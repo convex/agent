@@ -310,6 +310,12 @@ export async function streamText<
       }
       throw e;
     }
+  } else {
+    // The caller consumes the provider stream, but this separate background
+    // consumer can still reject (e.g. if durable abort cleanup fails).
+    void stream?.catch((error) => {
+      console.error("Failed to persist stream deltas:", error);
+    });
   }
 
   if (streamCleanupFailure) throw streamCleanupFailure.error;
