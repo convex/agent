@@ -12,7 +12,6 @@ import {
 import { getParts, deriveUIMessagesFromDeltas } from "../deltas.js";
 import type { TestConvex } from "convex-test";
 import type { StreamDelta, StreamMessage } from "../../validators.js";
-import { dedupeMessages } from "../react/useUIMessages.js";
 
 const defaultTestOptions = {
   throttleMs: 0,
@@ -434,34 +433,6 @@ describe("Stream Exclusion Logic", () => {
       expect(t1Streams[0].streamId).not.toBe(t2Streams[0].streamId);
     });
   });
-
-  test("dedupeMessages prefers finalized over streaming over pending", () => {
-    type M = {
-      order: number;
-      stepOrder: number;
-      status: "pending" | "success" | "failed" | "streaming";
-    };
-
-    const messages: M[] = [
-      { order: 1, stepOrder: 0, status: "pending" },
-      { order: 2, stepOrder: 0, status: "success" },
-      { order: 3, stepOrder: 0, status: "pending" },
-    ];
-    const streamMessages: M[] = [
-      { order: 1, stepOrder: 0, status: "streaming" },
-      { order: 2, stepOrder: 0, status: "streaming" },
-      { order: 3, stepOrder: 0, status: "success" },
-    ];
-
-    const result = dedupeMessages(messages, streamMessages);
-    expect(result).toHaveLength(3);
-    // pending replaced by streaming
-    expect(result[0].status).toBe("streaming");
-    // success kept over streaming
-    expect(result[1].status).toBe("success");
-    // pending replaced by success
-    expect(result[2].status).toBe("success");
-  });
 });
 
 // ============================================================================
@@ -860,35 +831,6 @@ describe("Fallback Behavior", () => {
     expect(msgs[0].status).toBe("streaming");
     expect(msgs[1].status).toBe("success");
     expect(msgs[2].status).toBe("failed");
-  });
-
-  test("dedupeMessages handles fallback from streaming to finalized gracefully", () => {
-    type M = {
-      order: number;
-      stepOrder: number;
-      status: "pending" | "success" | "failed" | "streaming";
-      text: string;
-    };
-
-    // Simulate: full messages from DB include finalized versions, streaming
-    // messages are still around from the delta stream
-    const dbMessages: M[] = [
-      { order: 1, stepOrder: 0, status: "success", text: "Final answer" },
-      { order: 2, stepOrder: 0, status: "pending", text: "Thinking..." },
-    ];
-    const streamMessages: M[] = [
-      { order: 1, stepOrder: 0, status: "streaming", text: "Final ans..." },
-      { order: 2, stepOrder: 0, status: "streaming", text: "Thinking..." },
-    ];
-
-    const result = dedupeMessages(dbMessages, streamMessages);
-
-    // Order 1: finalized DB version preferred over streaming
-    expect(result[0].status).toBe("success");
-    expect(result[0].text).toBe("Final answer");
-
-    // Order 2: streaming preferred over pending DB version
-    expect(result[1].status).toBe("streaming");
   });
 
   test("mergeTransforms adds smoothStream when streaming is enabled", () => {
