@@ -10,6 +10,8 @@
   approvals dropped provider options
 - Don't leave a failed delta write or stream cleanup as an unhandled rejection
   (#366)
+- Save every step the AI SDK runs and fail only once it gives up; onStepEnd now
+  runs before the step is saved (#397)
 
 ## 0.7.8
 

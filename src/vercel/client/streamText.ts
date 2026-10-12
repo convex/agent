@@ -1,10 +1,4 @@
-import type {
-  ModelMessage,
-  StepResult,
-  StreamTextResult,
-  ToolSet,
-  UIMessage as AIUIMessage,
-} from "ai";
+import type { StreamTextResult, ToolSet, UIMessage as AIUIMessage } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
 import { streamText as streamTextAi } from "ai";
 import {
@@ -22,10 +16,11 @@ import type {
   StreamingTextArgs,
 } from "./types.js";
 import type { Output as AISDKOutput } from "ai";
-import { startGeneration } from "./start.js";
+import { getGenerationControls, startGeneration } from "./start.js";
 import type { Agent } from "../index.js";
 import { getModelName, getProviderName } from "../../shared.js";
-import { errorToString, willContinue } from "./utils.js";
+import { errorToString } from "./utils.js";
+import { StepLifecycle } from "./stepLifecycle.js";
 import { materializeUIMessageChunkFiles } from "../fileMaterialization.js";
 
 export async function runStreamCleanup(cleanup: {
@@ -101,35 +96,19 @@ export async function streamText<
 > {
   type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
   const { threadId } = options ?? {};
-  const { args, userId, order, stepOrder, promptMessageId, ...call } =
-    await startGeneration<
-      StreamingTextArgs<AgentTools, TOOLS, OUTPUT, RUNTIME_CONTEXT>,
-      Tools,
-      object,
-      RUNTIME_CONTEXT
-    >(ctx, component, streamTextArgs, options, "streamText");
+  const started = await startGeneration<
+    StreamingTextArgs<AgentTools, TOOLS, OUTPUT, RUNTIME_CONTEXT>,
+    Tools,
+    object,
+    RUNTIME_CONTEXT
+  >(ctx, component, streamTextArgs, options, "streamText");
+  const { args, userId, order, stepOrder, promptMessageId, ...call } = started;
 
-  const steps: StepResult<Tools, RUNTIME_CONTEXT>[] = [];
-  let firstStreamError: string | undefined;
-  let streamCleanupFailure: { error: unknown } | undefined;
-  let initialResponseMessages: ModelMessage[] = [];
-  let initialResponseMessagesSaved = false;
-  const responseMessagesForStep = (
-    step: StepResult<Tools, RUNTIME_CONTEXT>,
-  ) => [
-    ...(initialResponseMessagesSaved ? [] : initialResponseMessages),
-    ...step.response.messages,
-  ];
-
-  // Track the final step for atomic save with stream finish (issue #181).
-  // Only used when streamText awaits stream consumption itself; the
-  // `returnImmediately` path saves inline instead (see onStepFinish below).
-  let pendingFinalStep:
-    | {
-        step: StepResult<Tools, RUNTIME_CONTEXT>;
-        responseMessages: ModelMessage[];
-      }
-    | undefined;
+  // The AI SDK calls onError before deciding whether to retry (ai 7.0.91+),
+  // and while it still uses the abort signal, so failing the generation there
+  // kills retries and aborts a live pipeline (issue #387). An error fails the
+  // generation only if no step ends cleanly after it.
+  let unrecoveredError: string | undefined;
 
   // Whether streamText will await stream consumption before returning.
   // When false (saveStreamDeltas.returnImmediately === true), we cannot
@@ -141,6 +120,17 @@ export async function streamText<
     (options.saveStreamDeltas === true ||
       (typeof options.saveStreamDeltas === "object" &&
         !options.saveStreamDeltas.returnImmediately));
+
+  const lifecycle = new StepLifecycle<Tools, RUNTIME_CONTEXT>(
+    getGenerationControls(started),
+    {
+      streamed: Boolean(threadId && options.saveStreamDeltas),
+      // Only the awaited path has a caller to throw a save failure to.
+      onSaveFailure: willAwaitStream
+        ? undefined
+        : (error) => console.error("Failed to save a generation step:", error),
+    },
+  );
 
   const streamer =
     threadId && options.saveStreamDeltas
@@ -176,6 +166,51 @@ export async function streamText<
         )
       : undefined;
 
+  // Only called once the AI SDK has finished, so the signal it owns is left
+  // alone (issue #387); aborting it is for cancellation.
+  let generationFailure: Promise<void> | undefined;
+  const failGeneration = (reason: string) =>
+    (generationFailure ??= runStreamCleanup({
+      failCall: () => call.fail(reason),
+      failStreamer: async () =>
+        streamer?.fail(reason, { abortGeneration: false }),
+    }));
+
+  // Saves the step the generation ended on, finishing the row with it
+  // (#181). The save stores the messages before running the handlers, so a
+  // failure here means nothing was stored: the message is still pending and
+  // the row streaming, and those are failed here.
+  const finalize = async () => {
+    let finishStreamId: string | undefined;
+    if (streamer) {
+      if (!willAwaitStream) await streamer.flushAndStopAccepting();
+      finishStreamId = await streamer.getOrCreateStreamId({
+        ifAborted: "returnUndefined",
+      });
+      if (!finishStreamId) return;
+    }
+    try {
+      const saved = await lifecycle.finalize(finishStreamId);
+      // Without stored messages the save finishes nothing, and on the awaited
+      // path consumeStream finishes the row instead.
+      const ownsFinish =
+        Boolean(streamer) && (savesMessages ? !saved : !willAwaitStream);
+      if (ownsFinish) await streamer!.finish();
+    } catch (error) {
+      await failGeneration(errorToString(error));
+      throw error;
+    }
+  };
+
+  let callerOnEnd: (() => unknown) | undefined;
+  const end = async () => {
+    if (unrecoveredError !== undefined) {
+      await failGeneration(unrecoveredError);
+    } else {
+      await finalize();
+    }
+  };
+
   const result = streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>({
     ...args,
     abortSignal: streamer?.abortController.signal ?? args.abortSignal,
@@ -185,22 +220,10 @@ export async function streamText<
     ),
     onError: async (error) => {
       console.error("onError", error);
-      const reason = (firstStreamError ??= errorToString(error.error));
-      try {
-        await runStreamCleanup({
-          failCall: () => call.fail(reason),
-          failStreamer: async () => streamer?.fail(reason),
-        });
-      } catch (cleanupError) {
-        streamCleanupFailure ??= { error: cleanupError };
-        console.error("Failed to clean up errored stream:", cleanupError);
-      }
+      unrecoveredError = errorToString(error.error);
       return streamTextArgs.onError?.(error);
     },
     onAbort: async (event) => {
-      const providerTriggeredAbort =
-        firstStreamError !== undefined && !args.abortSignal?.aborted;
-      if (providerTriggeredAbort) return;
       const reason = args.abortSignal?.reason
         ? errorToString(args.abortSignal.reason)
         : "streamText aborted";
@@ -211,8 +234,7 @@ export async function streamText<
       });
     },
     prepareStep: async (options) => {
-      if (options.stepNumber === 0)
-        initialResponseMessages = [...options.responseMessages];
+      await lifecycle.stepStarting(options);
       const result = await streamTextArgs.prepareStep?.(options);
       if (result) {
         const model = result.model ?? options.model;
@@ -227,53 +249,21 @@ export async function streamText<
       return undefined;
     },
     onStepEnd: async (step) => {
-      steps.push(step);
-      const createPendingMessage = await willContinue(steps, args.stopWhen);
-      if (!createPendingMessage && streamer) {
-        // Final step with streaming enabled.
-        if (willAwaitStream) {
-          // We're about to `await stream` below — defer the save so it
-          // happens atomically with stream finish (issue #181). Don't touch
-          // the streamer here: the stream-level `finish` chunk is emitted
-          // after this callback, so the row has to stay `streaming` and keep
-          // accepting parts until consumeStream reaches EOF, which is the only
-          // point where everything has actually been handed over.
-          pendingFinalStep = {
-            step,
-            responseMessages: responseMessagesForStep(step),
-          };
-        } else {
-          // returnImmediately path: streamText is about to return without
-          // awaiting consumption, so the deferred-save block below won't
-          // see this step. Save inline now (issue #265). Nothing awaits the
-          // stream here, so this is the last moment we can drain deltas, see
-          // flushAndStopAccepting for the window that leaves.
-          await streamer.flushAndStopAccepting();
-          const finishStreamId = await streamer.getOrCreateStreamId({
-            ifAborted: "returnUndefined",
-          });
-          if (finishStreamId) {
-            await call.save(
-              { step, responseMessages: responseMessagesForStep(step) },
-              false,
-              finishStreamId,
-            );
-            // The save finishes the row only when it stores messages. With
-            // saveMessages "none" nothing else will, so do it here.
-            if (!savesMessages) {
-              await streamer.finish();
-            }
-            initialResponseMessagesSaved = true;
-          }
-        }
-      } else {
-        await call.save(
-          { step, responseMessages: responseMessagesForStep(step) },
-          createPendingMessage,
-        );
-        initialResponseMessagesSaved = true;
-      }
+      lifecycle.stepEnded(step);
+      if (step.finishReason !== "error") unrecoveredError = undefined;
       return (streamTextArgs.onStepEnd ?? streamTextArgs.onStepFinish)?.(step);
+    },
+    // With nothing awaiting consumption, this is the last point before the
+    // caller's stream ends (#265). The awaited path ends at end of
+    // consumption instead (#326), and the caller's onEnd waits for it.
+    onEnd: async (event) => {
+      const runCallerOnEnd = () =>
+        (streamTextArgs.onEnd ?? streamTextArgs.onFinish)?.(event);
+      if (willAwaitStream) {
+        callerOnEnd = runCallerOnEnd;
+      } else {
+        await lifecycle.ended(end, runCallerOnEnd);
+      }
     },
   } as Parameters<
     typeof streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>
@@ -287,53 +277,46 @@ export async function streamText<
           : DEFAULT_STREAMING_OPTIONS.sendSources,
     }),
   );
-  if (willAwaitStream) {
-    try {
-      await stream;
-      await result.consumeStream();
-    } catch (e) {
-      // If the stream errored (e.g. onStepFinish threw), the DeltaStreamer's
-      // finish() was never called, leaving the streaming message stuck in
-      // "streaming" state. Clean it up by marking it as aborted.
-      try {
-        await streamer?.fail(errorToString(e));
-      } catch (cleanupError) {
-        streamCleanupFailure ??= { error: cleanupError };
-      }
-      if (pendingFinalStep) {
-        try {
-          await call.save(pendingFinalStep, false);
-        } catch (saveError) {
-          console.error("Failed to save deferred final step:", saveError);
-        }
-        pendingFinalStep = undefined;
-      }
-      throw e;
-    }
-  } else {
+  // A generation that recorded no step ends without onEnd.
+  const noSteps = result.steps.then(
+    () => false,
+    () => true,
+  );
+  if (!willAwaitStream) {
     // The caller consumes the provider stream, but this separate background
     // consumer can still reject (e.g. if durable abort cleanup fails).
     void stream?.catch((error) => {
       console.error("Failed to persist stream deltas:", error);
     });
-  }
-
-  if (streamCleanupFailure) throw streamCleanupFailure.error;
-
-  // If we deferred the final step save, do it now with atomic stream finish.
-  if (pendingFinalStep && streamer) {
-    const finishStreamId = await streamer.getOrCreateStreamId({
-      ifAborted: "returnUndefined",
+    void noSteps.then(async (failed) => {
+      if (!failed) return;
+      try {
+        await failGeneration(unrecoveredError ?? "No output generated");
+      } catch (error) {
+        lifecycle.recordSaveFailure(error);
+      }
     });
-    if (finishStreamId) {
-      await call.save(pendingFinalStep, false, finishStreamId);
+  }
+  if (willAwaitStream) {
+    try {
+      await stream;
+      await result.consumeStream();
+    } catch (e) {
+      // The stream itself failed, so nothing will finish the row or the
+      // pending message.
+      await failGeneration(errorToString(e)).catch((cleanupError) =>
+        console.error("Failed to clean up errored stream:", cleanupError),
+      );
+      throw e;
     }
-    pendingFinalStep = undefined;
-  } else if (willAwaitStream && streamer) {
-    // No final step was deferred (e.g. the generation produced none), so no
-    // save will finish the stream. The streamer doesn't finish itself, so do
-    // it here rather than leaving the row to time out.
-    await streamer.finish();
+    // End of consumption is where the generation really ended and every part
+    // has been handed over (#326).
+    if (await noSteps) {
+      await failGeneration(unrecoveredError ?? "No output generated");
+    } else {
+      await lifecycle.ended(end, () => callerOnEnd?.());
+    }
+    lifecycle.throwSaveFailure();
   }
   const metadata: GenerationOutputMetadata = {
     promptMessageId,

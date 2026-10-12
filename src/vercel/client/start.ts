@@ -78,6 +78,42 @@ function rawRequestResponseInclude(
   };
 }
 
+export type GenerationControls = {
+  /**
+   * Hooks around every failure of the pending message, so a caller holding
+   * a completed but unsaved step can order its saves around the failure.
+   * `after` runs whether or not the message could be failed.
+   */
+  setFailHooks: (hooks: {
+    before: () => Promise<void>;
+    after: (messageFailed: boolean) => Promise<void>;
+  }) => void;
+  /** Stores a step's messages without running the handlers. */
+  store: (
+    toSave: {
+      step: StepResult<ToolSet, Context>;
+      responseMessages?: ModelMessage[];
+    },
+    createPendingMessage?: boolean,
+    finishStreamId?: string,
+  ) => Promise<void>;
+  /** Runs the handlers for a step whose messages are stored, or stored by
+   * other means. */
+  runHandlers: (toSave: {
+    step: StepResult<ToolSet, Context>;
+  }) => Promise<void>;
+};
+
+// Kept off the public result of startGeneration and Agent.start, which hand
+// back the same object.
+const generationControls = new WeakMap<object, GenerationControls>();
+
+export function getGenerationControls(call: object): GenerationControls {
+  const controls = generationControls.get(call);
+  assert(controls, "Not a generation started by startGeneration");
+  return controls;
+}
+
 export async function startGeneration<
   T,
   Tools extends ToolSet = ToolSet,
@@ -239,7 +275,7 @@ export async function startGeneration<
   // the same cancellation. Share the one finalization instead of racing two
   // mutations for the pending message.
   let pendingMessageFailure: Promise<void> | undefined;
-  const fail = (reason: string): Promise<void> => {
+  const failPending = (reason: string): Promise<void> => {
     if (!pendingMessageId) return Promise.resolve();
     if (!pendingMessageFailure) {
       const messageId = pendingMessageId;
@@ -251,6 +287,19 @@ export async function startGeneration<
         .then(() => undefined);
     }
     return pendingMessageFailure;
+  };
+  let failHooks: Parameters<GenerationControls["setFailHooks"]>[0] | undefined;
+  // save() fails the pending message itself and must not go through the
+  // hooks, which may be waiting on that very save.
+  const fail = async (reason: string): Promise<void> => {
+    await failHooks?.before();
+    let messageFailed = false;
+    try {
+      await failPending(reason);
+      messageFailed = true;
+    } finally {
+      await failHooks?.after(messageFailed);
+    }
   };
   if (args.abortSignal) {
     const abortSignal = args.abortSignal;
@@ -316,7 +365,119 @@ export async function startGeneration<
   // tool execution IDs, message IDs, etc.) and they must be unique.
   // The pending message is linked via the explicit `pendingMessageId`
   // parameter passed to addMessages in the save closure.
-  return {
+  const runHandlers = async (
+    toSave:
+      | { step: StepResult<ToolSet, Context> }
+      | { object: GenerateObjectResult<unknown> },
+  ) => {
+    const output = "object" in toSave ? toSave.object : toSave.step;
+    if (opts.rawRequestResponseHandler) {
+      await opts.rawRequestResponseHandler(ctx, {
+        userId,
+        threadId,
+        agentName: opts.agentName,
+        request: output.request,
+        response: output.response,
+      });
+    }
+    if (opts.usageHandler && output.usage) {
+      const usageModel = resolveUsageModel(toSave, activeModel);
+      await opts.usageHandler(ctx, {
+        userId,
+        threadId,
+        agentName: opts.agentName,
+        model: getModelName(usageModel),
+        provider: getProviderName(usageModel),
+        usage: output.usage,
+        providerMetadata: output.providerMetadata,
+      });
+    }
+  };
+  const store = async <TOOLS extends ToolSet>(
+    toSave:
+      | {
+          step: StepResult<TOOLS, RUNTIME_CONTEXT>;
+          responseMessages?: ModelMessage[];
+        }
+      | { object: GenerateObjectResult<unknown> },
+    createPendingMessage?: boolean,
+    /**
+     * If provided, finish this stream atomically with the message save.
+     * This prevents UI flickering from separate mutations (issue #181).
+     */
+    finishStreamId?: string,
+  ) => {
+    if (threadId && saveMessages !== "none") {
+      let serialized;
+      if ("object" in toSave) {
+        serialized = await serializeObjectResult(
+          ctx,
+          component,
+          toSave.object,
+          activeModel,
+        );
+      } else {
+        const newResponseMessages =
+          toSave.responseMessages ?? toSave.step.response.messages;
+        // Even an empty completed step needs a durable assistant result so
+        // the pending message can be finalized at the storage boundary.
+        const responseMessagesToSave: ModelMessage[] =
+          newResponseMessages.length > 0
+            ? newResponseMessages
+            : [{ role: "assistant", content: [] }];
+        serialized = await serializeResponseMessages(
+          ctx,
+          component,
+          toSave.step,
+          activeModel,
+          responseMessagesToSave,
+        );
+      }
+      const embeddings = await embedMessages(
+        ctx,
+        { threadId, ...opts, userId },
+        serialized.messages.map((m) => m.message),
+      );
+      if (createPendingMessage) {
+        serialized.messages.push({
+          message: { role: "assistant", content: [] },
+          status: "pending",
+        });
+        embeddings?.vectors.push(null);
+      }
+      const saved = await ctx.runMutation(component.messages.addMessages, {
+        userId,
+        threadId,
+        agentName: opts.agentName,
+        promptMessageId,
+        abandonIfPromptMissing: true,
+        pendingMessageId,
+        messages: serialized.messages,
+        embeddings,
+        failPendingSteps: false,
+        finishStreamId,
+      });
+      const lastMessage = saved.messages.at(-1)!;
+      if (createPendingMessage) {
+        if (lastMessage.status === "failed") {
+          pendingMessageId = undefined;
+          savedMessages.push(...saved.messages);
+          await failPending(
+            lastMessage.error ??
+              "Aborting - the pending message was marked as failed",
+          );
+        } else {
+          pendingMessageId = lastMessage._id;
+          pendingMessageFailure = undefined;
+          savedMessages.push(...saved.messages.slice(0, -1));
+        }
+      } else {
+        pendingMessageId = undefined;
+        savedMessages.push(...saved.messages);
+      }
+    }
+  };
+  const call = {
     args: aiArgs,
     order: order ?? 0,
     stepOrder: stepOrder ?? 0,
@@ -343,97 +504,21 @@ export async function startGeneration<
        */
       finishStreamId?: string,
     ) => {
-      if (threadId && saveMessages !== "none") {
-        let serialized;
-        if ("object" in toSave) {
-          serialized = await serializeObjectResult(
-            ctx,
-            component,
-            toSave.object,
-            activeModel,
-          );
-        } else {
-          const newResponseMessages =
-            toSave.responseMessages ?? toSave.step.response.messages;
-          // Even an empty completed step needs a durable assistant result so
-          // the pending message can be finalized at the storage boundary.
-          const responseMessagesToSave: ModelMessage[] =
-            newResponseMessages.length > 0
-              ? newResponseMessages
-              : [{ role: "assistant", content: [] }];
-          serialized = await serializeResponseMessages(
-            ctx,
-            component,
-            toSave.step,
-            activeModel,
-            responseMessagesToSave,
-          );
-        }
-        const embeddings = await embedMessages(
-          ctx,
-          { threadId, ...opts, userId },
-          serialized.messages.map((m) => m.message),
-        );
-        if (createPendingMessage) {
-          serialized.messages.push({
-            message: { role: "assistant", content: [] },
-            status: "pending",
-          });
-          embeddings?.vectors.push(null);
-        }
-        const saved = await ctx.runMutation(component.messages.addMessages, {
-          userId,
-          threadId,
-          agentName: opts.agentName,
-          promptMessageId,
-          abandonIfPromptMissing: true,
-          pendingMessageId,
-          messages: serialized.messages,
-          embeddings,
-          failPendingSteps: false,
-          finishStreamId,
-        });
-        const lastMessage = saved.messages.at(-1)!;
-        if (createPendingMessage) {
-          if (lastMessage.status === "failed") {
-            pendingMessageId = undefined;
-            savedMessages.push(...saved.messages);
-            await fail(
-              lastMessage.error ??
-                "Aborting - the pending message was marked as failed",
-            );
-          } else {
-            pendingMessageId = lastMessage._id;
-            pendingMessageFailure = undefined;
-            savedMessages.push(...saved.messages.slice(0, -1));
-          }
-        } else {
-          pendingMessageId = undefined;
-          savedMessages.push(...saved.messages);
-        }
-      }
-      const output = "object" in toSave ? toSave.object : toSave.step;
-      if (opts.rawRequestResponseHandler) {
-        await opts.rawRequestResponseHandler(ctx, {
-          userId,
-          threadId,
-          agentName: opts.agentName,
-          request: output.request,
-          response: output.response,
-        });
-      }
-      if (opts.usageHandler && output.usage) {
-        const usageModel = resolveUsageModel(toSave, activeModel);
-        await opts.usageHandler(ctx, {
-          userId,
-          threadId,
-          agentName: opts.agentName,
-          model: getModelName(usageModel),
-          provider: getProviderName(usageModel),
-          usage: output.usage,
-          providerMetadata: output.providerMetadata,
-        });
-      }
+      await store(toSave, createPendingMessage, finishStreamId);
+      await runHandlers(toSave);
     },
   };
+  generationControls.set(call, {
+    setFailHooks: (hooks) => {
+      failHooks = hooks;
+    },
+    store: (toSave, createPendingMessage, finishStreamId) =>
+      store(
+        toSave as { step: StepResult<ToolSet, RUNTIME_CONTEXT> },
+        createPendingMessage,
+        finishStreamId,
+      ),
+    runHandlers,
+  });
+  return call;
 }
