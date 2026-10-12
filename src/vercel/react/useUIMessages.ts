@@ -4,7 +4,6 @@ import {
   type ErrorMessage,
   type Expand,
 } from "convex-helpers";
-import { usePaginatedQuery } from "convex-helpers/react";
 import {
   type PaginatedQueryArgs,
   type UsePaginatedQueryResult,
@@ -26,6 +25,7 @@ import {
 } from "../UIMessages.js";
 import { sorted } from "../../shared.js";
 import { useStreamingUIMessages } from "./useStreamingUIMessages.js";
+import { resolveStreams, usePaginatedOrders } from "./assemble.js";
 
 export type UIMessageLike = {
   order: number;
@@ -134,7 +134,7 @@ export function useUIMessages<Query extends UIMessagesQuery<any, any>>(
   },
 ): UsePaginatedQueryResult<UIMessagesQueryResult<Query>> {
   // These are full messages
-  const paginated = usePaginatedQuery(
+  const paginated = usePaginatedOrders(
     query,
     args as PaginatedQueryArgs<Query> | "skip",
     { initialNumItems: options.initialNumItems },
@@ -154,50 +154,30 @@ export function useUIMessages<Query extends UIMessagesQuery<any, any>>(
     { startOrder, skipStreamIds: options.skipStreamIds },
   );
 
-  const merged = useMemo(() => {
-    return {
-      ...paginated,
-      results: mergeUIMessages(paginated.results, streamMessages ?? []),
-    };
-  }, [paginated, streamMessages]);
+  const results = useMemo(
+    () => mergeUIMessages(paginated.results, streamMessages ?? []),
+    [paginated.results, streamMessages],
+  );
 
-  return merged as UIMessagesQueryResult<Query>;
+  return { ...paginated, results } as UIMessagesQueryResult<Query>;
 }
 
-export function mergeUIMessages<M extends UIMessageLike>(
+export function mergeUIMessages<M extends UIMessageLike & { id: string }>(
   messages: M[],
   streamMessages: M[],
 ): M[] {
-  const deduped = dedupeMessages(messages, streamMessages);
-  // Messages may have been split by pagination. Re-combine them here
-  // after dedupe has had access to each message's original stepOrder.
-  return combineUIMessages(deduped as unknown as UIMessage[]) as unknown as M[];
-}
-
-export function dedupeMessages<
-  M extends {
-    order: number;
-    stepOrder: number;
-    status: UIStatus;
-  },
->(messages: M[], streamMessages: M[]): M[] {
-  return sorted(messages.concat(streamMessages)).reduce((msgs, msg) => {
-    const last = msgs.at(-1);
-    if (!last) {
-      return [msg];
-    }
-    if (last.order !== msg.order || last.stepOrder !== msg.stepOrder) {
-      return [...msgs, msg];
-    }
-    if (
-      (last.status === "pending" || last.status === "streaming") &&
-      msg.status !== "pending"
-    ) {
-      // Let's prefer a streaming or finalized message over a pending
-      // one.
-      return [...msgs.slice(0, -1), msg];
-    }
-    // skip the new one if the previous one (listed) was finalized
-    return msgs;
-  }, [] as M[]);
+  const { rows, streams } = resolveStreams(
+    messages,
+    streamMessages.map((m) => ({
+      id: m.id,
+      order: m.order,
+      stepOrder: m.stepOrder,
+      live: m.status === "streaming",
+      value: m,
+    })),
+  );
+  // Messages may have been split by pagination. Re-combine them here.
+  return combineUIMessages(
+    sorted([...rows, ...streams]) as unknown as UIMessage[],
+  ) as unknown as M[];
 }

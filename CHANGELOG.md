@@ -10,6 +10,8 @@
   approvals dropped provider options
 - Don't leave a failed delta write or stream cleanup as an unhandled rejection
   (#366)
+- Fix useUIMessages and useThreadMessages freezing when a page ends partway
+  through a message (#395)
 
 ## 0.7.8
 

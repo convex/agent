@@ -5,7 +5,6 @@ import {
   type ErrorMessage,
   type Expand,
 } from "convex-helpers";
-import { usePaginatedQuery } from "convex-helpers/react";
 import {
   type PaginatedQueryArgs,
   type UsePaginatedQueryResult,
@@ -19,7 +18,7 @@ import type {
 import { useMemo, useState, useEffect, useRef } from "react";
 import type { SyncStreamsReturnValue } from "../client/types.js";
 import { sorted } from "../../shared.js";
-import { fromUIMessages } from "../UIMessages.js";
+import { fromUIMessages, type UIMessage } from "../UIMessages.js";
 import type {
   Message,
   MessageDoc,
@@ -28,6 +27,7 @@ import type {
 } from "../../validators.js";
 import type { StreamQueryArgs, StreamQuery } from "./types.js";
 import { useStreamingUIMessages } from "./useStreamingUIMessages.js";
+import { resolveStreams, usePaginatedOrders } from "./assemble.js";
 
 export type MessageDocLike = {
   order: number;
@@ -129,7 +129,7 @@ export function useThreadMessages<Query extends ThreadMessagesQuery<any, any>>(
   ThreadMessagesResult<Query> & { streaming: boolean; key: string }
 > {
   // These are full messages
-  const paginated = usePaginatedQuery(
+  const paginated = usePaginatedOrders(
     query,
     args as PaginatedQueryArgs<Query> | "skip",
     { initialNumItems: options.initialNumItems },
@@ -145,7 +145,7 @@ export function useThreadMessages<Query extends ThreadMessagesQuery<any, any>>(
     }
   }
   // These are streaming messages that will not include full messages.
-  const streamMessages = useStreamingThreadMessages(
+  const streams = useStreamingDocs(
     query as StreamQuery<ThreadMessagesArgs<Query>>,
     !options.stream ||
       args === "skip" ||
@@ -157,49 +157,27 @@ export function useThreadMessages<Query extends ThreadMessagesQuery<any, any>>(
 
   const threadId = args === "skip" ? undefined : args.threadId;
 
-  const merged = useMemo(() => {
-    const streamListMessages =
-      streamMessages?.map((m) => ({
+  const results = useMemo(() => {
+    const resolved = resolveStreams(
+      paginated.results as MessageDocLike[],
+      (streams ?? []).map(({ message, docs }) => ({
+        id: message.id,
+        order: message.order,
+        stepOrder: message.stepOrder,
+        live: message.status === "streaming",
+        value: docs,
+      })),
+    );
+    return sorted([
+      ...resolved.rows.map((m) => ({ ...m, streaming: false })),
+      ...resolved.streams.flat().map((m) => ({
         ...m,
         streaming: !m.status || m.status === "pending",
-      })) ?? [];
-    return {
-      ...paginated,
-      results: sorted(
-        paginated.results
-          .map((m) => ({ ...m, streaming: false }))
-          // Note: this is intentionally after paginated results.
-          .concat(streamListMessages) as (MessageDocLike & {
-          streaming: boolean;
-          key: string;
-        })[],
-      ).reduce(
-        (msgs, msg: MessageDocLike & { streaming: boolean; key: string }) => {
-          msg.key = `${threadId}-${msg.order}-${msg.stepOrder}`;
-          const last = msgs.at(-1);
-          if (!last) {
-            return [msg];
-          }
-          if (last.order !== msg.order || last.stepOrder !== msg.stepOrder) {
-            return [...msgs, msg];
-          }
-          if (
-            last.status === "pending" &&
-            (msg.streaming || msg.status !== "pending")
-          ) {
-            // Let's prefer a streaming or finalized message over a pending
-            // one.
-            return [...msgs.slice(0, -1), msg];
-          }
-          // skip the new one if the previous one (listed) was finalized
-          return msgs;
-        },
-        [] as (MessageDocLike & { streaming: boolean; key: string })[],
-      ),
-    };
-  }, [paginated, streamMessages, threadId]);
+      })),
+    ]).map((m) => ({ ...m, key: `${threadId}-${m.order}-${m.stepOrder}` }));
+  }, [paginated.results, streams, threadId]);
 
-  return merged as ThreadMessagesResult<Query> & {
+  return { ...paginated, results } as ThreadMessagesResult<Query> & {
     key: string;
     streaming: boolean;
   };
@@ -238,14 +216,26 @@ export function useStreamingThreadMessages<Query extends StreamQuery<any>>(
   const startOrder =
     args === "skip" ? undefined : (args.startOrder ?? undefined);
   const queryOptions = { startOrder, ...options };
-  const uiMessages = useStreamingUIMessages(query, queryArgs, queryOptions);
-  const [messages, setMessages] = useState<Array<MessageDoc> | undefined>();
+  return useStreamingDocs(query, queryArgs, queryOptions)?.flatMap(
+    ({ docs }) => docs,
+  );
+}
+
+function useStreamingDocs<Query extends StreamQuery<any>>(
+  query: Query,
+  args: StreamQueryArgs<Query> | "skip",
+  options?: {
+    startOrder?: number;
+    skipStreamIds?: string[];
+  },
+): { message: UIMessage; docs: MessageDoc[] }[] | undefined {
+  const uiMessages = useStreamingUIMessages(query, args, options);
+  const [converted, setConverted] = useState<{
+    threadId: string;
+    messages: { message: UIMessage; docs: MessageDoc[] }[];
+  }>();
   const generationRef = useRef(0);
   const threadId = args === "skip" ? undefined : args.threadId;
-
-  if ((threadId === undefined || !uiMessages) && messages !== undefined) {
-    setMessages(undefined);
-  }
 
   useEffect(() => {
     if (threadId === undefined || !uiMessages) {
@@ -253,14 +243,19 @@ export function useStreamingThreadMessages<Query extends StreamQuery<any>>(
     }
     const currentGeneration = ++generationRef.current;
     (async () => {
-      const nested = await Promise.all(
-        uiMessages.map((m) => fromUIMessages([m], { threadId })),
+      const messages = await Promise.all(
+        uiMessages.map(async (message) => ({
+          message,
+          docs: await fromUIMessages([message], { threadId }),
+        })),
       );
       if (generationRef.current === currentGeneration) {
-        setMessages(nested.flat());
+        setConverted({ threadId, messages });
       }
     })();
   }, [uiMessages, threadId]);
 
-  return messages;
+  return uiMessages && converted && converted.threadId === threadId
+    ? converted.messages
+    : undefined;
 }

@@ -922,8 +922,10 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
         newParts.push(part);
         continue;
       }
-      const previousPart = newParts.splice(previousPartIndex, 1)[0];
-      newParts.push(mergeParts(previousPart, part));
+      newParts[previousPartIndex] = mergeParts(
+        newParts[previousPartIndex],
+        part,
+      );
     }
     acc.push({
       ...previous,
