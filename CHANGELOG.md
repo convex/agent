@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix continuing a tool approval when a context handler returns history beyond `recentMessages`; context handlers no longer see approval requests or decisions, and pending approvals are left out of context instead of auto-denied (#416)
+
 ## 0.7.8
 
 - Fix answering a tool approval after an earlier approval in the same thread

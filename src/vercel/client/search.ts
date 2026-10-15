@@ -29,12 +29,12 @@ import type {
   ActionCtx,
 } from "./types.js";
 import { inlineMessagesFiles } from "./files.js";
+import { docsToModelMessages, toModelMessage } from "../mapping.js";
 import {
-  autoDenyUnresolvedApprovals,
-  docsToModelMessages,
-  toModelMessage,
-} from "../mapping.js";
-import { prepareApprovalContext } from "./prepareApprovalContext.js";
+  finishApprovals,
+  hideApprovals,
+  planApprovals,
+} from "./prepareApprovalContext.js";
 
 const DEFAULT_VECTOR_SCORE_THRESHOLD = 0.0;
 // Bound the rare boundary-extension query; incomplete orders are trimmed below.
@@ -275,72 +275,41 @@ export async function fetchRecentAndSearchMessages(
 }
 
 /**
- * Filter out tool messages that don't have both a tool call and response.
- * For the approval workflow, tool calls with approval responses (but no tool-results yet)
- * should also be kept.
+ * Filter out tool calls without a result and results without a call. As for
+ * the AI SDK, an approval decision answers its call.
  * @param docs The messages to filter.
  * @returns The filtered messages.
  */
 export function filterOutOrphanedToolMessages(docs: MessageDoc[]) {
   const toolCallIds = new Set<string>();
-  const toolResultIds = new Set<string>();
-  // Track approval workflow: toolCallId → approvalId
-  const approvalRequestsByToolCallId = new Map<string, string>();
-  // Track which approvalIds have responses
-  const approvalResponseIds = new Set<string>();
-
-  const result: MessageDoc[] = [];
+  const answered = new Set<string>();
+  const callIdsByApprovalId = new Map<string, string>();
+  const decided: string[] = [];
   for (const doc of docs) {
-    if (doc.message && Array.isArray(doc.message.content)) {
-      for (const content of doc.message.content) {
-        if (content.type === "tool-call") {
-          toolCallIds.add(content.toolCallId);
-        } else if (content.type === "tool-result") {
-          toolResultIds.add(content.toolCallId);
-        } else if (content.type === "tool-approval-request") {
-          const approvalRequest = content as {
-            type: "tool-approval-request";
-            toolCallId: string;
-            approvalId: string;
-          };
-          approvalRequestsByToolCallId.set(
-            approvalRequest.toolCallId,
-            approvalRequest.approvalId,
-          );
-        } else if (content.type === "tool-approval-response") {
-          const approvalResponse = content as {
-            type: "tool-approval-response";
-            approvalId: string;
-          };
-          approvalResponseIds.add(approvalResponse.approvalId);
-        }
+    if (!Array.isArray(doc.message?.content)) continue;
+    for (const part of doc.message.content) {
+      if (part.type === "tool-call") toolCallIds.add(part.toolCallId);
+      else if (part.type === "tool-result") answered.add(part.toolCallId);
+      else if (part.type === "tool-approval-request") {
+        callIdsByApprovalId.set(part.approvalId, part.toolCallId);
+      } else if (part.type === "tool-approval-response") {
+        decided.push(part.approvalId);
       }
     }
   }
+  for (const approvalId of decided) {
+    const toolCallId = callIdsByApprovalId.get(approvalId);
+    if (toolCallId) answered.add(toolCallId);
+  }
 
-  // Helper: check if tool call has a corresponding approval response
-  const hasApprovalResponse = (toolCallId: string) => {
-    const approvalId = approvalRequestsByToolCallId.get(toolCallId);
-    return approvalId !== undefined && approvalResponseIds.has(approvalId);
-  };
-
-  // Helper: check if tool call has a pending approval request
-  // (auto-deny handles these downstream, so they must survive the filter)
-  const hasApprovalRequest = (toolCallId: string) => {
-    return approvalRequestsByToolCallId.has(toolCallId);
-  };
-
+  const result: MessageDoc[] = [];
   for (const doc of docs) {
     if (
       doc.message?.role === "assistant" &&
       Array.isArray(doc.message.content)
     ) {
       const content = doc.message.content.filter(
-        (p) =>
-          p.type !== "tool-call" ||
-          toolResultIds.has(p.toolCallId) ||
-          hasApprovalResponse(p.toolCallId) ||
-          hasApprovalRequest(p.toolCallId),
+        (p) => p.type !== "tool-call" || answered.has(p.toolCallId),
       );
       if (content.length) {
         result.push({
@@ -352,14 +321,9 @@ export function filterOutOrphanedToolMessages(docs: MessageDoc[]) {
         });
       }
     } else if (doc.message?.role === "tool") {
-      const content = doc.message.content.filter((c) => {
-        // tool-result parts have toolCallId
-        if (c.type === "tool-result") {
-          return toolCallIds.has(c.toolCallId);
-        }
-        // tool-approval-response parts don't have toolCallId, so include them
-        return true;
-      });
+      const content = doc.message.content.filter(
+        (p) => p.type !== "tool-result" || toolCallIds.has(p.toolCallId),
+      );
       if (content.length) {
         result.push({
           ...doc,
@@ -677,15 +641,25 @@ export async function fetchContextWithPrompt(
     }
   }
 
-  const continuation =
+  const approvals = planApprovals(
+    recentMessages,
+    searchMessages,
     args.prompt === undefined
-      ? approvalContinuation(promptMessage, searchMessages, recentMessages)
-      : undefined;
-  const search = docsToModelMessages(searchMessages);
-  const recent = docsToModelMessages(prePromptDocs);
-  const inputMessages = messages.map(toModelMessage);
-  const inputPrompt = promptArray.map(toModelMessage);
-  const existingResponses = docsToModelMessages(existingResponseDocs);
+      ? continuedApprovals(promptMessage, recentMessages)
+      : [],
+  );
+  const [search] = hideApprovals(approvals, [
+    docsToModelMessages(searchMessages),
+  ]);
+  const [recent, inputMessages, inputPrompt, existingResponses] = hideApprovals(
+    approvals,
+    [
+      docsToModelMessages(prePromptDocs),
+      messages.map(toModelMessage),
+      promptArray.map(toModelMessage),
+      docsToModelMessages(existingResponseDocs),
+    ],
+  );
 
   const allMessages = [
     ...search,
@@ -694,31 +668,21 @@ export async function fetchContextWithPrompt(
     ...inputPrompt,
     ...existingResponses,
   ];
-  let processedMessages = args.contextHandler
-    ? await args.contextHandler(ctx, {
-        allMessages,
-        search,
-        recent,
-        inputMessages,
-        inputPrompt,
-        existingResponses,
-        userId,
-        threadId,
-      })
-    : allMessages;
-
-  if (continuation) {
-    processedMessages = prepareApprovalContext(
-      processedMessages,
-      continuation.approvalIds,
-      continuation.storedContext,
-    );
-  }
-
-  // Post-process: auto-deny unresolved approvals so the AI SDK sees a
-  // complete history. Applied after contextHandler so custom handlers
-  // don't need to handle this.
-  processedMessages = autoDenyUnresolvedApprovals(processedMessages);
+  let processedMessages = finishApprovals(
+    approvals,
+    args.contextHandler
+      ? await args.contextHandler(ctx, {
+          allMessages,
+          search,
+          recent,
+          inputMessages,
+          inputPrompt,
+          existingResponses,
+          userId,
+          threadId,
+        })
+      : allMessages,
+  );
 
   // Process messages to inline localhost files (if not, file urls pointing to localhost will be sent to LLM providers)
   if (process.env.CONVEX_CLOUD_URL?.startsWith("http://127.0.0.1")) {
@@ -732,59 +696,36 @@ export async function fetchContextWithPrompt(
   };
 }
 
-// Read before the context handler runs and from copies, since the messages
-// it is given share nested objects with these docs.
-function approvalContinuation(
+// A decision prompt continues every request in the one message on its order
+// that it answers.
+function continuedApprovals(
   promptMessage: MessageDoc | undefined,
-  searchMessages: MessageDoc[],
   recentMessages: MessageDoc[],
-): { approvalIds: Set<string>; storedContext: ModelMessage[] } | undefined {
+): string[] {
+  if (promptMessage?.message?.role !== "tool") return [];
+  const answered = promptMessage.message.content.flatMap((part) =>
+    part.type === "tool-approval-response" ? [part.approvalId] : [],
+  );
+  if (answered.length === 0) return [];
+  const requests = recentMessages
+    .filter((doc) => doc.order === promptMessage.order)
+    .map((doc) =>
+      doc.message?.role === "assistant" && Array.isArray(doc.message.content)
+        ? doc.message.content.flatMap((part) =>
+            part.type === "tool-approval-request" ? [part.approvalId] : [],
+          )
+        : [],
+    )
+    .filter((ids) => ids.some((id) => answered.includes(id)));
   if (
-    promptMessage?.message?.role !== "tool" ||
-    !promptMessage.message.content.some(
-      (part) => part.type === "tool-approval-response",
-    )
+    requests.length !== 1 ||
+    answered.some((id) => !requests[0].includes(id))
   ) {
-    return undefined;
-  }
-  const responseIds = new Set(
-    promptMessage.message.content.flatMap((part) =>
-      part.type === "tool-approval-response" ? [part.approvalId] : [],
-    ),
-  );
-  const requestContents = recentMessages.flatMap((doc) =>
-    doc.order === promptMessage.order &&
-    doc.message?.role === "assistant" &&
-    Array.isArray(doc.message.content) &&
-    doc.message.content.some(
-      (part) =>
-        part.type === "tool-approval-request" &&
-        responseIds.has(part.approvalId),
-    )
-      ? [doc.message.content]
-      : [],
-  );
-  if (requestContents.length !== 1) {
     throw new Error(
       "Approval continuation requires one complete request message",
     );
   }
-  const approvalIds = new Set(
-    requestContents[0].flatMap((part) =>
-      part.type === "tool-approval-request" ? [part.approvalId] : [],
-    ),
-  );
-  if ([...responseIds].some((approvalId) => !approvalIds.has(approvalId))) {
-    throw new Error(
-      "Approval continuation requires one complete request message",
-    );
-  }
-  return {
-    approvalIds,
-    storedContext: docsToModelMessages(
-      structuredClone([...searchMessages, ...recentMessages]),
-    ),
-  };
+  return requests[0];
 }
 
 export function getPromptArray(
