@@ -312,7 +312,7 @@ describe("search.ts", () => {
       expect(result[1]._id).toBe("2");
     });
 
-    it("should keep tool calls with approval request but NO approval response (auto-deny handles them)", () => {
+    it("should drop tool calls whose approval request has no response", () => {
       const messages: MessageDoc[] = [
         {
           _id: "1",
@@ -336,23 +336,17 @@ describe("search.ts", () => {
           },
           order: 1,
         } as MessageDoc,
-        // No approval response provided
       ];
 
       const result = filterOutOrphanedToolMessages(messages);
       expect(result).toHaveLength(1);
-      // The assistant message should keep the tool-call (auto-deny resolves it downstream)
       const assistantContent = result[0].message?.content;
       expect(Array.isArray(assistantContent)).toBe(true);
       if (Array.isArray(assistantContent)) {
-        expect(assistantContent).toHaveLength(3);
-        expect(assistantContent.find((p) => p.type === "text")).toBeDefined();
-        expect(
-          assistantContent.find((p) => p.type === "tool-approval-request"),
-        ).toBeDefined();
-        expect(
-          assistantContent.find((p) => p.type === "tool-call"),
-        ).toBeDefined();
+        expect(assistantContent.map((p) => p.type)).toEqual([
+          "text",
+          "tool-approval-request",
+        ]);
       }
     });
 
