@@ -104,16 +104,16 @@
   },
   "devDependencies": {
     "@convex-dev/agent": "file:..",
-    "@eslint/js": "9.39.4",
-    "@types/node": "24.13.3",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
+    "@eslint/js": "9.39.5",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "convex": "1.46.0",
-    "eslint": "9.39.4",
+    "eslint": "9.39.5",
     "eslint-plugin-react-hooks": "7.1.1",
-    "eslint-plugin-react-refresh": "0.5.2",
-    "globals": "17.11.0",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.70.0"
+    "typescript-eslint": "8.71.2"
   }
 }
