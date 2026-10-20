@@ -7,6 +7,7 @@ import {
   type MockedFunction,
 } from "vitest";
 import type { ModelMessage } from "ai";
+import { MockEmbeddingModelV4 } from "ai/test";
 import {
   type Auth,
   type StorageActionWriter,
@@ -15,6 +16,7 @@ import {
 import type { MessageDoc } from "../../validators.js";
 import type { ActionCtx, QueryCtx } from "./types.js";
 import {
+  embedMany,
   fetchContextWithPrompt,
   fetchContextMessages,
   filterOutOrphanedToolMessages,
@@ -103,6 +105,39 @@ describe("search.ts", () => {
 
     // Mock process.env to avoid file inlining in tests
     process.env.CONVEX_CLOUD_URL = "https://example.convex.cloud";
+  });
+
+  describe("embedMany", () => {
+    it("passes the provider metadata to the usage handler", async () => {
+      const providerMetadata = { testProvider: { cost: 0.000002 } };
+      const embeddingModel = new MockEmbeddingModelV4({
+        modelId: "test-embedding",
+        doEmbed: {
+          embeddings: [[0.1, 0.2]],
+          usage: { tokens: 3 },
+          providerMetadata,
+          warnings: [],
+        },
+      });
+      const usageHandler = vi.fn();
+
+      await embedMany({} as ActionCtx, {
+        userId: "user",
+        threadId: "thread",
+        values: ["hello"],
+        embeddingModel,
+        usageHandler,
+      });
+
+      expect(usageHandler).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          model: "test-embedding",
+          providerMetadata,
+          usage: expect.objectContaining({ inputTokens: 3 }),
+        }),
+      );
+    });
   });
 
   describe("getPromptArray", () => {

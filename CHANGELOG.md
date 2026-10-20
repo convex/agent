@@ -4,6 +4,7 @@
 
 - Fix TS2590 when constructing Agent or calling startGeneration with large model
   catalogs (#414)
+- Pass embedding providerMetadata to usageHandler (#393)
 
 ## 0.7.8
 

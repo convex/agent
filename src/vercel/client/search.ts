@@ -499,7 +499,7 @@ export async function embedMany(
       agentName,
       model: getModelName(effectiveEmbeddingModel),
       provider: getProviderName(effectiveEmbeddingModel),
-      providerMetadata: undefined,
+      providerMetadata: result.providerMetadata,
       usage: {
         inputTokens: result.usage.tokens,
         outputTokens: 0,
