@@ -4,7 +4,8 @@
 // 1. User sends message → model calls a tool with needsApproval
 // 2. Generation stops with a tool-approval-request in the response
 // 3. Client shows Approve/Deny buttons to the user
-// 4. User clicks Approve or Deny → saves response, schedules continuation
+// 4. User clicks Approve or Deny → saves response; the last decision in the
+//    step schedules continuation
 // 5. AI SDK automatically handles the approval: executes tool (if approved)
 //    or creates execution-denied result (if denied), then continues generation
 import { paginationOptsValidator } from "convex/server";
@@ -38,8 +39,9 @@ export const sendMessage = mutation({
 });
 
 /**
- * Generate a response. If a tool requires approval, generation stops
- * and the approval-request is persisted in the thread.
+ * Generate a response to a prompt, or continue from the last approval
+ * decision in a step. If a tool requires approval, generation stops and the
+ * approval-request is persisted in the thread.
  */
 export const generateResponse = internalAction({
   args: { promptMessageId: v.string(), threadId: v.string() },
@@ -55,9 +57,10 @@ export const generateResponse = internalAction({
 });
 
 /**
- * Submit an approval decision for a single tool call.
- * Saves the decision but does NOT continue generation — the client
- * calls continueAfterApprovals once all pending approvals are resolved.
+ * Submit an approval decision for a single tool call. The decision that
+ * resolves the last pending approval in its step schedules continuation.
+ * Mutations are serializable, so with concurrent decisions exactly one sees
+ * every approval decided.
  */
 export const submitApproval = mutation({
   args: {
@@ -69,6 +72,23 @@ export const submitApproval = mutation({
   returns: v.object({ messageId: v.string() }),
   handler: async (ctx, { threadId, approvalId, approved, reason }) => {
     await authorizeThreadAccess(ctx, threadId);
+    const { page } = await approvalAgent.listMessages(ctx, {
+      threadId,
+      paginationOpts: { cursor: null, numItems: 100 },
+    });
+    const decided = new Set([approvalId]);
+    let step: string[] | undefined;
+    for (const { message } of page) {
+      if (!Array.isArray(message?.content)) continue;
+      const requested: string[] = [];
+      for (const part of message.content) {
+        if (part.type === "tool-approval-response")
+          decided.add(part.approvalId);
+        if (part.type === "tool-approval-request")
+          requested.push(part.approvalId);
+      }
+      if (requested.includes(approvalId)) step = requested;
+    }
     const { messageId } = approved
       ? await approvalAgent.approveToolCall(ctx, {
           threadId,
@@ -76,46 +96,13 @@ export const submitApproval = mutation({
           reason,
         })
       : await approvalAgent.denyToolCall(ctx, { threadId, approvalId, reason });
+    if (step?.every((id) => decided.has(id))) {
+      await ctx.scheduler.runAfter(0, internal.chat.approval.generateResponse, {
+        threadId,
+        promptMessageId: messageId,
+      });
+    }
     return { messageId };
-  },
-});
-
-/**
- * Continue generation after all approvals in a step have been resolved.
- * The client calls this once every pending tool call has been approved or denied.
- */
-export const continueAfterApprovals = internalAction({
-  args: {
-    threadId: v.string(),
-    lastApprovalMessageId: v.string(),
-  },
-  handler: async (ctx, { threadId, lastApprovalMessageId }) => {
-    const result = await approvalAgent.streamText(
-      ctx,
-      { threadId },
-      { promptMessageId: lastApprovalMessageId },
-      { saveStreamDeltas: { chunking: "word", throttleMs: 100 } },
-    );
-    await result.consumeStream();
-  },
-});
-
-/**
- * Schedule continuation after all approvals are resolved.
- * Called by the client when hasPendingApprovals becomes false.
- */
-export const triggerContinuation = mutation({
-  args: {
-    threadId: v.string(),
-    lastApprovalMessageId: v.string(),
-  },
-  handler: async (ctx, { threadId, lastApprovalMessageId }) => {
-    await authorizeThreadAccess(ctx, threadId);
-    await ctx.scheduler.runAfter(
-      0,
-      internal.chat.approval.continueAfterApprovals,
-      { threadId, lastApprovalMessageId },
-    );
   },
 });
 

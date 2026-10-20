@@ -51,15 +51,6 @@ function Chat({ threadId, reset }: { threadId: string; reset: () => void }) {
   );
 
   const submitApproval = useMutation(api.chat.approval.submitApproval);
-  const triggerContinuation = useMutation(
-    api.chat.approval.triggerContinuation,
-  );
-
-  // Track the last approval messageId so we can use it for continuation.
-  const lastApprovalMessageIdRef = useRef<string | null>(null);
-  // Track whether we've already triggered continuation for this batch.
-  const continuationTriggeredRef = useRef(false);
-
   const hasPendingApprovals = messages.some((m) =>
     m.parts.some(
       (p) =>
@@ -67,36 +58,6 @@ function Chat({ threadId, reset }: { threadId: string; reset: () => void }) {
         (p as ToolUIPart).state === "approval-requested",
     ),
   );
-
-  // When all approvals are resolved (hasPendingApprovals goes false)
-  // and we have a saved messageId, trigger continuation.
-  useEffect(() => {
-    if (
-      !hasPendingApprovals &&
-      lastApprovalMessageIdRef.current &&
-      !continuationTriggeredRef.current
-    ) {
-      continuationTriggeredRef.current = true;
-      void triggerContinuation({
-        threadId,
-        lastApprovalMessageId: lastApprovalMessageIdRef.current,
-      });
-      lastApprovalMessageIdRef.current = null;
-    }
-    if (hasPendingApprovals) {
-      continuationTriggeredRef.current = false;
-    }
-  }, [hasPendingApprovals, threadId, triggerContinuation]);
-
-  async function handleApproval(args: {
-    threadId: string;
-    approvalId: string;
-    approved: boolean;
-    reason?: string;
-  }) {
-    const { messageId } = await submitApproval(args);
-    lastApprovalMessageIdRef.current = messageId;
-  }
 
   const [prompt, setPrompt] = useState(
     "Delete the file important.txt and transfer $500 to account savings-123",
@@ -126,7 +87,7 @@ function Chat({ threadId, reset }: { threadId: string; reset: () => void }) {
                 key={m.key}
                 message={m}
                 threadId={threadId}
-                onApproval={handleApproval}
+                onApproval={submitApproval}
               />
             ))}
             <div ref={messagesEndRef} />
@@ -171,8 +132,6 @@ function Chat({ threadId, reset }: { threadId: string; reset: () => void }) {
               className="px-4 py-2 rounded-lg bg-red-100 text-red-700 hover:bg-red-200 transition font-medium"
               onClick={() => {
                 reset();
-                lastApprovalMessageIdRef.current = null;
-                continuationTriggeredRef.current = false;
                 setPrompt(
                   "Delete the file important.txt and transfer $500 to account savings-123",
                 );

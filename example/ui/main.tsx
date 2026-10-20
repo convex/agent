@@ -9,9 +9,10 @@ import FilesImages from "./files/FilesImages";
 import RateLimiting from "./rate_limiting/RateLimiting";
 import { WeatherFashion } from "./workflows/WeatherFashion";
 import RagBasic from "./rag/RagBasic";
-import { StrictMode } from "react";
+import { lazy, StrictMode, Suspense } from "react";
 import StreamArray from "./objects/StreamArray";
 import ChatApproval from "./chat/ChatApproval";
+const ChatAssistantUI = lazy(() => import("./chat/ChatAssistantUI"));
 
 const convex = new ConvexReactClient(import.meta.env.VITE_CONVEX_URL as string);
 
@@ -42,6 +43,20 @@ export function App() {
             <Route path="/" element={<Index />} />
             <Route path="/chat-basic" element={<ChatBasic />} />
             <Route path="/chat-streaming" element={<ChatStreaming />} />
+            <Route
+              path="/chat-assistant-ui"
+              element={
+                <Suspense
+                  fallback={
+                    <p role="status" className="p-8 text-center">
+                      Loading chat…
+                    </p>
+                  }
+                >
+                  <ChatAssistantUI />
+                </Suspense>
+              }
+            />
             <Route path="/files-images" element={<FilesImages />} />
             <Route path="/rag-basic" element={<RagBasic />} />
             <Route path="/rate-limiting" element={<RateLimiting />} />
@@ -88,6 +103,18 @@ function Index() {
               A simple streaming chat interface with an AI agent. Shows how to
               stream responses from an LLM in real time (without HTTP
               streaming!).
+            </p>
+          </li>
+          <li className="border rounded-sm p-4 hover:shadow-sm transition">
+            <Link
+              to="/chat-assistant-ui"
+              className="text-xl font-semibold text-indigo-700 hover:underline"
+            >
+              assistant-ui Chat
+            </Link>
+            <p className="mt-2 text-gray-700">
+              The tool approval agent in an assistant-ui chat, with streaming,
+              approvals, history, and cancellation.
             </p>
           </li>
           <li className="border rounded-sm p-4 hover:shadow-sm transition">
