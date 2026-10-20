@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Avoid TS2590 in Agent and standalone generation options with large model
-  catalogs.
+- Fix TS2590 when constructing Agent or calling startGeneration with large model
+  catalogs (#414)
 
 ## 0.7.8
 

@@ -109,6 +109,7 @@ import type {
   QueryCtx,
   AgentPrompt,
   AgentCallSettings,
+  AgentLanguageModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
 import {
@@ -452,9 +453,9 @@ export class Agent<
       | "generateObject"
       | "streamObject",
   ): Promise<{
-    args: T & {
+    args: Omit<T, "model"> & {
       instructions?: Instructions;
-      model: LanguageModel;
+      model: AgentLanguageModel;
       prompt?: never;
       messages: ModelMessage[];
       runtimeContext?: RUNTIME_CONTEXT;

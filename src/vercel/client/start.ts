@@ -2,7 +2,6 @@ import {
   isStepCount,
   type GenerateObjectResult,
   type IdGenerator,
-  type LanguageModel,
   type Instructions,
   type ModelMessage,
   type StepResult,
@@ -19,6 +18,7 @@ import type {
   ActionCtx,
   AgentCallSettings,
   AgentComponent,
+  AgentLanguageModel,
   Config,
   Options,
 } from "./types.js";
@@ -104,7 +104,7 @@ export async function startGeneration<
      * The model to use for the LLM calls. This will override the model specified
      * in the Agent constructor.
      */
-    model?: LanguageModel;
+    model?: AgentLanguageModel;
     /**
      * The tools to use for the tool calls. This will override tools specified
      * in the Agent constructor or createThread / continueThread.
@@ -157,9 +157,9 @@ export async function startGeneration<
     | "generateObject"
     | "streamObject",
 ): Promise<{
-  args: T & {
+  args: Omit<T, "model"> & {
     instructions?: Instructions;
-    model: LanguageModel;
+    model: AgentLanguageModel;
     messages: ModelMessage[];
     prompt?: never;
     tools?: Tools;
@@ -303,8 +303,8 @@ export async function startGeneration<
       args.stopWhen ?? (opts.maxSteps ? isStepCount(opts.maxSteps) : undefined),
     tools,
     ...(include ? { include } : {}),
-  } as unknown as T & {
-    model: LanguageModel;
+  } as unknown as Omit<T, "model"> & {
+    model: AgentLanguageModel;
     messages: ModelMessage[];
     prompt?: never;
     tools?: Tools;

@@ -5,7 +5,7 @@ import type {
   ModelMessage,
   ProviderOptions,
 } from "@ai-sdk/provider-utils";
-import type { JSONValue } from "@ai-sdk/provider";
+import type { JSONValue, LanguageModelV4 } from "@ai-sdk/provider";
 import type {
   EmbeddingModel,
   GenerateObjectResult,
@@ -50,13 +50,19 @@ export type {
 
 /**
  * Type-level check that ensures models are from AI SDK v7.
- * If a v5 model (LanguageModelV2) is passed, TypeScript will show the error message string.
+ * If a v5 model (LanguageModelV2) is passed, TypeScript will show the error message.
+ * The message is a required key, not a string literal, so the result stays
+ * assignable to the AI SDK's `LanguageModel`.
  */
 type AssertAISDKv7<T> = T extends string
   ? T
   : T extends { specificationVersion: "v4" }
     ? T
-    : "⚠️ @convex-dev/agent requires AI SDK v7. Update your dependencies: npm install ai@^7.0.0 @ai-sdk/openai@^4.0.0 (or other provider).";
+    : LanguageModelV4 & {
+        "@convex-dev/agent requires AI SDK v7. Update your dependencies: npm install ai@^7.0.0 @ai-sdk/openai@^4.0.0 (or other provider).": true;
+      };
+
+export type AgentLanguageModel = AssertAISDKv7<LanguageModel>;
 
 export type AgentPrompt = {
   /**
@@ -98,7 +104,7 @@ export type AgentPrompt = {
    * The model to use for the LLM calls. This will override the languageModel
    * specified in the Agent config.
    */
-  model?: AssertAISDKv7<LanguageModel>;
+  model?: AgentLanguageModel;
 };
 
 export type Config = {
@@ -112,7 +118,7 @@ export type Config = {
    *   languageModel: openai.chat("gpt-4o-mini"),
    * })
    */
-  languageModel?: AssertAISDKv7<LanguageModel>;
+  languageModel?: AgentLanguageModel;
   /**
    * @deprecated Use `embeddingModel` instead.
    */
