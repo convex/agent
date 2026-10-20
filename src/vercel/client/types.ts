@@ -64,6 +64,8 @@ type AssertAISDKv7<T> = T extends string
 
 export type AgentLanguageModel = AssertAISDKv7<LanguageModel>;
 
+export type WithoutModel<T> = T extends unknown ? Omit<T, "model"> : never;
+
 export type AgentPrompt = {
   /**
    * System message to include in the prompt. Overwrites Agent instructions.

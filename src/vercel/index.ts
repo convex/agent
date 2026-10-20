@@ -110,6 +110,7 @@ import type {
   AgentPrompt,
   AgentCallSettings,
   AgentLanguageModel,
+  WithoutModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
 import {
@@ -453,7 +454,7 @@ export class Agent<
       | "generateObject"
       | "streamObject",
   ): Promise<{
-    args: Omit<T, "model"> & {
+    args: WithoutModel<T> & {
       instructions?: Instructions;
       model: AgentLanguageModel;
       prompt?: never;

@@ -19,6 +19,7 @@ import type {
   AgentCallSettings,
   AgentComponent,
   AgentLanguageModel,
+  WithoutModel,
   Config,
   Options,
 } from "./types.js";
@@ -157,7 +158,7 @@ export async function startGeneration<
     | "generateObject"
     | "streamObject",
 ): Promise<{
-  args: Omit<T, "model"> & {
+  args: WithoutModel<T> & {
     instructions?: Instructions;
     model: AgentLanguageModel;
     messages: ModelMessage[];
@@ -303,7 +304,7 @@ export async function startGeneration<
       args.stopWhen ?? (opts.maxSteps ? isStepCount(opts.maxSteps) : undefined),
     tools,
     ...(include ? { include } : {}),
-  } as unknown as Omit<T, "model"> & {
+  } as unknown as WithoutModel<T> & {
     model: AgentLanguageModel;
     messages: ModelMessage[];
     prompt?: never;
