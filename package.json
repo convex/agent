@@ -127,7 +127,7 @@
     "clsx": "2.1.1",
     "convex": "1.46.0",
     "convex-helpers": "0.1.128",
-    "convex-test": "https://pkg.pr.new/convex-test@163",
+    "convex-test": "https://pkg.pr.new/convex/convex-test@163",
     "dayjs": "1.11.20",
     "dotenv": "18.0.1",
     "eslint": "9.39.4",

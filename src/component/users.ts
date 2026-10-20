@@ -1,4 +1,3 @@
-import { paginator } from "convex-helpers/server/pagination";
 import { stream } from "convex-helpers/server/stream";
 import { nullable } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
@@ -15,7 +14,7 @@ import {
   query,
 } from "./_generated/server.js";
 import { deleteMessage } from "./messages.js";
-import { deleteStreamsPageForThreadId } from "./streams.js";
+import { deleteStreamsPageForThreadId, deletionCursor } from "./streams.js";
 import { schema, v } from "./schema.js";
 
 // Note: it only searches for users with threads
@@ -155,13 +154,13 @@ async function deletePageForUserId(
 
   // Phase 1: Get a thread to work on if we don't have one
   if (!threadsCursor || !threadInProgress) {
-    const threads = await paginator(ctx.db, schema)
+    const threads = await ctx.db
       .query("threads")
       .withIndex("userId", (q) => q.eq("userId", args.userId))
       .order("desc")
       .paginate({
         numItems: 1,
-        cursor: args.threadsCursor ?? null,
+        cursor: deletionCursor(args.threadsCursor),
       });
     threadsCursor = threads.continueCursor;
     if (threads.page.length > 0) {
@@ -185,7 +184,7 @@ async function deletePageForUserId(
 
   // Phase 2: Delete messages for the current thread
   if (!streamsInProgress) {
-    const messages = await paginator(ctx.db, schema)
+    const messages = await ctx.db
       .query("messages")
       .withIndex("threadId_status_tool_order_stepOrder", (q) =>
         q.eq("threadId", threadInProgress!),
@@ -193,7 +192,7 @@ async function deletePageForUserId(
       .order("desc")
       .paginate({
         numItems: 100,
-        cursor: args.messagesCursor,
+        cursor: deletionCursor(messagesCursor),
       });
     await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
 
