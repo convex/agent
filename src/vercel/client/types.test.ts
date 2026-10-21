@@ -1,5 +1,6 @@
 import type { LanguageModelV3, LanguageModelV4 } from "@ai-sdk/provider";
 import { expectTypeOf, test } from "vitest";
+import type { Agent } from "../index.js";
 import type { startGeneration } from "./start.js";
 import type { AgentPrompt, Config } from "./types.js";
 
@@ -19,5 +20,25 @@ expectTypeOf<
 expectTypeOf<
   Extract<Started<Variants>, { mode: "b" }>["b"]
 >().toEqualTypeOf<string>();
+
+type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type ManyModelIds = `provider/model-${Digit}${Digit}${Digit}`;
+type StartArgs<T> = Parameters<typeof startGeneration<T>>[2];
+declare const agent: Agent;
+type AgentStartArgs<T extends object> = Parameters<
+  typeof agent.start<undefined, T>
+>[1];
+expectTypeOf<{ model: ManyModelIds }>().toExtend<
+  StartArgs<{ model: ManyModelIds }>
+>();
+expectTypeOf<{ model: ManyModelIds }>().toExtend<
+  AgentStartArgs<{ model: ManyModelIds }>
+>();
+expectTypeOf<{ model: LanguageModelV3 }>().not.toExtend<
+  StartArgs<{ model: LanguageModelV3 }>
+>();
+expectTypeOf<{ model: LanguageModelV3 }>().not.toExtend<
+  AgentStartArgs<{ model: LanguageModelV3 }>
+>();
 
 test("noop", () => {});
