@@ -124,31 +124,33 @@ describe("files", () => {
       });
       files.push(fileId);
     }
-    vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+    // Past the grace period for every file: Date.now() is pinned per
+    // mutation, so later inserts can be a few ms ahead of the fake clock.
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000 + 1000);
     // Paginate through files to delete one at a time
     let cursor: string | null = null;
     const seen: string[] = [];
+    let isDone = false;
     for (let i = 0; i < 3; i++) {
-      const { page, continueCursor, isDone }: PaginationResult<Doc<"files">> =
-        await t.query(api.files.getFilesToDelete, {
-          paginationOpts: {
-            numItems: 1,
-            cursor,
-          },
-        });
-      expect(page.length).toBe(1);
-      seen.push(page[0]._id);
-      cursor = continueCursor;
       expect(isDone).toBe(false);
+      const result: PaginationResult<Doc<"files">> = await t.query(
+        api.files.getFilesToDelete,
+        { paginationOpts: { numItems: 1, cursor } },
+      );
+      expect(result.page.length).toBe(1);
+      seen.push(result.page[0]._id);
+      cursor = result.continueCursor;
+      isDone = result.isDone;
     }
-    const { page, isDone } = await t.query(api.files.getFilesToDelete, {
-      paginationOpts: {
-        numItems: 1,
-        cursor,
-      },
-    });
-    expect(page.length).toBe(0);
-    expect(isDone).toBe(true);
+    // Built-in pagination may report isDone on the last full page; otherwise
+    // the next page is empty and done.
+    if (!isDone) {
+      const { page, isDone } = await t.query(api.files.getFilesToDelete, {
+        paginationOpts: { numItems: 1, cursor },
+      });
+      expect(page.length).toBe(0);
+      expect(isDone).toBe(true);
+    }
     // All fileIds should be seen
     expect(seen.sort()).toEqual(files.sort());
   });

@@ -1,4 +1,3 @@
-import { paginator } from "convex-helpers/server/pagination";
 import { mergedStream, stream } from "convex-helpers/server/stream";
 import { v } from "convex/values";
 import type { Id } from "../_generated/dataModel.js";
@@ -34,7 +33,7 @@ export const paginate = query({
   }),
   handler: async (ctx, args) => {
     const tableName = getVectorTableName(args.vectorDimension);
-    const vectors = await paginator(ctx.db, schema)
+    const vectors = await ctx.db
       .query(tableName)
       .withIndex("model_table_threadId" as any, (q) =>
         args.table

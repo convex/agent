@@ -60,6 +60,31 @@ function utf8Length(text: string): number {
   return new TextEncoder().encode(text).length;
 }
 
+/**
+ * Scheduled deletion jobs store their cursor in function args. Ones scheduled
+ * before the switch from convex-helpers' paginator to built-in `.paginate()`
+ * hold paginator cursors: JSON arrays of index key values ending in
+ * `_creationTime` (number) and `_id` (string), or `[]` when done. Those aren't
+ * valid built-in cursors, so restart from the beginning, which is safe since
+ * these jobs delete rows as they read them.
+ */
+export function deletionCursor(cursor: string | null | undefined) {
+  if (!cursor) return null;
+  try {
+    const key: unknown = JSON.parse(cursor);
+    if (
+      Array.isArray(key) &&
+      (key.length === 0 ||
+        (typeof key.at(-2) === "number" && typeof key.at(-1) === "string"))
+    ) {
+      return null;
+    }
+  } catch {
+    // Not JSON, so not a paginator cursor.
+  }
+  return cursor;
+}
+
 // Half the 16 MiB read limit across a request's cursors.
 const MAX_DELTA_BYTES_PER_REQUEST = 8 * 1024 * 1024;
 const MAX_BYTES_READ_PER_DELETE = 1024 * 1024;
@@ -137,6 +162,8 @@ export const listDeltas = query({
       if (stream.threadId !== args.threadId) {
         throw new Error("Stream does not belong to the given thread");
       }
+      // Uses paginator: queries may only call built-in .paginate() once per
+      // transaction, and this reads one page per stream.
       const { page } = await paginator(ctx.db, schema)
         .query("streamDeltas")
         .withIndex("streamId_start_end", (q) =>
@@ -450,13 +477,13 @@ async function deletePageForStreamId(
   ctx: MutationCtx,
   args: { streamId: Id<"streamingMessages">; cursor?: string },
 ) {
-  const deltas = await paginator(ctx.db, schema)
+  const deltas = await ctx.db
     .query("streamDeltas")
     .withIndex("streamId_start_end", (q) => q.eq("streamId", args.streamId))
     .paginate({
       numItems: MAX_DELTAS_PER_REQUEST,
       maximumBytesRead: MAX_BYTES_READ_PER_DELETE,
-      cursor: args.cursor ?? null,
+      cursor: deletionCursor(args.cursor),
     });
   await Promise.all(
     deltas.page.map((d) => ctx.db.delete("streamDeltas", d._id)),
@@ -698,6 +725,9 @@ export async function getStreamingMessagesWithMetadata(
   const streamsToRelease: Id<"streamingMessages">[] = [];
   for (const streamingMessage of streamingMessages) {
     try {
+      // Uses paginator, like listDeltas: it reads one page per stream, and
+      // built-in .paginate() is limited to once per transaction in queries.
+      // (This is called from the finalizeMessage mutation.)
       const deltas = await paginator(ctx.db, schema)
         .query("streamDeltas")
         .withIndex("streamId_start_end", (q) =>
