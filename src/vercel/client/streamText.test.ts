@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { Agent, createThread } from "../index.js";
 import { v } from "convex/values";
-import type { LanguageModelV4Source } from "@ai-sdk/provider";
+import { APICallError, type LanguageModelV4Source } from "@ai-sdk/provider";
 import { app, components } from "./setup.test.js";
 import { mockModel } from "./mockModel.js";
 import { runStreamCleanup } from "./streamText.js";
@@ -43,6 +43,24 @@ const failingAgent = new Agent(components.agent, {
   languageModel: mockModel({
     content: [{ type: "text", text: "partial response" }],
     fail: { error: PROVIDER_FAILURE_TEXT },
+  }),
+});
+
+const rejectedRequestAgent = new Agent(components.agent, {
+  name: "rejected-request-stream-test",
+  languageModel: mockModel({
+    doGenerate: async () => {
+      throw new Error("unused");
+    },
+    doStream: async () => {
+      throw new APICallError({
+        message: PROVIDER_FAILURE_TEXT,
+        url: "https://provider.test/v1/chat/completions",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    },
   }),
 });
 
@@ -241,6 +259,36 @@ const streamTextCleanupFailure = app.action({
   },
 });
 
+const streamTextRejectedRequest = app.action({
+  args: {
+    threadId: v.string(),
+    saveStreamDeltas: v.union(
+      v.boolean(),
+      v.object({
+        chunking: v.literal("word"),
+        throttleMs: v.number(),
+        returnImmediately: v.optional(v.boolean()),
+      }),
+    ),
+  },
+  handler: async (ctx, { threadId, saveStreamDeltas }) => {
+    const providerErrors: string[] = [];
+    const result = await rejectedRequestAgent.streamText(
+      ctx,
+      { threadId, userId: "u1" },
+      {
+        prompt: "Test",
+        onError: ({ error }) => {
+          providerErrors.push(errorToString(error));
+        },
+      },
+      { saveStreamDeltas },
+    );
+    await result.consumeStream();
+    return providerErrors;
+  },
+});
+
 // A generation that someone aborts out of band while it is streaming, the way
 // a client cancelling a request would: list the streaming row and abort it.
 // The throttle holds every part after the first, so the only remaining delta
@@ -326,6 +374,7 @@ const { api, createTest } = app.defineModules({
     streamTextNoStorage,
     streamTextNoStorageImmediate,
     streamTextCleanupFailure,
+    streamTextRejectedRequest,
     streamTextAbortedMidStream,
     streamTextEmptyNoStorageAwaited,
     streamTextWithSources,
@@ -517,6 +566,49 @@ describe("streamText abort cleanup", () => {
     );
     expect(streaming).toHaveLength(0);
     expect(aborted).toHaveLength(1);
+  });
+});
+
+describe("provider rejects the first request (issue #387)", () => {
+  test.each([
+    ["awaited deltas", { chunking: "word" as const, throttleMs: 250 }],
+    [
+      "returnImmediately",
+      { chunking: "word" as const, throttleMs: 250, returnImmediately: true },
+    ],
+    ["no deltas", false],
+  ])("leaves no unhandled rejection with %s", async (_, saveStreamDeltas) => {
+    const t = createTest();
+    const threadId = await t.run(async (ctx) =>
+      createThread(ctx, components.agent, { userId: "u1" }),
+    );
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    // Convex runs actions outside Node. The AI SDK only observes some of its
+    // internal promises when it detects Node (fixed in ai 7.0.119).
+    const release = process.release;
+    Object.defineProperty(process, "release", {
+      value: { ...release, name: "convex" },
+      configurable: true,
+    });
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const providerErrors = await t.action(
+        api.streamText.streamTextRejectedRequest,
+        { threadId, saveStreamDeltas },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(providerErrors).toEqual([PROVIDER_FAILURE_TEXT]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      Object.defineProperty(process, "release", {
+        value: release,
+        configurable: true,
+      });
+    }
+    expect(unhandled.map(errorToString)).toEqual([]);
   });
 });
 
