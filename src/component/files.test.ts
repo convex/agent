@@ -124,7 +124,9 @@ describe("files", () => {
       });
       files.push(fileId);
     }
-    vi.advanceTimersByTime(24 * 60 * 60 * 1000);
+    // Past the grace period for every file: Date.now() is pinned per
+    // mutation, so later inserts can be a few ms ahead of the fake clock.
+    vi.advanceTimersByTime(24 * 60 * 60 * 1000 + 1000);
     // Paginate through files to delete one at a time
     let cursor: string | null = null;
     const seen: string[] = [];
