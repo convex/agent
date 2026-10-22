@@ -543,6 +543,59 @@ describe("tool approval semantics", () => {
     expectNoDanglingLocalCalls();
   });
 
+  test.each(["before", "after"] as const)(
+    "recovers an approved exchange with over 1,000 same-order messages %s the decision",
+    async (position) => {
+      const s = await scenario({ ids: ["a"] });
+      const addMessages = async () => {
+        for (let start = 0; start < 1_001; start += 100) {
+          await s.t.run((ctx) =>
+            agent.saveMessages(ctx, {
+              threadId: s.threadId,
+              promptMessageId: s.requestMessageId,
+              messages: Array.from(
+                { length: Math.min(100, 1_001 - start) },
+                () => ({
+                  role: "assistant" as const,
+                  content: "Still working",
+                }),
+              ),
+              skipEmbeddings: true,
+            }),
+          );
+        }
+      };
+      const approvalId = position === "before" ? "b" : "a";
+      if (position === "before") {
+        await s.completeA();
+        await addMessages();
+        await s.addRequest(s.requestMessageId, [approvalId]);
+      }
+      const { messageId } = await s.t.run((ctx) =>
+        agent.approveToolCall(ctx, { threadId: s.threadId, approvalId }),
+      );
+      if (position === "after") {
+        await s.addRequest(messageId, ["c"]);
+        await s.approve("c");
+        await addMessages();
+      }
+
+      await s.continue(messageId, undefined, { excludeToolMessages: true });
+
+      expect(executed).toEqual(position === "before" ? ["a", "b"] : ["a"]);
+      expect(await s.resultIds()).toEqual([`call-${approvalId}`]);
+      expect(partsFor("c")).toEqual([]);
+      if (position === "before") {
+        expect(partsFor("a").map((part) => part.type)).toEqual([
+          "tool-call",
+          "tool-result",
+        ]);
+      }
+      expectNoDanglingLocalCalls();
+      expectEveryCallAnsweredNext();
+    },
+  );
+
   test("does not execute denied or unanswered tools with tool messages excluded", async () => {
     const s = await scenario({ ids: ["a", "b", "c"] });
     const { messageId } = await s.decide([
