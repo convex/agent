@@ -51,7 +51,8 @@ async function gatewayIsAvailable(): Promise<boolean> {
 function gatewayWithMockFallback(modelId: string): LanguageModelV4 {
   const gateway = convexGateway(modelId);
   const fallback = mockModel({});
-  const model = async () => ((await gatewayIsAvailable()) ? gateway : fallback);
+  const model = async (): Promise<LanguageModelV4> =>
+    (await gatewayIsAvailable()) ? gateway : fallback;
   return {
     specificationVersion: gateway.specificationVersion,
     provider: gateway.provider,
