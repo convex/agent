@@ -2,7 +2,12 @@ import type { ModelMessage, ToolModelMessage } from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod/v4";
 import type { Message } from "../../validators.js";
-import { Agent, createTool, type ContextHandler } from "../index.js";
+import {
+  Agent,
+  createTool,
+  type ContextHandler,
+  type ContextOptions,
+} from "../index.js";
 import { MockLanguageModel } from "./mockModel.js";
 import { components, initConvexTest } from "./setup.test.js";
 
@@ -400,7 +405,11 @@ async function scenario({
     async prompt(text: string) {
       return (await save({ prompt: text })).messageId;
     },
-    continue(promptMessageId: string, contextMode?: ContextMode) {
+    continue(
+      promptMessageId: string,
+      contextMode?: ContextMode,
+      contextOptions?: ContextOptions,
+    ) {
       return t.action(async (ctx) => {
         const contextHandler: ContextHandler | undefined = contextMode
           ? async (_ctx, { allMessages }) => handlers[contextMode](allMessages)
@@ -409,7 +418,7 @@ async function scenario({
           ctx,
           { threadId },
           { promptMessageId },
-          contextHandler ? { contextHandler } : undefined,
+          { contextHandler, contextOptions },
         );
         return result.text;
       });
@@ -503,6 +512,155 @@ afterEach(() => {
 });
 
 describe("tool approval semantics", () => {
+  test.each([false, true])(
+    "executes an approved tool with excludeToolMessages=%s",
+    async (excludeToolMessages) => {
+      const s = await scenario({ ids: ["a"] });
+      const { messageId } = await s.t.run((ctx) =>
+        agent.approveToolCall(ctx, { threadId: s.threadId, approvalId: "a" }),
+      );
+
+      await s.continue(messageId, undefined, { excludeToolMessages });
+
+      expect(executed).toEqual(["a"]);
+      expect(await s.resultIds()).toEqual(["call-a"]);
+      expectNoDanglingLocalCalls();
+    },
+  );
+
+  test("excludes older tool history while continuing an approved exchange", async () => {
+    const s = await scenario({ ids: ["old"] });
+    await s.continue(await s.approve("old"));
+    const promptMessageId = await s.prompt("Run another tool");
+    await s.addRequest(promptMessageId, ["a"]);
+
+    await s.continue(await s.approve("a"), undefined, {
+      excludeToolMessages: true,
+    });
+
+    expect(executed).toEqual(["old", "a"]);
+    expect(partsFor("old")).toEqual([]);
+    expectNoDanglingLocalCalls();
+  });
+
+  test("does not execute denied or unanswered tools with tool messages excluded", async () => {
+    const s = await scenario({ ids: ["a", "b", "c"] });
+    const { messageId } = await s.decide([
+      { approvalId: "a", approved: true },
+      { approvalId: "b", approved: false, reason: "Not permitted" },
+    ]);
+
+    await s.continue(messageId, undefined, { excludeToolMessages: true });
+
+    expect(executed).toEqual(["a"]);
+    expect(await s.results()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolCallId: "call-b",
+          output: { type: "execution-denied", reason: "Not permitted" },
+        }),
+      ]),
+    );
+    expectNoDanglingLocalCalls();
+  });
+
+  test("still validates approved inputs when tool messages are excluded", async () => {
+    const s = await scenario({ ids: ["a"] });
+
+    await expect(
+      s.continue(await s.approve("a"), "change-input", {
+        excludeToolMessages: true,
+      }),
+    ).rejects.toThrow(/preserve the stored tool-call for call-a/);
+
+    expect(executed).toEqual([]);
+  });
+
+  test("does not restore approvals from another thread", async () => {
+    const s = await scenario({ ids: ["a"] });
+    const promptMessageId = await s.approve("a");
+    const { threadId } = await s.t.run((ctx) => agent.createThread(ctx));
+
+    await expect(
+      s.t.action((ctx) =>
+        agent.generateText(
+          ctx,
+          { threadId },
+          { promptMessageId },
+          { contextOptions: { excludeToolMessages: true } },
+        ),
+      ),
+    ).rejects.toThrow(/thread/);
+
+    expect(executed).toEqual([]);
+  });
+
+  test("does not restore a non-approval tool message", async () => {
+    const s = await scenario({ ids: ["a"] });
+    await s.continue(await s.approve("a"));
+    const result = (await s.messages()).page.find(
+      (doc) =>
+        doc.message?.role === "tool" &&
+        doc.message.content.some((part) => part.type === "tool-result"),
+    );
+    expect(result).toBeDefined();
+
+    await s.continue(result!._id, undefined, { excludeToolMessages: true });
+
+    expect(executed).toEqual(["a"]);
+    expect(partsFor("a")).toEqual([]);
+  });
+
+  test("does not restore approval context when the prompt is overridden", async () => {
+    const s = await scenario({ ids: ["a"] });
+    const promptMessageId = await s.approve("a");
+
+    await s.t.action(async (ctx) => {
+      const result = await agent.generateText(
+        ctx,
+        { threadId: s.threadId },
+        { promptMessageId, prompt: "Do something else" },
+        { contextOptions: { excludeToolMessages: true } },
+      );
+      return result.text;
+    });
+
+    expect(executed).toEqual([]);
+    expect(partsFor("a")).toEqual([]);
+  });
+
+  test("restores only the continued request within its message order", async () => {
+    const s = await scenario();
+    const { first } = await s.completeAThenApproveC();
+
+    await s.continue(first, undefined, { excludeToolMessages: true });
+
+    expect(executed).toEqual(["a"]);
+    expect(partsFor("c")).toEqual([]);
+    expectNoDanglingLocalCalls();
+  });
+
+  test("rejects an excluded decision for a request from another order", async () => {
+    const s = await scenario();
+    const later = await s.prompt("Next");
+    await s.addRequest(later, ["x"]);
+    const { messageId } = await s.save({
+      promptMessageId: later,
+      message: {
+        role: "tool",
+        content: [
+          { type: "tool-approval-response", approvalId: "a", approved: true },
+        ],
+      },
+    });
+
+    await expect(
+      s.continue(messageId, undefined, { excludeToolMessages: true }),
+    ).rejects.toThrow(/one complete request message/);
+
+    expect(executed).toEqual([]);
+  });
+
   test("continues a mixed batch", async () => {
     const s = await scenario({ ids: ["a", "b", "c"] });
     const { messageId } = await s.decide([

@@ -643,6 +643,44 @@ export async function fetchContextWithPrompt(
     },
   );
 
+  if (
+    args.contextOptions?.excludeToolMessages &&
+    args.promptMessageId &&
+    args.prompt === undefined
+  ) {
+    const [target] = await ctx.runQuery(component.messages.getMessagesByIds, {
+      messageIds: [args.promptMessageId],
+    });
+    if (
+      target?.status === "success" &&
+      target.threadId === threadId &&
+      target.message?.role === "tool" &&
+      target.message.content.some(
+        (part) => part.type === "tool-approval-response",
+      )
+    ) {
+      // Exclude historical tool exchanges, but keep the complete approval
+      // exchange being continued. Reuse the bounded order-completion query.
+      const active = await fetchRecentAndSearchMessages(ctx, component, {
+        userId,
+        threadId,
+        targetMessageId: args.promptMessageId,
+        contextOptions: { recentMessages: 1 },
+      });
+      const activeOrder = active.recentMessages.filter(
+        (doc) => doc.order === target.order,
+      );
+      recentMessages.splice(
+        0,
+        recentMessages.length,
+        ...sorted([
+          ...recentMessages.filter((doc) => doc.order !== target.order),
+          ...activeOrder,
+        ]),
+      );
+    }
+  }
+
   const promptMessageIndex = args.promptMessageId
     ? recentMessages.findIndex((m) => m._id === args.promptMessageId)
     : -1;
