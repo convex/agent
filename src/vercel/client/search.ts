@@ -4,6 +4,7 @@ import {
   type ModelMessage,
 } from "ai";
 import { assert } from "convex-helpers";
+import type { PaginationResult } from "convex/server";
 import type { MessageDoc } from "../../validators.js";
 import {
   validateVectorDimension,
@@ -642,6 +643,62 @@ export async function fetchContextWithPrompt(
       },
     },
   );
+
+  if (
+    args.contextOptions?.excludeToolMessages &&
+    args.promptMessageId &&
+    args.prompt === undefined
+  ) {
+    const [target] = await ctx.runQuery(component.messages.getMessagesByIds, {
+      messageIds: [args.promptMessageId],
+    });
+    if (
+      target?.status === "success" &&
+      target.threadId === threadId &&
+      target.message?.role === "tool" &&
+      target.message.content.some(
+        (part) => part.type === "tool-approval-response",
+      )
+    ) {
+      // Exclude historical tool exchanges, but recover the complete approval
+      // order even when it exceeds the ordinary history-completion window.
+      const activeOrder: MessageDoc[] = [];
+      let cursor: string | null = null;
+      let numItems = 1;
+      while (true) {
+        const page: PaginationResult<MessageDoc> = await ctx.runQuery(
+          component.messages.listMessagesByThreadId,
+          {
+            threadId,
+            upToAndIncludingMessageId: args.promptMessageId,
+            statuses: ["success"],
+            order: "desc",
+            paginationOpts: { numItems, cursor },
+          },
+        );
+        activeOrder.push(
+          ...page.page.filter((doc) => doc.order === target.order),
+        );
+        const oldest = page.page.at(-1);
+        if (
+          page.isDone ||
+          !oldest ||
+          oldest.order < target.order ||
+          oldest.stepOrder === 0
+        ) {
+          break;
+        }
+        cursor = page.continueCursor;
+        numItems = Math.min(oldest.stepOrder, MAX_ORDER_COMPLETION_MESSAGES);
+      }
+      const restored = sorted([
+        ...recentMessages.filter((doc) => doc.order !== target.order),
+        ...filterOutOrphanedToolMessages(sorted(activeOrder)),
+      ]);
+      recentMessages.length = 0;
+      for (const doc of restored) recentMessages.push(doc);
+    }
+  }
 
   const promptMessageIndex = args.promptMessageId
     ? recentMessages.findIndex((m) => m._id === args.promptMessageId)
