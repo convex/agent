@@ -330,7 +330,7 @@ export class DeltaStreamer<T> {
       !this.#ongoingWrite &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
     ) {
-      this.#ongoingWrite = this.#sendDelta();
+      this.#startWrite();
     } else {
       this.#scheduleFlush();
     }
@@ -363,7 +363,7 @@ export class DeltaStreamer<T> {
         this.#scheduleFlush();
         return;
       }
-      this.#ongoingWrite = this.#sendDelta();
+      this.#startWrite();
     }, wait);
   }
 
@@ -428,7 +428,7 @@ export class DeltaStreamer<T> {
       if (this.#nextParts.length === 0) {
         break;
       }
-      this.#ongoingWrite = this.#sendDelta();
+      this.#startWrite();
     }
   }
 
@@ -479,6 +479,14 @@ export class DeltaStreamer<T> {
     return streamId;
   }
 
+  // Writes run in the background and are only awaited later, if at all.
+  // Observing each one when it starts keeps a failure from surfacing as an
+  // unhandled rejection; whoever awaits #ongoingWrite still gets the error.
+  #startWrite() {
+    this.#ongoingWrite = this.#sendDelta();
+    this.#ongoingWrite.catch(() => {});
+  }
+
   async #sendDelta() {
     this.#cancelScheduledFlush();
     if (this.abortController.signal.aborted) {
@@ -517,7 +525,7 @@ export class DeltaStreamer<T> {
       Date.now() - this.#latestWrite >= this.config.throttleMs
     ) {
       // We send again immediately with the accumulated deltas.
-      this.#ongoingWrite = this.#sendDelta();
+      this.#startWrite();
     } else {
       this.#ongoingWrite = undefined;
       // Whatever is still buffered has just lost its owner: this write is

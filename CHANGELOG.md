@@ -8,6 +8,8 @@
 - Require ai 7.0.129 or later. Before 7.0.119 a provider error before the first
   chunk failed the action with an unhandled rejection (#387), and before 7.0.129
   approvals dropped provider options
+- Don't leave a failed delta write or stream cleanup as an unhandled rejection
+  (#366)
 
 ## 0.7.8
 
