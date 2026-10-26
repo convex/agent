@@ -87,6 +87,27 @@ describe("resolveStreams", () => {
       shown: ["f"],
     },
     {
+      name: "nothing in, nothing out",
+      rows: [],
+      streams: [],
+      kept: [],
+      shown: [],
+    },
+    {
+      name: "streams with no saved rows are shown",
+      rows: [],
+      streams: [live("a", "1/0"), ended("f", "2/0")],
+      kept: [],
+      shown: ["a", "f"],
+    },
+    {
+      name: "a stream leaves a failed row in another order alone",
+      rows: [row("1/0", "failed"), row("2/0")],
+      streams: [live("a", "2/0")],
+      kept: ["1/0"],
+      shown: ["a"],
+    },
+    {
       name: "orders are resolved independently",
       rows: [row("1/0"), row("1/1"), row("2/0"), row("2/1")],
       streams: [ended("f", "1/1"), live("a", "2/1")],
