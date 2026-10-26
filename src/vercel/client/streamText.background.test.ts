@@ -1,11 +1,12 @@
 // @vitest-environment node
 import process from "node:process";
-import { setImmediate } from "node:timers/promises";
+import { setImmediate, setTimeout } from "node:timers/promises";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { getFunctionAddress } from "convex/server";
 import { expect, test, vi } from "vitest";
 import { Agent, createThread } from "../index.js";
 import { mockModel } from "./mockModel.js";
+import { DeltaStreamer } from "./streaming.js";
 import { components, initConvexTest } from "./setup.test.js";
 
 test("returnImmediately observes a failed abort cleanup", async () => {
@@ -87,6 +88,65 @@ test("returnImmediately observes a failed abort cleanup", async () => {
   } finally {
     abort.abort();
     logError.mockRestore();
+    process.removeListener("unhandledRejection", onUnhandled);
+  }
+});
+
+test("a failed background delta write is observed while the source is still open", async () => {
+  const t = initConvexTest();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => unhandled.push(error);
+  process.on("unhandledRejection", onUnhandled);
+  const abortFailure = new Error("onAsyncAbort failed");
+  try {
+    await t.action(async (ctx) => {
+      const threadId = await createThread(ctx, components.agent);
+      const deltaRef = getFunctionAddress(components.agent.streams.addDelta);
+      const failingCtx = {
+        ...ctx,
+        runMutation: (async (reference, args) => {
+          if (getFunctionAddress(reference).reference === deltaRef.reference) {
+            throw new Error("addDelta failed");
+          }
+          return ctx.runMutation(reference, args);
+        }) as typeof ctx.runMutation,
+      };
+      const streamer = new DeltaStreamer<string>(
+        components.agent,
+        failingCtx,
+        {
+          throttleMs: 0,
+          abortSignal: undefined,
+          compress: null,
+          onAsyncAbort: async () => {
+            throw abortFailure;
+          },
+        },
+        {
+          threadId,
+          order: 0,
+          stepOrder: 0,
+          format: "UIMessageChunk",
+        },
+      );
+      // The source stays open after the failed write, so nothing awaits the
+      // write until it closes.
+      const source = new ReadableStream<string>({
+        async start(controller) {
+          controller.enqueue("a");
+          await setTimeout(20);
+          controller.close();
+        },
+      });
+      await expect(
+        streamer.consumeStream(
+          source as Parameters<typeof streamer.consumeStream>[0],
+        ),
+      ).rejects.toBe(abortFailure);
+      await setImmediate();
+    });
+    expect(unhandled).toEqual([]);
+  } finally {
     process.removeListener("unhandledRejection", onUnhandled);
   }
 });
