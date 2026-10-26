@@ -837,6 +837,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | { message: string; type: "other" }
             >;
           }>;
+          onSaveMessages?: string;
           order?: number | "next";
           pendingMessageId?: string;
           promptMessageId?: string;
@@ -1579,6 +1580,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {
           messageId: string;
+          onSaveMessages?: string;
           result: { status: "success" } | { error: string; status: "failed" };
         },
         null,
@@ -2954,6 +2956,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             approved: boolean;
             reason?: string;
           }>;
+          onSaveMessages?: string;
           threadId: string;
         },
         { messageId: string },
