@@ -37,6 +37,14 @@ expectTypeOf<{ model: ManyModelIds }>().toExtend<
 expectTypeOf<{ model: LanguageModelV3 }>().not.toExtend<
   StartArgs<{ model: LanguageModelV3 }>
 >();
+type ModelOrDefault =
+  | { kind: "override"; model: ManyModelIds }
+  | { kind: "default" };
+expectTypeOf<ModelOrDefault>().toExtend<StartArgs<ModelOrDefault>>();
+type V3OrDefault =
+  | { kind: "override"; model: LanguageModelV3 }
+  | { kind: "default" };
+expectTypeOf<V3OrDefault>().not.toExtend<StartArgs<V3OrDefault>>();
 expectTypeOf<{ model: LanguageModelV3 }>().not.toExtend<
   AgentStartArgs<{ model: LanguageModelV3 }>
 >();
