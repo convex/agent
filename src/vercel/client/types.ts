@@ -27,12 +27,14 @@ import type {
 } from "ai";
 
 import type {
+  FunctionReference_future,
   GenericActionCtx,
   GenericDataModel,
   WithoutSystemFields,
 } from "convex/server";
 import type {
   MessageDoc,
+  OnSaveMessagesArgs,
   ProviderMetadata,
   StreamDelta,
   StreamMessage,
@@ -164,6 +166,19 @@ export type Config = {
    * log the raw request body or response headers to a table, or logs.
    */
   rawRequestResponseHandler?: RawRequestResponseHandler;
+  /**
+   * An internal mutation run inside the transaction that saves or finalizes
+   * messages, with the docs as written. If it throws, the save rolls back.
+   * Use `vOnSaveMessagesArgs` as its args validator.
+   *
+   * Saves through this Agent from inside the callback run it again. Save with
+   * the standalone `saveMessages` there, which doesn't run it.
+   */
+  onSaveMessages?: FunctionReference_future<
+    "mutation",
+    "internal",
+    OnSaveMessagesArgs
+  >;
   /**
    * @deprecated Reach out if you use this. Otherwise will be removed soon.
    * Default provider options to pass for the LLM calls.

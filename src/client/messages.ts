@@ -101,6 +101,8 @@ export type SaveMessagesArgs = {
    * A pending message ID to replace when adding messages.
    */
   pendingMessageId?: string;
+  /** A function handle from `createFunctionHandle(config.onSaveMessages)`. */
+  onSaveMessagesHandle?: string;
 };
 
 /**
@@ -143,6 +145,7 @@ export async function saveMessages(
       }),
     ),
     failPendingSteps: args.failPendingSteps ?? false,
+    onSaveMessages: args.onSaveMessagesHandle,
   });
   return { messages: result.messages };
 }

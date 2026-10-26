@@ -2,6 +2,7 @@ import { assert, omit, pick } from "convex-helpers";
 import { mergedStream, stream } from "convex-helpers/server/stream";
 import {
   paginationOptsValidator,
+  type FunctionHandle,
   type WithoutSystemFields,
 } from "convex/server";
 import type { ObjectType } from "convex/values";
@@ -54,6 +55,26 @@ import {
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
   return omit(message, ["parentMessageId", "stepId", "files"]);
+}
+
+const vOnSaveMessages = v.optional(v.string());
+
+// The app's mutation runs as a subtransaction of this one and its error is
+// deliberately not caught: if the app's write fails, the message write must
+// roll back with it, or the app's mirror of the thread drifts.
+async function runOnSaveMessages(
+  ctx: MutationCtx,
+  handle: string | undefined,
+  threadId: Id<"threads">,
+  userId: string | undefined,
+  messages: MessageDoc[],
+) {
+  if (!handle || messages.length === 0) return;
+  await ctx.runMutation(handle as FunctionHandle<"mutation">, {
+    threadId,
+    userId,
+    messages,
+  });
 }
 
 export async function deleteMessage(
@@ -128,11 +149,9 @@ async function markPendingMessageFailed(
     const { tableName } = getVectorIdInfo(ctx, message.embeddingId);
     await ctx.db.delete(tableName, message.embeddingId);
   }
-  await ctx.db.patch("messages", message._id, {
-    status: "failed",
-    error,
-    embeddingId: undefined,
-  });
+  const patch = { status: "failed" as const, error, embeddingId: undefined };
+  await ctx.db.patch("messages", message._id, patch);
+  return publicMessage({ ...message, ...patch });
 }
 
 export const deleteByOrder = mutation({
@@ -206,6 +225,7 @@ const addMessagesArgs = {
   // If provided, finish this stream atomically with the message save.
   // This prevents UI flickering from separate mutations (issue #181).
   finishStreamId: v.optional(v.id("streamingMessages")),
+  onSaveMessages: vOnSaveMessages,
 };
 export const addMessages = mutation({
   args: addMessagesArgs,
@@ -243,6 +263,7 @@ async function addMessagesHandler(
     order: requestedOrder,
     pendingMessageId,
     hideFromUserIdSearch,
+    onSaveMessages,
     ...rest
   } = args;
   const promptMessage =
@@ -263,6 +284,7 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
+  const restartFailed: MessageDoc[] = [];
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
     const pendingMessages = await ctx.db
@@ -281,11 +303,13 @@ async function addMessagesHandler(
             const { tableName } = getVectorIdInfo(ctx, m.embeddingId);
             await ctx.db.delete(tableName, m.embeddingId);
           }
-          await ctx.db.patch("messages", m._id, {
-            status: "failed",
+          const patch = {
+            status: "failed" as const,
             error: "Restarting",
             embeddingId: undefined,
-          });
+          };
+          await ctx.db.patch("messages", m._id, patch);
+          restartFailed.push(publicMessage({ ...m, ...patch }));
         }),
     );
   }
@@ -305,6 +329,13 @@ async function addMessagesHandler(
     stepOrder = maxMessage?.stepOrder ?? -1;
   } else if (promptMessageId) {
     if (!promptMessage && abandonIfPromptMissing) {
+      await runOnSaveMessages(
+        ctx,
+        onSaveMessages,
+        threadId,
+        userId,
+        restartFailed,
+      );
       return { messages: [] };
     }
     assert(promptMessage, `Parent message ${promptMessageId} not found`);
@@ -429,7 +460,12 @@ async function addMessagesHandler(
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
-  return { messages: toReturn.map(publicMessage) };
+  const saved = toReturn.map(publicMessage);
+  await runOnSaveMessages(ctx, onSaveMessages, threadId, userId, [
+    ...restartFailed,
+    ...saved,
+  ]);
+  return { messages: saved };
 }
 
 // exported for tests
@@ -488,9 +524,10 @@ export const finalizeMessage = mutation({
       v.object({ status: v.literal("success") }),
       v.object({ status: v.literal("failed"), error: v.string() }),
     ),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: v.null(),
-  handler: async (ctx, { messageId, result }) => {
+  handler: async (ctx, { messageId, result, onSaveMessages }) => {
     const message = await ctx.db.get("messages", messageId);
     assert(message, `Message ${messageId} not found`);
     if (message.status !== "pending") {
@@ -500,6 +537,16 @@ export const finalizeMessage = mutation({
       );
       return;
     }
+    // The nested addMessages never gets the handle, so whatever this writes is
+    // reported here exactly once, with its final status.
+    const report = (written: MessageDoc[]) =>
+      runOnSaveMessages(
+        ctx,
+        onSaveMessages,
+        message.threadId,
+        message.userId,
+        written,
+      );
     // See if we can add any in-progress data
     if (!message.message?.content.length) {
       const { messages, materializationFailures, streamsToRelease } =
@@ -509,43 +556,57 @@ export const finalizeMessage = mutation({
           "Failed to materialize persisted assistant streams",
           materializationFailures,
         );
-        await markPendingMessageFailed(
-          ctx,
-          message,
-          result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
-        );
+        await report([
+          await markPendingMessageFailed(
+            ctx,
+            message,
+            result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
+          ),
+        ]);
         return;
       }
       if (messages.length > 0) {
         // Nested so an oversized recovered message rolls back on its own and
         // the pending message is marked failed instead of stuck.
+        let recovered: MessageDoc[];
         try {
-          await ctx.runMutation(api.messages.addMessages, {
-            messages,
-            threadId: message.threadId,
-            agentName: message.agentName,
-            failPendingSteps: false,
-            pendingMessageId: messageId,
-            userId: message.userId,
-            embeddings: undefined,
-          });
+          ({ messages: recovered } = await ctx.runMutation(
+            api.messages.addMessages,
+            {
+              messages,
+              threadId: message.threadId,
+              agentName: message.agentName,
+              failPendingSteps: false,
+              pendingMessageId: messageId,
+              userId: message.userId,
+              embeddings: undefined,
+            },
+          ));
         } catch (error) {
           console.error("Failed to persist recovered assistant streams", error);
-          await markPendingMessageFailed(
-            ctx,
-            message,
-            result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
-          );
+          await report([
+            await markPendingMessageFailed(
+              ctx,
+              message,
+              result.status === "failed"
+                ? result.error
+                : STREAM_RECOVERY_FAILURE,
+            ),
+          ]);
           return;
         }
         await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
+        await report(recovered);
         return;
       }
     }
     if (result.status === "failed") {
-      await markPendingMessageFailed(ctx, message, result.error);
+      await report([
+        await markPendingMessageFailed(ctx, message, result.error),
+      ]);
     } else {
       await ctx.db.patch("messages", messageId, { status: "success" });
+      await report([publicMessage({ ...message, status: "success" })]);
     }
   },
 });
@@ -609,6 +670,7 @@ export const respondToToolCallApprovals = mutation({
         reason: v.optional(v.string()),
       }),
     ),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: v.object({ messageId: v.id("messages") }),
   handler: async (ctx, args) => {
@@ -628,6 +690,7 @@ export const respondToToolCallApprovals = mutation({
       promptMessageId: plan.requestMessageId as Id<"messages">,
       failPendingSteps: false,
       messages: [{ message: plan.message }],
+      onSaveMessages: args.onSaveMessages,
     });
     return { messageId: saved.messages[0]._id as Id<"messages"> };
   },

@@ -10,6 +10,8 @@
   approvals dropped provider options
 - Don't leave a failed delta write or stream cleanup as an unhandled rejection
   (#366)
+- Add an Agent `onSaveMessages` mutation that runs in the same transaction as
+  each message save (#147)
 
 ## 0.7.8
 

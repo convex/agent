@@ -752,6 +752,13 @@ export const vMessageDoc = v.object({
 });
 export type MessageDoc = Infer<typeof vMessageDoc>; // Public
 
+export const vOnSaveMessagesArgs = v.object({
+  threadId: v.string(),
+  userId: v.optional(v.string()),
+  messages: v.array(vMessageDoc),
+});
+export type OnSaveMessagesArgs = Infer<typeof vOnSaveMessagesArgs>;
+
 export const vThreadDoc = v.object({
   _id: v.string(),
   _creationTime: v.number(),

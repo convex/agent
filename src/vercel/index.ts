@@ -40,6 +40,7 @@ function warnDeprecation(key: string, message: string) {
 }
 import { assert, omit, pick } from "convex-helpers";
 import {
+  createFunctionHandle,
   internalActionGeneric,
   internalMutationGeneric,
   type GenericActionCtx,
@@ -140,6 +141,7 @@ export {
   vContextOptions,
   vMessage,
   vMessageDoc,
+  vOnSaveMessagesArgs,
   vPaginationResult,
   vProviderMetadata,
   vSource,
@@ -152,6 +154,7 @@ export {
   vUserMessage,
   type Message,
   type MessageDoc,
+  type OnSaveMessagesArgs,
   type SourcePart,
   type ThreadDoc,
   type Usage,
@@ -890,7 +893,14 @@ export class Agent<
       ...rest,
       agentName: this.options.name,
       embeddings,
+      onSaveMessagesHandle: await this.onSaveMessagesHandle(),
     });
+  }
+
+  private async onSaveMessagesHandle() {
+    return this.options.onSaveMessages
+      ? await createFunctionHandle(this.options.onSaveMessages)
+      : undefined;
   }
 
   /**
@@ -1195,6 +1205,7 @@ export class Agent<
       threadId: args.threadId,
       agentName: this.options.name,
       decisions: args.decisions,
+      onSaveMessages: await this.onSaveMessagesHandle(),
     });
   }
 
@@ -1256,6 +1267,7 @@ export class Agent<
       messages,
       embeddings,
       failPendingSteps: false,
+      onSaveMessages: await this.onSaveMessagesHandle(),
     });
   }
 
@@ -1307,6 +1319,7 @@ export class Agent<
       messages,
       embeddings,
       agentName: this.options.name,
+      onSaveMessages: await this.onSaveMessagesHandle(),
     });
   }
 
@@ -1328,6 +1341,7 @@ export class Agent<
     await runMutation(ctx, this.component.messages.finalizeMessage, {
       messageId: args.messageId,
       result: args.result,
+      onSaveMessages: await this.onSaveMessagesHandle(),
     });
   }
 
