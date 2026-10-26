@@ -12,6 +12,7 @@ import {
   timeoutStreamHandler,
 } from "./streams.js";
 import schema from "./schema.js";
+import type { MessageDoc } from "../validators.js";
 import { initConvexTest, modules } from "./setup.test.js";
 
 describe("agent", () => {
@@ -749,6 +750,78 @@ describe("agent", () => {
       { threadId: thread._id as Id<"threads">, order: "asc" },
     );
     expect(remainingMessages.page).toHaveLength(0);
+  });
+
+  test("excludeToolMessages keeps the target order's tools across pages", async () => {
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, {
+      userId: "test",
+    });
+    const threadId = thread._id as Id<"threads">;
+    const exchange = (id: string) => [
+      { message: { role: "user" as const, content: `ask ${id}` } },
+      {
+        message: {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "tool-call" as const,
+              input: {},
+              toolCallId: id,
+              toolName: "tool",
+            },
+          ],
+        },
+      },
+      {
+        message: {
+          role: "tool" as const,
+          content: [
+            {
+              type: "tool-result" as const,
+              toolName: "tool",
+              result: id,
+              toolCallId: id,
+            },
+          ],
+        },
+      },
+      { message: { role: "assistant" as const, content: `answer ${id}` } },
+    ];
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: exchange("a"),
+    });
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: exchange("b"),
+    });
+    const pages = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const result: {
+        page: MessageDoc[];
+        isDone: boolean;
+        continueCursor: string;
+      } = await t.query(api.messages.listMessagesByThreadId, {
+        threadId,
+        excludeToolMessages: true,
+        upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
+        order: "desc",
+        paginationOpts: { numItems: 2, cursor },
+      });
+      pages.push(...result.page);
+      if (result.isDone) break;
+      cursor = result.continueCursor;
+    }
+    expect(pages.map((m) => [m.order, m.stepOrder, m.tool])).toEqual([
+      [1, 3, false],
+      [1, 2, true],
+      [1, 1, true],
+      [1, 0, false],
+      [0, 3, false],
+      [0, 0, false],
+    ]);
   });
 
   test("deleteByOrder deletes messages within specified order range", async () => {
