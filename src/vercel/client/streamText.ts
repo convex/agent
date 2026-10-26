@@ -124,7 +124,6 @@ export async function streamText<
   const lifecycle = new StepLifecycle<Tools, RUNTIME_CONTEXT>(
     getGenerationControls(started),
     {
-      streamed: Boolean(threadId && options.saveStreamDeltas),
       // Only the awaited path has a caller to throw a save failure to.
       onSaveFailure: willAwaitStream
         ? undefined

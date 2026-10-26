@@ -545,7 +545,6 @@ export class Agent<
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
     const lifecycle = new StepLifecycle<Tools, RUNTIME_CONTEXT>(
       getGenerationControls(started),
-      { streamed: false },
     );
     try {
       const result = (await generateText<Tools, RUNTIME_CONTEXT, OUTPUT>({

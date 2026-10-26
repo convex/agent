@@ -238,8 +238,12 @@ const streamTextCleanupFailure = app.action({
     let aborts = 0;
     const failingCtx = {
       ...ctx,
+      // Either mutation can end the pending message under the failure.
       runMutation: (async (reference, args) => {
-        if (hasKeys(args, ["messageId", "result"])) {
+        const storesFailed = (
+          args as { messages?: { status?: string }[] }
+        ).messages?.some((m) => m.status === "failed");
+        if (hasKeys(args, ["messageId", "result"]) || storesFailed) {
           throw new Error(CLEANUP_FAILURE_TEXT);
         }
         return ctx.runMutation(reference, args);
@@ -584,9 +588,16 @@ const twoStepArgs = {
     v.union(v.literal("onStepEnd"), v.literal("onEnd"), v.literal("onError")),
   ),
   failStore: v.optional(
-    v.union(v.literal("final"), v.literal("finalOnce"), v.literal("first")),
+    v.union(
+      v.literal("final"),
+      v.literal("finalOnce"),
+      v.literal("first"),
+      v.literal("underFailure"),
+    ),
   ),
+  abortDuringFailingStore: v.optional(v.boolean()),
   failMessageFailure: v.optional(v.boolean()),
+  throttleMs: v.optional(v.number()),
 };
 type Failure = NonNullable<ObjectType<typeof twoStepArgs>["failure"]>;
 type TwoStepArgs = ObjectType<typeof twoStepArgs>;
@@ -696,7 +707,11 @@ function twoStepAgent(
 // Fails the save of the final answer (once, for a transient failure), or of
 // the first step's tool call, before anything is stored; and optionally the
 // marking of the pending message as failed.
-function failingStore(ctx: ActionCtx, args: TwoStepArgs): ActionCtx {
+function failingStore(
+  ctx: ActionCtx,
+  args: TwoStepArgs,
+  abortController: AbortController,
+): ActionCtx {
   const failStore = args.failStore;
   if (!failStore && !args.failMessageFailure) return ctx;
   const failingPart = failStore === "first" ? "tool-call" : "text";
@@ -709,19 +724,25 @@ function failingStore(ctx: ActionCtx, args: TwoStepArgs): ActionCtx {
         throw new Error("failing the message failed");
       }
       const messages = (mutationArgs as { messages?: MessageDoc[] }).messages;
-      const stores = messages?.some(
-        (m) =>
-          m.message?.role === "assistant" &&
-          Array.isArray(m.message.content) &&
-          m.message.content.some((p) => p.type === failingPart),
-      );
-      if (
-        failStore &&
-        stores &&
-        (failStore !== "finalOnce" || failures++ === 0)
-      ) {
+      const stores =
+        failStore === "underFailure"
+          ? messages?.some((m) => m.status === "failed")
+          : messages?.some(
+              (m) =>
+                m.message?.role === "assistant" &&
+                Array.isArray(m.message.content) &&
+                m.message.content.some((p) => p.type === failingPart),
+            );
+      const once = failStore === "finalOnce" || args.abortDuringFailingStore;
+      if (failStore && stores && (!once || failures++ === 0)) {
+        if (args.abortDuringFailingStore) {
+          abortController.abort();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
         throw new Error(
-          `${failStore === "first" ? "first" : "final"} store failed`,
+          failStore === "underFailure"
+            ? "store under the failure failed"
+            : `${failStore === "first" ? "first" : "final"} store failed`,
         );
       }
       return ctx.runMutation(reference, mutationArgs);
@@ -732,16 +753,17 @@ function failingStore(ctx: ActionCtx, args: TwoStepArgs): ActionCtx {
 const streamTextTwoSteps = app.action({
   args: twoStepArgs,
   handler: async (ctx, args) => {
+    const abortController = new AbortController();
     const { agent, observed, callArgs } = twoStepAgent(
       ctx,
       args,
-      new AbortController(),
+      abortController,
     );
     let error: string | undefined;
     let steps: number | undefined;
     try {
       const result = await agent.streamText(
-        failingStore(ctx, args),
+        failingStore(ctx, args, abortController),
         { threadId: args.threadId },
         callArgs,
         args.mode === "noDeltas"
@@ -749,7 +771,7 @@ const streamTextTwoSteps = app.action({
           : {
               saveStreamDeltas: {
                 returnImmediately: args.mode === "returnImmediately",
-                throttleMs: 0,
+                throttleMs: args.throttleMs ?? 0,
               },
             },
       );
@@ -768,16 +790,17 @@ const streamTextTwoSteps = app.action({
 const generateTextTwoSteps = app.action({
   args: twoStepArgs,
   handler: async (ctx, args) => {
+    const abortController = new AbortController();
     const { agent, observed, callArgs } = twoStepAgent(
       ctx,
       args,
-      new AbortController(),
+      abortController,
     );
     let error: string | undefined;
     let steps: number | undefined;
     try {
       const result = await agent.generateText(
-        failingStore(ctx, args),
+        failingStore(ctx, args, abortController),
         { threadId: args.threadId },
         callArgs,
       );
@@ -1639,7 +1662,7 @@ describe.each(modes)(
       ).toMatchObject({
         usageCalls: 2,
         error: mode === "awaited" ? "final store failed" : null,
-        saved: [USER, ...LOOKUP_STEP, ANSWER],
+        saved: [USER, ...LOOKUP_STEP, { ...ANSWER, status: "failed" }],
         ...stream(streamed, "aborted"),
       });
     });
@@ -1693,6 +1716,61 @@ describe.each(modes)(
         run.saved.slice(1).map(() => "failed"),
       );
       expect(run.saved.length).toBeGreaterThan(1);
+    });
+  },
+);
+
+describe.each(modes)(
+  "a failure around a step's save, $mode",
+  ({ mode, streamed }) => {
+    // The rejected save leaves the step for the failure to store, once.
+    test("an abort during a save that then fails stores the step once", async () => {
+      expect(
+        await runTwoSteps("streamText", {
+          scenario: "toolCallsFinish",
+          mode,
+          failStore: "first",
+          abortDuringFailingStore: true,
+        }),
+      ).toMatchObject({
+        usageCalls: 1,
+        saved: [USER, ...LOOKUP_STEP.map((m) => ({ ...m, status: "failed" }))],
+      });
+    });
+
+    test("a step that can't be stored under the failure still reports usage", async () => {
+      expect(
+        await runTwoSteps("streamText", {
+          scenario: "toolCallsFinish",
+          mode,
+          abort: "afterFirstStep",
+          failStore: "underFailure",
+        }),
+      ).toMatchObject({
+        usageCalls: 1,
+        saved: streamed
+          ? [USER, ...LOOKUP_STEP.map((m) => ({ ...m, status: "failed" }))]
+          : [USER, FAILED_TAIL],
+      });
+    });
+  },
+);
+
+// Throttled deltas still hold part of the step when the abort lands, so the
+// stream alone can't recover it.
+test.each(["awaited", "returnImmediately"] as const)(
+  "an abort after a step keeps all of it with throttled deltas, %s",
+  async (mode) => {
+    expect(
+      await runTwoSteps("streamText", {
+        scenario: "toolCallsFinish",
+        mode,
+        abort: "afterFirstStep",
+        throttleMs: 60_000,
+      }),
+    ).toMatchObject({
+      error: null,
+      saved: [USER, ...LOOKUP_STEP.map((m) => ({ ...m, status: "failed" }))],
     });
   },
 );
@@ -1842,8 +1920,8 @@ describe("generateText saves every step the SDK runs (issue #388)", () => {
       }),
     ).toMatchObject({
       usageCalls: 2,
-      error: "failing the message failed",
-      saved: [USER, ...LOOKUP_STEP, ANSWER],
+      error: "final store failed",
+      saved: [USER, ...LOOKUP_STEP, { ...ANSWER, status: "failed" }],
     });
   });
 

@@ -80,22 +80,25 @@ function rawRequestResponseInclude(
 
 export type GenerationControls = {
   /**
-   * Hooks around every failure of the pending message, so a caller holding
-   * a completed but unsaved step can order its saves around the failure.
-   * `after` runs whether or not the message could be failed.
+   * Runs as each failure starts, before the pending message is failed, so a
+   * caller holding a completed but unsaved step can store it under the
+   * failure. Only what is left pending is recovered from the stream's deltas.
    */
-  setFailHooks: (hooks: {
-    before: () => Promise<void>;
-    after: (messageFailed: boolean) => Promise<void>;
-  }) => void;
-  /** Stores a step's messages without running the handlers. */
+  setOnFail: (onFail: (reason: string) => Promise<void>) => void;
+  /**
+   * Stores a step's messages without running the handlers. With a `failure`,
+   * they are stored as failed with that error.
+   */
   store: (
     toSave: {
       step: StepResult<ToolSet, Context>;
       responseMessages?: ModelMessage[];
     },
-    createPendingMessage?: boolean,
-    finishStreamId?: string,
+    options?: {
+      createPendingMessage?: boolean;
+      finishStreamId?: string;
+      failure?: string;
+    },
   ) => Promise<void>;
   /** Runs the handlers for a step whose messages are stored, or stored by
    * other means. */
@@ -288,18 +291,12 @@ export async function startGeneration<
     }
     return pendingMessageFailure;
   };
-  let failHooks: Parameters<GenerationControls["setFailHooks"]>[0] | undefined;
-  // save() fails the pending message itself and must not go through the
-  // hooks, which may be waiting on that very save.
+  let onFail: ((reason: string) => Promise<void>) | undefined;
+  // save() fails the pending message itself and must not go through onFail,
+  // which may be waiting on that very save.
   const fail = async (reason: string): Promise<void> => {
-    await failHooks?.before();
-    let messageFailed = false;
-    try {
-      await failPending(reason);
-      messageFailed = true;
-    } finally {
-      await failHooks?.after(messageFailed);
-    }
+    await onFail?.(reason);
+    await failPending(reason);
   };
   if (args.abortSignal) {
     const abortSignal = args.abortSignal;
@@ -406,6 +403,7 @@ export async function startGeneration<
      * This prevents UI flickering from separate mutations (issue #181).
      */
     finishStreamId?: string,
+    failure?: string,
   ) => {
     if (threadId && saveMessages !== "none") {
       let serialized;
@@ -433,11 +431,21 @@ export async function startGeneration<
           responseMessagesToSave,
         );
       }
-      const embeddings = await embedMessages(
-        ctx,
-        { threadId, ...opts, userId },
-        serialized.messages.map((m) => m.message),
-      );
+      if (failure !== undefined) {
+        serialized.messages = serialized.messages.map((m) => ({
+          ...m,
+          status: "failed" as const,
+          error: failure,
+        }));
+      }
+      const embeddings =
+        failure !== undefined
+          ? undefined
+          : await embedMessages(
+              ctx,
+              { threadId, ...opts, userId },
+              serialized.messages.map((m) => m.message),
+            );
       if (createPendingMessage) {
         serialized.messages.push({
           message: { role: "assistant", content: [] },
@@ -509,14 +517,15 @@ export async function startGeneration<
     },
   };
   generationControls.set(call, {
-    setFailHooks: (hooks) => {
-      failHooks = hooks;
+    setOnFail: (hook) => {
+      onFail = hook;
     },
-    store: (toSave, createPendingMessage, finishStreamId) =>
+    store: (toSave, options) =>
       store(
         toSave as { step: StepResult<ToolSet, RUNTIME_CONTEXT> },
-        createPendingMessage,
-        finishStreamId,
+        options?.createPendingMessage,
+        options?.finishStreamId,
+        options?.failure,
       ),
     runHandlers,
   });

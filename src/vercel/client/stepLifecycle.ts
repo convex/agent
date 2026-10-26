@@ -30,34 +30,21 @@ export class StepLifecycle<
 
   constructor(
     controls: GenerationControls,
-    options: {
-      /**
-       * Whether the step's parts were streamed as deltas. Failing the message
-       * materializes its stream's deltas into it, so once that succeeds a
-       * step under the failure only has its handlers run.
-       */
-      streamed: boolean;
-      onSaveFailure?: (error: unknown) => void;
-    },
+    options: { onSaveFailure?: (error: unknown) => void } = {},
   ) {
     this.#controls = controls;
     this.#onSaveFailure = options.onSaveFailure;
-    // `before` runs synchronously when the failure starts, so the step is
-    // claimed before a concurrent prepareStep can save it as intermediate.
-    controls.setFailHooks({
-      before: () => {
-        this.#stepUnderFailure ??= this.#takeStaged();
-        return this.#saves;
-      },
-      after: (messageFailed) => {
-        const step = this.#stepUnderFailure;
-        this.#stepUnderFailure = undefined;
-        return this.#save(
-          step,
-          false,
-          !options.streamed || !messageFailed,
-        ).catch(() => {});
-      },
+    // The staged step is claimed synchronously when the failure starts,
+    // before a concurrent prepareStep can save it as intermediate. A save
+    // already in flight may still reject and leave its step behind, so that
+    // is checked once it settles. Either is stored whole, rather than
+    // recovered from deltas, which a throttle may still hold.
+    controls.setOnFail(async (reason) => {
+      const staged = this.#takeStaged();
+      await this.#saves;
+      const step = this.#stepUnderFailure ?? staged;
+      this.#stepUnderFailure = undefined;
+      await this.#save(step, { failure: reason }).catch(() => {});
     });
   }
 
@@ -69,7 +56,7 @@ export class StepLifecycle<
     if (options.stepNumber === 0) {
       this.#initialResponseMessages = [...options.responseMessages];
     }
-    await this.#save(this.#takeStaged(), true);
+    await this.#save(this.#takeStaged(), { createPendingMessage: true });
   }
 
   stepEnded(step: StepResult<TOOLS, RUNTIME_CONTEXT>): void {
@@ -94,7 +81,7 @@ export class StepLifecycle<
     await this.#saves;
     const staged = this.#takeStaged();
     if (!staged) return false;
-    await this.#save(staged, false, true, finishStreamId);
+    await this.#save(staged, { finishStreamId });
     return true;
   }
 
@@ -137,26 +124,24 @@ export class StepLifecycle<
   // saves are chained so a failure always lands after the step before it.
   // A step whose messages could not be stored rejects, so the caller stops
   // the generation instead of letting a later step finalize without it; it is
-  // kept for the failure to save. A handler failure after storing is only
-  // recorded.
+  // kept for the failure to save. Under the failure there is nothing left to
+  // stop, so the handlers run either way and each step reaches them once.
+  // A handler failure is only recorded.
   #save(
     step: StagedStep<TOOLS, RUNTIME_CONTEXT> | undefined,
-    createPendingMessage: boolean,
-    storeMessages = true,
-    finishStreamId?: string,
+    options: Parameters<GenerationControls["store"]>[1] = {},
   ): Promise<void> {
     if (!step) return this.#saves;
     const saving = this.#saves.then(async () => {
-      if (storeMessages) {
-        try {
-          await this.#controls.store(
-            step as StagedStep<ToolSet, Context>,
-            createPendingMessage,
-            finishStreamId,
-          );
-        } catch (error) {
+      try {
+        await this.#controls.store(
+          step as StagedStep<ToolSet, Context>,
+          options,
+        );
+      } catch (error) {
+        this.recordSaveFailure(error);
+        if (options.failure === undefined) {
           this.#stepUnderFailure ??= step;
-          this.recordSaveFailure(error);
           throw error;
         }
       }
