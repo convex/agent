@@ -796,7 +796,9 @@ export const listMessagesByThreadIdArgs = {
 export const listMessagesByThreadId = query({
   args: listMessagesByThreadIdArgs,
   handler: async (ctx, args) => {
-    const messages = await listMessagesByThreadIdHandler(ctx, args);
+    const messages = await listMessagesByThreadIdHandler(ctx, args, {
+      keepContinuedOrderTools: true,
+    });
     return { ...messages, page: messages.page.map(publicMessage) };
   },
   returns: vPaginationResult(vMessageDoc),
@@ -805,6 +807,7 @@ export const listMessagesByThreadId = query({
 async function listMessagesByThreadIdHandler(
   ctx: QueryCtx,
   args: ObjectType<typeof listMessagesByThreadIdArgs>,
+  { keepContinuedOrderTools = false } = {},
 ) {
   const statuses = args.statuses ?? vMessageStatus.members.map((m) => m.value);
   const last =
@@ -838,8 +841,9 @@ async function listMessagesByThreadIdHandler(
     ),
   );
   // Excluding tool messages trims earlier orders. The order being continued
-  // keeps them, or an approval loses its call and decision (#409).
-  if (args.excludeToolMessages && last) {
+  // keeps them, or an approval loses its call and decision (#409). Cloning
+  // reuses this handler and wants strict exclusion.
+  if (args.excludeToolMessages && last && keepContinuedOrderTools) {
     streams.push(
       ...statuses.map((status) =>
         stream(ctx.db, schema)
