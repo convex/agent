@@ -12,6 +12,8 @@
   (#366)
 - Fix useUIMessages and useThreadMessages freezing when a page ends partway
   through a message (#395)
+- Run approved tools when `excludeToolMessages` is set: the order being
+  continued keeps its tool messages (#409)
 
 ## 0.7.8
 

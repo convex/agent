@@ -837,6 +837,24 @@ async function listMessagesByThreadIdHandler(
         ),
     ),
   );
+  // Excluding tool messages trims earlier orders. The order being continued
+  // keeps them, or an approval loses its call and decision (#409).
+  if (args.excludeToolMessages && last) {
+    streams.push(
+      ...statuses.map((status) =>
+        stream(ctx.db, schema)
+          .query("messages")
+          .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+            q
+              .eq("threadId", args.threadId)
+              .eq("status", status)
+              .eq("tool", true)
+              .eq("order", last.order),
+          )
+          .order(order),
+      ),
+    );
+  }
   const messages = await mergedStream(streams, ["order", "stepOrder"]).paginate(
     args.paginationOpts ?? {
       numItems: DEFAULT_RECENT_MESSAGES,

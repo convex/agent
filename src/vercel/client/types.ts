@@ -211,8 +211,10 @@ export type AgentCallSettings = LanguageModelCallOptions &
  */
 export type ContextOptions = {
   /**
-   * Whether to include tool messages in the context.
-   * By default, tool calls and results are not included.
+   * Whether to exclude tool calls and results from the context.
+   * The order being continued (the promptMessageId's) keeps its tool messages,
+   * so pending tool approvals and earlier steps still resume.
+   * Default: false
    */
   excludeToolMessages?: boolean;
   /**
