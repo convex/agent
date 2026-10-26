@@ -5,6 +5,9 @@
 - Fix TS2590 when constructing Agent or calling startGeneration with large model
   catalogs (#414)
 - Pass embedding providerMetadata to usageHandler (#393)
+- Require ai 7.0.129 or later. Before 7.0.119 a provider error before the first
+  chunk failed the action with an unhandled rejection (#387), and before 7.0.129
+  approvals dropped provider options
 
 ## 0.7.8
 
