@@ -19,6 +19,7 @@ import {
   type StreamDelta,
   type StreamMessage,
 } from "../../validators.js";
+import { vUIMessage } from "../UIMessages.js";
 import type {
   ActionCtx,
   AgentComponent,
@@ -27,14 +28,23 @@ import type {
   SyncStreamsReturnValue,
 } from "./types.js";
 
+const vSyncStreamsReturnValue = v.optional(
+  v.union(
+    v.object({ kind: v.literal("list"), messages: v.array(vStreamMessage) }),
+    v.object({ kind: v.literal("deltas"), deltas: v.array(vStreamDelta) }),
+  ),
+);
+
+/** Returns of a streaming query for `useThreadMessages`, from `listMessages`. */
 export const vStreamMessagesReturnValue = v.object({
   ...vPaginationResult(vMessageDoc).fields,
-  streams: v.optional(
-    v.union(
-      v.object({ kind: v.literal("list"), messages: v.array(vStreamMessage) }),
-      v.object({ kind: v.literal("deltas"), deltas: v.array(vStreamDelta) }),
-    ),
-  ),
+  streams: vSyncStreamsReturnValue,
+});
+
+/** Returns of a streaming query for `useUIMessages`, from `listUIMessages`. */
+export const vStreamUIMessagesReturnValue = v.object({
+  ...vPaginationResult(vUIMessage).fields,
+  streams: vSyncStreamsReturnValue,
 });
 
 /**

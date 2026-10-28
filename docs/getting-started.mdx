@@ -28,6 +28,9 @@ Install the component and Gateway provider:
 npm install @convex-dev/agent @convex-dev/ai-sdk-provider ai convex
 ```
 
+The Agent requires `ai@^7`. If you use other AI SDK providers, install them at
+`^4` (e.g. `@ai-sdk/openai@^4`), the major that pairs with `ai@^7`.
+
 Create a `convex.config.ts` file in your app's `convex/` folder and install the
 component by calling `use`:
 

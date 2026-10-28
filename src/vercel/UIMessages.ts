@@ -19,7 +19,7 @@ import {
   convertUint8ArrayToBase64,
   type ReasoningFilePart,
 } from "@ai-sdk/provider-utils";
-import type { Infer } from "convex/values";
+import { v, type Infer } from "convex/values";
 import { toModelMessage, fromModelMessage, toUIFilePart } from "./mapping.js";
 import {
   extractReasoning,
@@ -28,12 +28,13 @@ import {
   joinText,
   sorted,
 } from "../shared.js";
-import type {
-  MessageDoc,
-  MessageStatus,
-  ProviderOptions,
-  SourcePart,
-  vSource,
+import {
+  vMessageStatus,
+  type MessageDoc,
+  type MessageStatus,
+  type ProviderOptions,
+  type SourcePart,
+  type vSource,
 } from "../validators.js";
 import { omit, pick } from "convex-helpers";
 
@@ -53,6 +54,25 @@ export type UIMessage<
   text: string;
   _creationTime: number;
 };
+
+/**
+ * Validates a {@link UIMessage}, e.g. in a query's `returns`. `parts` and
+ * `metadata` depend on the app's tools and data parts, so they aren't checked.
+ */
+export const vUIMessage = v.object({
+  id: v.string(),
+  role: v.union(v.literal("system"), v.literal("user"), v.literal("assistant")),
+  parts: v.array(v.any()),
+  metadata: v.optional(v.any()),
+  key: v.string(),
+  order: v.number(),
+  stepOrder: v.number(),
+  status: v.union(v.literal("streaming"), vMessageStatus),
+  agentName: v.optional(v.string()),
+  userId: v.optional(v.string()),
+  text: v.string(),
+  _creationTime: v.number(),
+});
 
 /**
  * Converts a list of UIMessages to MessageDocs, along with extra metadata that

@@ -10,6 +10,8 @@
   approvals dropped provider options
 - Don't leave a failed delta write or stream cleanup as an unhandled rejection
   (#366)
+- Add `vStreamUIMessagesReturnValue` and `vUIMessage`, the `returns` validators
+  for a streaming `listUIMessages` query (#295)
 
 ## 0.7.8
 
