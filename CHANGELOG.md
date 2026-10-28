@@ -1,9 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.7.9
 
+- Uses built-in pagination instead of the paginator for listing threads by
+  userId, as well as listing files and embeddings. Impact: If a user is
+  currently paginating, their cursor will not be valid and their paginated query
+  will reset to the first page. Also, if you called `listThreadsByUserId`,
+  `getFilesToDelete`, or paginate vectors from a query that already makes
+  another pagination call, it will now fail, since each query is only allowed
+  one built-in `.paginate` call currently.
 - Fix TS2590 when constructing Agent or calling startGeneration with large model
-  catalogs or model id unions (#414, #417)
+  (#424) catalogs or model id unions (#414, #417)
 - Pass embedding providerMetadata to usageHandler (#393)
 - Require ai 7.0.129 or later. Before 7.0.119 a provider error before the first
   chunk failed the action with an unhandled rejection (#387), and before 7.0.129
@@ -13,7 +20,7 @@
 - Fix useUIMessages and useThreadMessages freezing when a page ends partway
   through a message (#395)
 - Run approved tools when `excludeToolMessages` is set: `listMessages` with
-  `upToAndIncludingMessageId` keeps that order's tool messages (#409)
+  `upToAndIncludingMessageId` keeps that order's tool messages (#409, #427)
 
 ## 0.7.8
 
@@ -590,9 +597,8 @@ data at rest is backwards compatible.
   - On the right you can see the selected message's details, as well as fetch
     contextual messages to investigate what messages would get fetched for that
     message, with configurable ContextOptions.
-  - Use the [hosted version](https://convex.github.io/agent/) or run it
-    locally with `npx @convex-dev/agent-playground` - uses Vite internally for
-    now.
+  - Use the [hosted version](https://convex.github.io/agent/) or run it locally
+    with `npx @convex-dev/agent-playground` - uses Vite internally for now.
   - API key management (to authenticate into the UI Playground)
 - The `order` and `stepOrder` is now well defined: each call to something like
   `generateText` will be on the next "order" and each message generated from it
