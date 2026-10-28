@@ -83,7 +83,7 @@ import {
   fetchContextMessages,
   generateAndSaveEmbeddings,
 } from "./client/search.js";
-import { startGeneration } from "./client/start.js";
+import { getGenerationControls, startGeneration } from "./client/start.js";
 import { syncStreams, type StreamingOptions } from "./client/streaming.js";
 import { createThread, getThreadMetadata } from "../client/threads.js";
 import { runMutation } from "../client/run.js";
@@ -113,11 +113,8 @@ import type {
   WithoutModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
-import {
-  errorToString,
-  hasSuccessfulToolCall,
-  willContinue,
-} from "./client/utils.js";
+import { errorToString, hasSuccessfulToolCall } from "./client/utils.js";
+import { StepLifecycle } from "./client/stepLifecycle.js";
 
 export { isStepCount, stepCountIs } from "ai";
 export { hasSuccessfulToolCall };
@@ -537,48 +534,41 @@ export class Agent<
     > &
       GenerationOutputMetadata
   > {
-    const { args, promptMessageId, order, ...call } = await this.start(
+    const started = await this.start(
       ctx,
       generateTextArgs,
       { ...threadOpts, ...options },
       "generateText",
     );
+    const { args, promptMessageId, order, ...call } = started;
 
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
-    const steps: StepResult<Tools, RUNTIME_CONTEXT>[] = [];
-    let initialResponseMessages: ModelMessage[] = [];
-    let initialResponseMessagesSaved = false;
+    const lifecycle = new StepLifecycle<Tools, RUNTIME_CONTEXT>(
+      getGenerationControls(started),
+    );
     try {
       const result = (await generateText<Tools, RUNTIME_CONTEXT, OUTPUT>({
         ...args,
         prepareStep: async (options) => {
-          if (options.stepNumber === 0) {
-            initialResponseMessages = [...options.responseMessages];
-          }
+          await lifecycle.stepStarting(options);
           const result = await generateTextArgs.prepareStep?.(options);
           call.updateModel(result?.model ?? options.model);
           return result;
         },
         onStepEnd: async (step) => {
-          steps.push(step);
-          await call.save(
-            {
-              step,
-              responseMessages: [
-                ...(initialResponseMessagesSaved
-                  ? []
-                  : initialResponseMessages),
-                ...step.response.messages,
-              ],
-            },
-            await willContinue(steps, args.stopWhen),
-          );
-          initialResponseMessagesSaved = true;
+          lifecycle.stepEnded(step);
           return (
             generateTextArgs.onStepEnd ?? generateTextArgs.onStepFinish
           )?.(step);
         },
+        onEnd: (event) =>
+          lifecycle.ended(
+            () => lifecycle.finalize(),
+            () =>
+              (generateTextArgs.onEnd ?? generateTextArgs.onFinish)?.(event),
+          ),
       })) as GenerateTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
+      lifecycle.throwSaveFailure();
       const metadata: GenerationOutputMetadata = {
         promptMessageId,
         order,

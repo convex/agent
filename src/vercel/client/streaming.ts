@@ -223,6 +223,7 @@ export class DeltaStreamer<T> {
   #ongoingWrite: Promise<void> | undefined;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
   #abortPromise: Promise<void> | undefined;
+  #failed = false;
   #cursor: number = 0;
   public abortController: AbortController;
   /**
@@ -290,10 +291,16 @@ export class DeltaStreamer<T> {
     }
   }
 
+  // Failing the row stops this streamer without necessarily aborting the
+  // generation, whose signal the AI SDK may still own.
+  get #stopped() {
+    return this.#failed || this.abortController.signal.aborted;
+  }
+
   // Avoid race conditions by only creating once
   #creatingStreamIdPromise: Promise<string> | undefined;
   public async getStreamId() {
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       await this.#abortPromise;
       throw new Error("Cannot create a stream after it has been aborted");
     }
@@ -310,7 +317,7 @@ export class DeltaStreamer<T> {
   }
 
   public async addParts(parts: T[]) {
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       return;
     }
     if (this.#stoppedAccepting) {
@@ -323,7 +330,7 @@ export class DeltaStreamer<T> {
       ifAborted: "returnUndefined",
     });
     if (!streamId) return;
-    if (this.#stoppedAccepting || this.abortController.signal.aborted) {
+    if (this.#stoppedAccepting || this.#stopped) {
       return;
     }
     if (
@@ -352,7 +359,7 @@ export class DeltaStreamer<T> {
         this.#ongoingWrite ||
         this.#nextParts.length === 0 ||
         this.#stoppedAccepting ||
-        this.abortController.signal.aborted
+        this.#stopped
       ) {
         return;
       }
@@ -388,7 +395,7 @@ export class DeltaStreamer<T> {
     }
     // Abort cleanup owns the terminal component transition, so consumeStream
     // must wait for it instead of also trying to finish the stream.
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       await this.#waitForAbortCleanup();
       return;
     }
@@ -398,12 +405,12 @@ export class DeltaStreamer<T> {
     try {
       await this.#flushPendingParts();
     } catch (error) {
-      if (this.abortController.signal.aborted) {
+      if (this.#stopped) {
         await this.#waitForAbortCleanup();
       }
       throw error;
     }
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       await this.#waitForAbortCleanup();
       return;
     }
@@ -417,7 +424,7 @@ export class DeltaStreamer<T> {
    * resolves no delta write is outstanding and #nextParts is empty.
    */
   async #flushPendingParts(): Promise<void> {
-    while (!this.abortController.signal.aborted) {
+    while (!this.#stopped) {
       const inFlight = this.#ongoingWrite;
       await inFlight;
       // #sendDelta reassigns #ongoingWrite from its own tail, so a write can
@@ -467,12 +474,12 @@ export class DeltaStreamer<T> {
     if (options?.ifAborted !== "returnUndefined") {
       return this.getStreamId();
     }
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       await this.#abortPromise;
       return undefined;
     }
     const streamId = await this.getStreamId();
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       await this.#abortPromise;
       return undefined;
     }
@@ -489,7 +496,7 @@ export class DeltaStreamer<T> {
 
   async #sendDelta() {
     this.#cancelScheduledFlush();
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       return;
     }
     let success: boolean;
@@ -576,13 +583,13 @@ export class DeltaStreamer<T> {
     try {
       await this.#ongoingWrite;
     } catch (error) {
-      if (this.abortController.signal.aborted) {
+      if (this.#stopped) {
         await this.#waitForAbortCleanup();
       }
       throw error;
     }
     await this.#sendDelta(); // #sendDelta checks aborted internally
-    if (this.abortController.signal.aborted) {
+    if (this.#stopped) {
       await this.#waitForAbortCleanup();
       return;
     }
@@ -591,8 +598,13 @@ export class DeltaStreamer<T> {
     });
   }
 
-  public async fail(reason: string) {
-    await this.#abort(reason);
+  /**
+   * Marks the stream row aborted. By default this also aborts
+   * `abortController`, cancelling a generation that is still running; pass
+   * `abortGeneration: false` once the generation has ended on its own.
+   */
+  public async fail(reason: string, options?: { abortGeneration?: boolean }) {
+    await this.#abort(reason, true, options?.abortGeneration ?? true);
   }
 
   async #abortDelta(reason: string) {
@@ -612,10 +624,15 @@ export class DeltaStreamer<T> {
     if (callbackFailure) throw callbackFailure.error;
   }
 
-  #abort(reason: string, waitForOngoingWrite = true): Promise<void> {
+  #abort(
+    reason: string,
+    waitForOngoingWrite = true,
+    abortGeneration = true,
+  ): Promise<void> {
+    if (abortGeneration) this.abortController.abort();
     if (!this.#abortPromise) {
+      this.#failed = true;
       this.#cancelScheduledFlush();
-      this.abortController.abort();
       this.#abortPromise = this.#abortCreatedStream(
         reason,
         waitForOngoingWrite,

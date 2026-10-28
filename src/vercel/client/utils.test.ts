@@ -1,10 +1,10 @@
 import type { StepResult } from "ai";
 import { describe, expect, test } from "vitest";
-import { hasSuccessfulToolCall, willContinue } from "./utils.js";
+import { hasSuccessfulToolCall } from "./utils.js";
 
-// Minimal StepResult builder — only the fields willContinue and
-// hasSuccessfulToolCall actually read. Loosely typed on purpose so test
-// fixtures can be terse; cast at the boundary.
+// Minimal StepResult builder with only the fields hasSuccessfulToolCall
+// reads. Loosely typed on purpose so test fixtures can be terse; cast at the
+// boundary.
 type StepFixture = {
   finishReason?: string;
   content?: Array<{ type: string; toolName?: string }>;
@@ -21,10 +21,6 @@ function makeStep(partial: StepFixture): StepResult<any> {
     ...partial,
   } as unknown as StepResult<any>;
 }
-
-// Never stops, so `willContinue` returning true means it reached the end
-// rather than taking the early `toolCalls > completed` bail.
-const neverStop = () => false;
 
 describe("hasSuccessfulToolCall", () => {
   test("returns true when last step has a tool-result for the named tool", () => {
@@ -62,42 +58,5 @@ describe("hasSuccessfulToolCall", () => {
 
   test("returns false when steps is empty", () => {
     expect(hasSuccessfulToolCall("search")({ steps: [] })).toBe(false);
-  });
-});
-
-describe("willContinue", () => {
-  test("does not stop when a tool-error fills in for a missing tool-result", async () => {
-    // Two tool calls; one returns a result, the other errors.
-    const step = makeStep({
-      toolCalls: [
-        { toolCallId: "1", toolName: "a" },
-        { toolCallId: "2", toolName: "b" },
-      ],
-      toolResults: [{ toolCallId: "1", toolName: "a" }],
-      content: [
-        { type: "tool-result", toolName: "a" },
-        { type: "tool-error", toolName: "b" },
-      ],
-    });
-    // A stop condition that never stops, so reaching the end returns true.
-    // With `undefined` the function returns false either way, which cannot
-    // distinguish "took the early bail" from "ran to the end".
-    expect(await willContinue([step], neverStop)).toBe(true);
-  });
-
-  test("stops when a tool call has neither a result nor an error yet", async () => {
-    const step = makeStep({
-      toolCalls: [{ toolCallId: "1", toolName: "a" }],
-      toolResults: [],
-      content: [],
-    });
-    // Same never-stopping condition as above, so a `false` here can only
-    // come from the early `toolCalls > completed` bail.
-    expect(await willContinue([step], neverStop)).toBe(false);
-  });
-
-  test("stops when finishReason is not tool-calls", async () => {
-    const step = makeStep({ finishReason: "stop" });
-    expect(await willContinue([step], undefined)).toBe(false);
   });
 });
