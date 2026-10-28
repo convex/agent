@@ -796,7 +796,9 @@ export const listMessagesByThreadIdArgs = {
 export const listMessagesByThreadId = query({
   args: listMessagesByThreadIdArgs,
   handler: async (ctx, args) => {
-    const messages = await listMessagesByThreadIdHandler(ctx, args);
+    const messages = await listMessagesByThreadIdHandler(ctx, args, {
+      keepContinuedOrderTools: true,
+    });
     return { ...messages, page: messages.page.map(publicMessage) };
   },
   returns: vPaginationResult(vMessageDoc),
@@ -805,6 +807,7 @@ export const listMessagesByThreadId = query({
 async function listMessagesByThreadIdHandler(
   ctx: QueryCtx,
   args: ObjectType<typeof listMessagesByThreadIdArgs>,
+  { keepContinuedOrderTools = false } = {},
 ) {
   const statuses = args.statuses ?? vMessageStatus.members.map((m) => m.value);
   const last =
@@ -837,6 +840,25 @@ async function listMessagesByThreadIdHandler(
         ),
     ),
   );
+  // Excluding tool messages trims earlier orders. The order being continued
+  // keeps them, or an approval loses its call and decision (#409). Cloning
+  // reuses this handler and wants strict exclusion.
+  if (args.excludeToolMessages && last && keepContinuedOrderTools) {
+    streams.push(
+      ...statuses.map((status) =>
+        stream(ctx.db, schema)
+          .query("messages")
+          .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+            q
+              .eq("threadId", args.threadId)
+              .eq("status", status)
+              .eq("tool", true)
+              .eq("order", last.order),
+          )
+          .order(order),
+      ),
+    );
+  }
   const messages = await mergedStream(streams, ["order", "stepOrder"]).paginate(
     args.paginationOpts ?? {
       numItems: DEFAULT_RECENT_MESSAGES,

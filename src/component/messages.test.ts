@@ -1667,4 +1667,48 @@ describe("cloneThread", () => {
       }
     }
   });
+
+  test("excludeToolMessages skips tool messages in the boundary order", async () => {
+    const { t, sourceThreadId, targetThreadId, targetRows } = await seed();
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId: sourceThreadId,
+      messages: [
+        { message: { role: "user", content: "four" } },
+        {
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                input: {},
+                toolCallId: "1",
+                toolName: "tool",
+              },
+            ],
+          },
+        },
+        {
+          message: {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolName: "tool",
+                result: "foo",
+                toolCallId: "1",
+              },
+            ],
+          },
+        },
+        { message: { role: "assistant", content: "four answer" } },
+      ],
+    });
+    await t.action(api.messages.cloneThread, {
+      sourceThreadId,
+      targetThreadId,
+      excludeToolMessages: true,
+      upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
+    });
+    expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
+  });
 });

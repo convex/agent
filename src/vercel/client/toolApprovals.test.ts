@@ -1,9 +1,9 @@
-import type { ModelMessage, ToolModelMessage } from "ai";
+import { stepCountIs, type ModelMessage, type ToolModelMessage } from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod/v4";
 import type { Message } from "../../validators.js";
 import { Agent, createTool, type ContextHandler } from "../index.js";
-import { MockLanguageModel } from "./mockModel.js";
+import { MockLanguageModel, mockModel } from "./mockModel.js";
 import { components, initConvexTest } from "./setup.test.js";
 
 const executed: string[] = [];
@@ -1087,4 +1087,86 @@ describe("tool approval semantics", () => {
       expect.stringContaining("Auto-denying unresolved tool approval b"),
     );
   });
+});
+
+describe("approval continuation with excludeToolMessages", () => {
+  function setup() {
+    const ran: string[] = [];
+    const excludingAgent = new Agent(components.agent, {
+      name: "exclude-tool-messages-approval",
+      contextOptions: { excludeToolMessages: true },
+      stopWhen: stepCountIs(5),
+      tools: {
+        echo: createTool({
+          inputSchema: z.object({ tag: z.string() }),
+          needsApproval: true,
+          execute: async (_ctx, { tag }) => {
+            ran.push(tag);
+            return tag;
+          },
+        }),
+      },
+      languageModel: mockModel({
+        contentSteps: [
+          [
+            {
+              type: "tool-call",
+              toolCallId: "call-x",
+              toolName: "echo",
+              input: JSON.stringify({ tag: "x" }),
+            },
+          ],
+          [{ type: "text", text: "Done" }],
+        ],
+      }),
+    });
+    return { ran, excludingAgent, t: initConvexTest() };
+  }
+
+  test.each(["generateText", "streamText"] as const)(
+    "%s runs the approved tool",
+    async (mode) => {
+      const { ran, excludingAgent, t } = setup();
+      const { threadId, approvalId } = await t.action(async (ctx) => {
+        const { threadId } = await excludingAgent.createThread(ctx);
+        const first = await excludingAgent.generateText(
+          ctx,
+          { threadId },
+          { prompt: "Echo x" },
+        );
+        const approvalId = first.steps
+          .flatMap((step) => step.content)
+          .flatMap((part) =>
+            part.type === "tool-approval-request" ? [part.approvalId] : [],
+          )[0];
+        return { threadId, approvalId };
+      });
+      expect(approvalId).toBeDefined();
+      const { messageId } = await t.run((ctx) =>
+        excludingAgent.approveToolCall(ctx, { threadId, approvalId }),
+      );
+
+      const text = await t.action(async (ctx) => {
+        if (mode === "generateText") {
+          return (
+            await excludingAgent.generateText(
+              ctx,
+              { threadId },
+              { promptMessageId: messageId },
+            )
+          ).text;
+        }
+        const result = await excludingAgent.streamText(
+          ctx,
+          { threadId },
+          { promptMessageId: messageId },
+        );
+        await result.consumeStream();
+        return await result.text;
+      });
+
+      expect(ran).toEqual(["x"]);
+      expect(text).toBe("Done");
+    },
+  );
 });
