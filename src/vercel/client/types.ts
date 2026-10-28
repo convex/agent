@@ -64,6 +64,13 @@ type AssertAISDKv7<T> = T extends string
 
 export type AgentLanguageModel = AssertAISDKv7<LanguageModel>;
 
+// Per-call model ids are widened to string: a caller's args are intersected
+// with these, and crossing two copies of the model id union exceeds
+// TypeScript's union size limit (TS2590, https://github.com/convex/agent/issues/417).
+type AgentModelOverride = AssertAISDKv7<
+  string | Exclude<LanguageModel, string>
+>;
+
 export type WithoutModel<T> = T extends unknown ? Omit<T, "model"> : never;
 
 export type AgentPrompt = {
@@ -106,7 +113,7 @@ export type AgentPrompt = {
    * The model to use for the LLM calls. This will override the languageModel
    * specified in the Agent config.
    */
-  model?: AgentLanguageModel;
+  model?: AgentModelOverride;
 };
 
 export type Config = {

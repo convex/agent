@@ -19,6 +19,7 @@ import type {
   AgentCallSettings,
   AgentComponent,
   AgentLanguageModel,
+  AgentPrompt,
   WithoutModel,
   Config,
   Options,
@@ -105,7 +106,7 @@ export async function startGeneration<
      * The model to use for the LLM calls. This will override the model specified
      * in the Agent constructor.
      */
-    model?: AgentLanguageModel;
+    model?: AgentPrompt["model"];
     /**
      * The tools to use for the tool calls. This will override tools specified
      * in the Agent constructor or createThread / continueThread.
