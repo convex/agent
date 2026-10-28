@@ -69,8 +69,14 @@ stream deltas. This is very similar to
 
 ```ts
 import { paginationOptsValidator } from "convex/server";
-// highlight-next-line
-import { vStreamArgs, listUIMessages, syncStreams } from "@convex-dev/agent";
+import {
+  listUIMessages,
+  syncStreams,
+  // highlight-next-line
+  vStreamArgs,
+  // highlight-next-line
+  vStreamUIMessagesReturnValue,
+} from "@convex-dev/agent";
 import { components } from "./_generated/api";
 
 export const listThreadMessages = query({
@@ -81,6 +87,8 @@ export const listThreadMessages = query({
     // highlight-next-line
     streamArgs: vStreamArgs,
   },
+  // highlight-next-line
+  returns: vStreamUIMessagesReturnValue,
   handler: async (ctx, args) => {
     await authorizeThreadAccess(ctx, threadId);
 
