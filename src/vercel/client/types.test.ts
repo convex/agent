@@ -24,9 +24,9 @@ expectTypeOf<
 type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
 type ManyModelIds = `provider/model-${Digit}${Digit}${Digit}`;
 type StartArgs<T> = Parameters<typeof startGeneration<T>>[2];
-declare const agent: Agent;
+declare const _agent: Agent;
 type AgentStartArgs<T extends object> = Parameters<
-  typeof agent.start<undefined, T>
+  typeof _agent.start<undefined, T>
 >[1];
 expectTypeOf<{ model: ManyModelIds }>().toExtend<
   StartArgs<{ model: ManyModelIds }>
