@@ -833,11 +833,7 @@ async function listMessagesByThreadIdHandler(
           }
           return qq;
         })
-        .order(order)
-        .filterWith(
-          // We allow all messages on the same order.
-          async (m) => !last || m.order <= last.order,
-        ),
+        .order(order),
     ),
   );
   // Excluding tool messages trims earlier orders. The order being continued
