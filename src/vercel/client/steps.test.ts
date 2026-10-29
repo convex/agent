@@ -105,6 +105,22 @@ function retriedModel() {
   return { model: m, calls: () => calls };
 }
 
+// The provider rejects the request before streaming anything.
+function rejectingModel() {
+  let calls = 0;
+  const m = mockModel({
+    doStream: async () => {
+      calls++;
+      throw new Error("provider rejected");
+    },
+    doGenerate: async () => {
+      calls++;
+      throw new Error("provider rejected");
+    },
+  });
+  return { model: m, calls: () => calls };
+}
+
 type Row = { role?: string; parts: string[]; status: string };
 
 async function readThread(ctx: ActionCtx, threadId: string) {
@@ -217,14 +233,17 @@ const run = app.action({
     awaitTextOnly: v.optional(v.boolean()),
     retryFirstAttempt: v.optional(v.boolean()),
     stopAtAnswer: v.optional(v.boolean()),
+    rejectRequest: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const m = args.retryFirstAttempt
-      ? retriedModel()
-      : model(
-          args.scenario === "toolCalls" ? "tool-calls" : "stop",
-          args.failSecond ?? false,
-        );
+    const m = args.rejectRequest
+      ? rejectingModel()
+      : args.retryFirstAttempt
+        ? retriedModel()
+        : model(
+            args.scenario === "toolCalls" ? "tool-calls" : "stop",
+            args.failSecond ?? false,
+          );
     // What a retry from the same prompt does.
     const restart = async () => {
       const { page } = await ctx.runQuery(
@@ -381,6 +400,7 @@ async function go(args: {
   awaitTextOnly?: boolean;
   retryFirstAttempt?: boolean;
   stopAtAnswer?: boolean;
+  rejectRequest?: boolean;
 }) {
   const t = createTest();
   const threadId = await t.run((ctx) =>
@@ -472,6 +492,13 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
     expect(r.usageCalls).toBe(runner === "generateText" ? 1 : 2);
   });
 
+  test("a rejected request fails the generation", async () => {
+    const r = await go({ runner, scenario: "toolCalls", rejectRequest: true });
+    expect(r.saved).toEqual([USER, FAILED]);
+    expect(r.streams).toEqual(streamed ? ["finished"] : []);
+    if (runner === "generateText") expect(r.error).toBe("provider rejected");
+  });
+
   test("stopWhen sees what onStepEnd set", async () => {
     const r = await go({
       runner,
@@ -497,6 +524,18 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
       abortInStepEnd: true,
     });
     expect(r.saved).toEqual([USER, ...LOOKUP]);
+  });
+
+  test("an abort in onStepEnd still reports a failed step save", async () => {
+    const r = await go({
+      runner,
+      scenario: "toolCalls",
+      stopFromStepEnd: true,
+      abortInStepEnd: true,
+      failSave: "first",
+    });
+    expect(r.saved).toEqual([USER, FAILED]);
+    if (awaited) expect(r.error).toBe("first save failed");
   });
 
   test("an abort during a step save stops the next step", async () => {
