@@ -259,6 +259,23 @@ const streamTextCleanupFailure = app.action({
   },
 });
 
+const streamTextFullStreamErrors = app.action({
+  args: { threadId: v.string(), returnImmediately: v.boolean() },
+  handler: async (ctx, { threadId, returnImmediately }) => {
+    const result = await failingAgent.streamText(
+      ctx,
+      { threadId },
+      { prompt: "Test", onError: () => {} },
+      { saveStreamDeltas: { returnImmediately, throttleMs: 0 } },
+    );
+    const errors: string[] = [];
+    for await (const part of result.fullStream) {
+      if (part.type === "error") errors.push(errorToString(part.error));
+    }
+    return errors;
+  },
+});
+
 const streamTextRejectedRequest = app.action({
   args: {
     threadId: v.string(),
@@ -374,6 +391,7 @@ const { api, createTest } = app.defineModules({
     streamTextNoStorage,
     streamTextNoStorageImmediate,
     streamTextCleanupFailure,
+    streamTextFullStreamErrors,
     streamTextRejectedRequest,
     streamTextAbortedMidStream,
     streamTextEmptyNoStorageAwaited,
@@ -567,6 +585,23 @@ describe("streamText abort cleanup", () => {
     expect(streaming).toHaveLength(0);
     expect(aborted).toHaveLength(1);
   });
+});
+
+describe("provider errors reach fullStream", () => {
+  test.each([false, true])(
+    "with saveStreamDeltas (returnImmediately: %s)",
+    async (returnImmediately) => {
+      const t = createTest();
+      const threadId = await t.run(async (ctx) =>
+        createThread(ctx, components.agent, { userId: "u1" }),
+      );
+      const errors = await t.action(api.streamText.streamTextFullStreamErrors, {
+        threadId,
+        returnImmediately,
+      });
+      expect(errors).toEqual([PROVIDER_FAILURE_TEXT]);
+    },
+  );
 });
 
 describe("provider rejects the first request (issue #387)", () => {
