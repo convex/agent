@@ -216,6 +216,7 @@ const run = app.action({
     abortDuringSave: v.optional(v.boolean()),
     awaitTextOnly: v.optional(v.boolean()),
     retryFirstAttempt: v.optional(v.boolean()),
+    stopAtAnswer: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const m = args.retryFirstAttempt
@@ -275,6 +276,21 @@ const run = app.action({
       ],
       maxRetries: 0,
       ...(args.retryFirstAttempt ? { streamRetries: 1 } : {}),
+      ...(args.stopAtAnswer
+        ? {
+            experimental_transform: <Part extends { type: string }>({
+              stopStream,
+            }: {
+              stopStream: () => void;
+            }) =>
+              new TransformStream<Part, Part>({
+                transform(part, controller) {
+                  if (part.type === "text-delta") stopStream();
+                  else controller.enqueue(part);
+                },
+              }),
+          }
+        : {}),
       abortSignal: abort.signal,
       ...(args.scenario === "deniedApproval"
         ? { toolApproval: () => ({ type: "denied" as const, reason: "No." }) }
@@ -321,7 +337,7 @@ const run = app.action({
         );
         if (args.awaitTextOnly) {
           await result.text;
-          return { saved: await readThread(ctx, args.threadId) };
+          return { error, saved: await readThread(ctx, args.threadId) };
         }
         await result.consumeStream();
       }
@@ -329,7 +345,7 @@ const run = app.action({
       error = errorToString(e);
     }
     if (args.awaitTextOnly) {
-      return { saved: await readThread(ctx, args.threadId) };
+      return { error, saved: await readThread(ctx, args.threadId) };
     }
     // Let a returnImmediately generation's own cleanup land.
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -364,6 +380,7 @@ async function go(args: {
   abortDuringSave?: boolean;
   awaitTextOnly?: boolean;
   retryFirstAttempt?: boolean;
+  stopAtAnswer?: boolean;
 }) {
   const t = createTest();
   const threadId = await t.run((ctx) =>
@@ -497,6 +514,16 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
     expect(r.saved).toEqual([USER, ...LOOKUP, ANSWER]);
   });
 
+  test("the result rejects when the answer fails to save", async () => {
+    const r = await go({
+      runner,
+      scenario: "toolCalls",
+      failSave: "final",
+      awaitTextOnly: true,
+    });
+    expect(r.error).toBe("final save failed");
+  });
+
   test.skipIf(runner === "generateText")(
     "a stream retry after a provider error saves the answer (#428)",
     async () => {
@@ -511,6 +538,18 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
         saved: [USER, ANSWER],
         streams: streamed ? ["finished"] : [],
       });
+    },
+  );
+
+  test.skipIf(runner === "generateText")(
+    "a transform that stops the stream keeps the steps before it",
+    async () => {
+      const r = await go({ runner, scenario: "toolCalls", stopAtAnswer: true });
+      expect(r.modelCalls).toBe(2);
+      // The SDK drops the rest of the step, so it never ends and its pending
+      // message is left, as on main: a transform cannot tell this end from a
+      // stream retry.
+      expect(r.saved).toEqual([USER, ...LOOKUP, PENDING]);
     },
   );
 
