@@ -113,11 +113,7 @@ import type {
   WithoutModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
-import {
-  errorToString,
-  hasSuccessfulToolCall,
-  willContinue,
-} from "./client/utils.js";
+import { errorToString, hasSuccessfulToolCall } from "./client/utils.js";
 
 export { isStepCount, stepCountIs } from "ai";
 export { hasSuccessfulToolCall };
@@ -477,6 +473,14 @@ export class Agent<
       createPendingMessage?: boolean,
     ) => Promise<void>;
     fail: (reason: string) => Promise<void>;
+    endStep: <TOOLS extends ToolSet>(
+      step: StepResult<TOOLS, RUNTIME_CONTEXT>,
+    ) => void;
+    beforeStep: (
+      options: { stepNumber: number; responseMessages: ModelMessage[] },
+      streamId?: string,
+    ) => Promise<void>;
+    end: (options?: { error?: string; streamId?: string }) => Promise<void>;
     getSavedMessages: () => MessageDoc[];
   }> {
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
@@ -545,40 +549,28 @@ export class Agent<
     );
 
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
-    const steps: StepResult<Tools, RUNTIME_CONTEXT>[] = [];
-    let initialResponseMessages: ModelMessage[] = [];
-    let initialResponseMessagesSaved = false;
     try {
       const result = (await generateText<Tools, RUNTIME_CONTEXT, OUTPUT>({
         ...args,
         prepareStep: async (options) => {
-          if (options.stepNumber === 0) {
-            initialResponseMessages = [...options.responseMessages];
-          }
+          await call.beforeStep(options);
           const result = await generateTextArgs.prepareStep?.(options);
           call.updateModel(result?.model ?? options.model);
           return result;
         },
-        onStepEnd: async (step) => {
-          steps.push(step);
-          await call.save(
-            {
-              step,
-              responseMessages: [
-                ...(initialResponseMessagesSaved
-                  ? []
-                  : initialResponseMessages),
-                ...step.response.messages,
-              ],
-            },
-            await willContinue(steps, args.stopWhen),
-          );
-          initialResponseMessagesSaved = true;
+        onStepEnd: (step) => {
+          call.endStep(step);
           return (
             generateTextArgs.onStepEnd ?? generateTextArgs.onStepFinish
           )?.(step);
         },
+        onEnd: async (event) => {
+          // The SDK ignores this throwing; end() rejects again below.
+          await call.end();
+          return (generateTextArgs.onEnd ?? generateTextArgs.onFinish)?.(event);
+        },
       })) as GenerateTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
+      await call.end();
       const metadata: GenerationOutputMetadata = {
         promptMessageId,
         order,

@@ -196,6 +196,9 @@ const addMessagesArgs = {
    * throwing. A caller passing an id that never existed still gets an error.
    */
   abandonIfPromptMissing: v.optional(v.boolean()),
+  // The stream these messages were generated with. If someone aborted it,
+  // they are saved as failed.
+  streamId: v.optional(v.id("streamingMessages")),
   order: v.optional(v.union(v.number(), v.literal("next"))),
   agentName: v.optional(v.string()),
   messages: v.array(vMessageWithMetadataInternal),
@@ -243,6 +246,7 @@ async function addMessagesHandler(
     messages,
     promptMessageId,
     abandonIfPromptMissing,
+    streamId,
     order: requestedOrder,
     pendingMessageId,
     hideFromUserIdSearch,
@@ -323,6 +327,11 @@ async function addMessagesHandler(
     const maxMessage = await getMaxMessage(ctx, threadId);
     order = maxMessage?.order ?? -1;
     stepOrder = maxMessage?.stepOrder ?? -1;
+  }
+  const stream = streamId && (await ctx.db.get("streamingMessages", streamId));
+  if (stream && stream.state.kind === "aborted") {
+    fail = true;
+    error = stream.state.reason;
   }
   const toReturn: Doc<"messages">[] = [];
   if (embeddings) {

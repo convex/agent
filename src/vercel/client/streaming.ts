@@ -246,7 +246,10 @@ export class DeltaStreamer<T> {
       onAsyncAbort: (reason: string) => Promise<void>;
       abortSignal: AbortSignal | undefined;
       compress: ((parts: T[]) => T[]) | null;
-      /** Defaults to false, meaning `consumeStream` finishes the stream. */
+      /**
+       * @deprecated The agent no longer uses this. Defaults to false, meaning
+       * `consumeStream` finishes the stream.
+       */
       finishHandledExternally?: boolean;
       materialize?: (parts: T[]) => Promise<{
         parts: T[];
@@ -433,6 +436,8 @@ export class DeltaStreamer<T> {
   }
 
   /**
+   * @deprecated The agent no longer uses this.
+   *
    * For the `returnImmediately` path, where nothing awaits consumption and the
    * save has to happen inline (issue #265).
    *

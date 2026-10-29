@@ -840,6 +840,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           order?: number | "next";
           pendingMessageId?: string;
           promptMessageId?: string;
+          streamId?: string;
           threadId: string;
           userId?: string;
         },

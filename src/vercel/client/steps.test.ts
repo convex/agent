@@ -553,14 +553,14 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
     if (awaited) expect(r.error).toBe("first save failed");
   });
 
-  test("an abort during a step save stops the next step", async () => {
+  test("an abort during a step save fails the next step", async () => {
     const r = await go({
       runner,
       scenario: "toolCalls",
       abortDuringSave: true,
     });
     expect(r.modelCalls).toBe(1);
-    expect(r.saved).toEqual([USER, ...LOOKUP]);
+    expect(r.saved).toEqual([USER, ...LOOKUP, FAILED]);
   });
 
   test("the answer is saved before the result resolves", async () => {
@@ -637,7 +637,14 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
       restartAfterFirstStep: true,
     });
     expect(r.modelCalls).toBe(1);
-    // The retry's own pending message, which this harness never fills.
-    expect(r.saved).toEqual([USER, ...LOOKUP, PENDING]);
+    // The step saves after the retry, so it fails like one cut off by it. The
+    // retry's own pending message is never filled by this harness.
+    expect(r.saved).toEqual([
+      USER,
+      { ...LOOKUP[0], status: "failed" },
+      PENDING,
+      { ...LOOKUP[1], status: "failed" },
+      FAILED,
+    ]);
   });
 });
