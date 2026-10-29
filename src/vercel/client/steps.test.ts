@@ -234,6 +234,7 @@ const run = app.action({
     retryFirstAttempt: v.optional(v.boolean()),
     stopAtAnswer: v.optional(v.boolean()),
     rejectRequest: v.optional(v.boolean()),
+    throwAtFinish: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const m = args.rejectRequest
@@ -295,6 +296,19 @@ const run = app.action({
       ],
       maxRetries: 0,
       ...(args.retryFirstAttempt ? { streamRetries: 1 } : {}),
+      ...(args.throwAtFinish
+        ? {
+            experimental_transform: <Part extends { type: string }>() =>
+              new TransformStream<Part, Part>({
+                transform(part, controller) {
+                  if (part.type === "finish") {
+                    throw new Error("transform failed");
+                  }
+                  controller.enqueue(part);
+                },
+              }),
+          }
+        : {}),
       ...(args.stopAtAnswer
         ? {
             experimental_transform: <Part extends { type: string }>({
@@ -401,6 +415,7 @@ async function go(args: {
   retryFirstAttempt?: boolean;
   stopAtAnswer?: boolean;
   rejectRequest?: boolean;
+  throwAtFinish?: boolean;
 }) {
   const t = createTest();
   const threadId = await t.run((ctx) =>
@@ -589,6 +604,20 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
       // message is left, as on main: a transform cannot tell this end from a
       // stream retry.
       expect(r.saved).toEqual([USER, ...LOOKUP, PENDING]);
+    },
+  );
+
+  test.skipIf(runner === "generateText")(
+    "a transform that throws at the end keeps the answer",
+    async () => {
+      const r = await go({
+        runner,
+        scenario: "toolCalls",
+        throwAtFinish: true,
+      });
+      expect(r.saved).toEqual([USER, ...LOOKUP, ANSWER]);
+      expect(r.usageCalls).toBe(2);
+      if (awaited) expect(r.error).toBe("transform failed");
     },
   );
 
