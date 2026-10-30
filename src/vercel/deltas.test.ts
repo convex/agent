@@ -309,7 +309,7 @@ describe("mergeDeltas", () => {
       [{ type: "text-delta", id: "t0", delta: "world" }] as UIMessageChunk[],
       state,
     ));
-    ({ message: msg, streamState: state } = applyUIMessageChunksIncremental(
+    ({ message: msg } = applyUIMessageChunksIncremental(
       msg,
       [
         { type: "text-delta", id: "t0", delta: "!" },
@@ -395,7 +395,7 @@ describe("mergeDeltas", () => {
       (completedToolPart as { preliminary?: boolean }).preliminary,
     ).toBeUndefined();
 
-    ({ message: msg, streamState: state } = applyUIMessageChunksIncremental(
+    ({ message: msg } = applyUIMessageChunksIncremental(
       msg,
       [
         {
@@ -473,7 +473,7 @@ describe("mergeDeltas", () => {
       }),
     );
 
-    ({ message, streamState } = applyUIMessageChunksIncremental(
+    ({ message } = applyUIMessageChunksIncremental(
       message,
       [{ type: "tool-output-denied", toolCallId: "call-1" }],
       streamState,
@@ -676,7 +676,7 @@ describe("mergeDeltas", () => {
       ] as UIMessageChunk[],
       state,
     ));
-    ({ message: msg, streamState: state } = applyUIMessageChunksIncremental(
+    ({ message: msg } = applyUIMessageChunksIncremental(
       msg,
       [
         {
@@ -778,7 +778,7 @@ describe("mergeDeltas", () => {
       [{ type: "start" }, { type: "start-step" }] as UIMessageChunk[],
       state,
     ));
-    ({ message: msg, streamState: state } = applyUIMessageChunksIncremental(
+    ({ message: msg } = applyUIMessageChunksIncremental(
       msg,
       [
         {
@@ -822,7 +822,7 @@ describe("mergeDeltas", () => {
       state,
     ));
     // Deltas in a later batch must land on the part matching their id.
-    ({ message: msg, streamState: state } = applyUIMessageChunksIncremental(
+    ({ message: msg } = applyUIMessageChunksIncremental(
       msg,
       [
         { type: "text-delta", id: "t1", delta: "B" },
