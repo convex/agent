@@ -251,7 +251,7 @@ export async function startGeneration<
     );
     const claim = await ctx.runMutation(
       component.messages.claimPendingMessage,
-      { messageId: args.pendingMessageId },
+      { threadId, messageId: args.pendingMessageId },
     );
     if (claim.status !== "claimed") {
       throw new AlreadyClaimedError(claim.status, claim.messageId);

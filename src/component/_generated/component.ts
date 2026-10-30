@@ -1558,7 +1558,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       claimPendingMessage: FunctionReference<
         "mutation",
         "internal",
-        { messageId: string },
+        { messageId: string; threadId: string },
         | {
             message: {
               _creationTime: number;

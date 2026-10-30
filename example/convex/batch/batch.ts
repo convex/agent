@@ -99,8 +99,9 @@ export async function startThreadBatch(
 }
 
 /**
- * A model that answers the first call with the batch's result and defers to
- * the real model after that. Passing it to `agent.generateText` saves the
+ * A model that answers the prompt the batch saw with the batch's result, and
+ * defers to the real model once steps after it were saved, e.g. when a retry
+ * continues after the batched tool call already ran. Passing it to `agent.generateText` saves the
  * result through the normal path: the stored message shape, usage reporting,
  * embeddings, and tool execution plus any follow-up steps.
  */
@@ -108,17 +109,15 @@ function replayModel(
   result: LanguageModelV4GenerateResult,
   model: LanguageModelV4,
 ): LanguageModelV4 {
-  let replayed = false;
   return {
     specificationVersion: "v4",
     provider: model.provider,
     modelId: model.modelId,
     supportedUrls: model.supportedUrls,
-    doGenerate: async (options) => {
-      if (replayed) return model.doGenerate(options);
-      replayed = true;
-      return result;
-    },
+    doGenerate: async (options) =>
+      options.prompt.at(-1)?.role === "user"
+        ? result
+        : model.doGenerate(options),
     doStream: (options) => model.doStream(options),
   };
 }
@@ -151,7 +150,7 @@ export async function saveBatchResults(
       result: { status: "failed", error },
     });
   const missing = new Map(doc.items.map((i) => [i.promptMessageId, i]));
-  let running = false;
+  let unfinished = false;
   const results = await batchApi.doGetBatchResults({ batchId: doc.batch.id });
   for await (const item of results) {
     const queued = missing.get(item.id);
@@ -172,14 +171,15 @@ export async function saveBatchResults(
       );
     } catch (error) {
       if (error instanceof AlreadyClaimedError) {
-        running ||= error.status === "running";
+        unfinished ||= error.status === "running";
       } else {
-        // generateText already marked its message failed.
+        // generateText failed its message, and the next poll continues it.
         console.error("Saving batch result", error);
+        unfinished = true;
       }
     }
   }
-  if (running) return "pending";
+  if (unfinished) return "pending";
   for (const { pendingMessageId } of missing.values()) {
     await fail(pendingMessageId, "Missing from batch results");
   }

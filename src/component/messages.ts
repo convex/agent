@@ -582,7 +582,7 @@ export const CLAIM_LEASE_MS = 10 * 60 * 1000;
  * finds its own message failed and stops.
  */
 export const claimPendingMessage = mutation({
-  args: { messageId: v.id("messages") },
+  args: { threadId: v.id("threads"), messageId: v.id("messages") },
   returns: v.union(
     v.object({
       status: v.literal("claimed"),
@@ -594,11 +594,14 @@ export const claimPendingMessage = mutation({
       messageId: v.id("messages"),
     }),
   ),
-  handler: async (ctx, { messageId }) => {
+  handler: async (ctx, { threadId, messageId }) => {
     const key = await ctx.db.get("messages", messageId);
-    assert(key, `Message ${messageId} not found`);
-    const latest = (await orderedMessagesStream(ctx, {
-      threadId: key.threadId,
+    assert(
+      key?.threadId === threadId && key.message?.role === "assistant",
+      `Message ${messageId} is not an assistant message in thread ${threadId}`,
+    );
+    const answer = await orderedMessagesStream(ctx, {
+      threadId,
       sortOrder: "desc",
       startOrder: key.order,
       startOrderBound: "eq",
@@ -606,8 +609,14 @@ export const claimPendingMessage = mutation({
       .filterWith(
         async (m) => m._id === messageId || m.claim?.key === messageId,
       )
-      .first())!;
-    const now = Date.now();
+      .collect();
+    // The latest claim is the current attempt. A lapsed attempt's text can be
+    // recovered after it, so its messages can come later in the order.
+    const lastClaim = Math.max(...answer.map((m) => m.claim?.at ?? -Infinity));
+    const latest = answer.find(
+      (m) => (m.claim?.at ?? -Infinity) === lastClaim,
+    )!;
+    const now = Math.max(Date.now(), lastClaim + 1);
     const claimed = async (message: Doc<"messages">) => {
       await ctx.db.patch("messages", message._id, {
         claim: { key: messageId, at: now },
