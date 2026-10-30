@@ -5,7 +5,6 @@ import { corsRouter } from "convex-helpers/server/cors";
 const http = httpRouter();
 
 const cors = corsRouter(http, {
-  allowCredentials: true,
   allowedHeaders: ["Authorization", "Content-Type"],
   exposedHeaders: ["Content-Type", "Content-Length", "X-Message-Id"],
 });
