@@ -223,6 +223,7 @@ describe("files", () => {
 
     vi.advanceTimersByTime(1000);
     const lastTouchedBefore = Date.now();
+    await add("fresh");
     const { page } = await t.query(api.files.getFilesToDelete, {
       paginationOpts: { numItems: 10, cursor: null },
       lastTouchedBefore,
