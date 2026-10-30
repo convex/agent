@@ -204,4 +204,78 @@ describe("files", () => {
       }),
     ).resolves.toMatchObject({ page: [] });
   });
+
+  test("a cutoff lists recent files, and keeps those used at or after it", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const t = convexTest(schema, modules);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const add = (name: string) =>
+      t.mutation(api.files.addFile, {
+        storageId: `storage-${name}`,
+        hash: `hash-${name}`,
+        filename: `${name}.txt`,
+        mediaType: "text/plain",
+      });
+    const { fileId: orphan } = await add("orphan");
+    const { fileId: referenced } = await add("referenced");
+    const { fileId: reused } = await add("reused");
+
+    vi.advanceTimersByTime(1000);
+    const lastTouchedBefore = Date.now();
+    const { page } = await t.query(api.files.getFilesToDelete, {
+      paginationOpts: { numItems: 10, cursor: null },
+      lastTouchedBefore,
+    });
+    expect(page.map((f) => f._id).sort()).toEqual(
+      [orphan, referenced, reused].sort(),
+    );
+
+    await t.mutation(api.files.copyFile, { fileId: referenced });
+    // Reuse doesn't add a reference: the message saving it does, later.
+    await t.mutation(api.files.useExistingFile, {
+      hash: "hash-reused",
+      filename: "reused.txt",
+      mediaType: "text/plain",
+    });
+    await expect(
+      t.mutation(api.files.deleteFiles, {
+        fileIds: page.map((f) => f._id),
+        lastTouchedBefore,
+      }),
+    ).resolves.toEqual([orphan]);
+    await expect(
+      t.query(api.files.get, { fileId: reused }),
+    ).resolves.not.toBeNull();
+    await expect(
+      t.query(api.files.get, { fileId: referenced }),
+    ).resolves.toMatchObject({ refcount: 1 });
+    error.mockRestore();
+  });
+
+  test.each([NaN, Date.now() + 60_000])(
+    "rejects a %s cutoff without deleting",
+    async (lastTouchedBefore) => {
+      const t = convexTest(schema, modules);
+      const { fileId } = await t.mutation(api.files.addFile, {
+        storageId: "storage-bad-cutoff",
+        hash: "hash-bad-cutoff",
+        filename: "bad.txt",
+        mediaType: "text/plain",
+      });
+      await expect(
+        t.query(api.files.getFilesToDelete, {
+          paginationOpts: { numItems: 10, cursor: null },
+          lastTouchedBefore,
+        }),
+      ).rejects.toThrow("lastTouchedBefore");
+      await expect(
+        t.mutation(api.files.deleteFiles, {
+          fileIds: [fileId],
+          lastTouchedBefore,
+        }),
+      ).rejects.toThrow("lastTouchedBefore");
+      await expect(t.query(api.files.get, { fileId })).resolves.not.toBeNull();
+    },
+  );
 });
