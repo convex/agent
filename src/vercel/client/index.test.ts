@@ -217,7 +217,7 @@ const generateObjectWithThread = app.action({
     });
     const result = await thread.generateObject({
       prompt: args.prompt,
-      schema: z.object({ prompt: z.any() }),
+      schema: z.object({ hello: z.string() }),
     });
     return { object: result.object };
   },
@@ -514,7 +514,7 @@ describe("Agent text/object generation", () => {
       userId: "6",
       prompt: "Object please",
     });
-    expect(result.object).toBeDefined();
+    expect(result.object).toEqual({ hello: "world" });
   });
 });
 
