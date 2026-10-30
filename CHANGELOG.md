@@ -6,6 +6,7 @@
   instead of leaving it pending (#438)
 - Keep the whole order being continued in context, past the recent window (#433,
   #436)
+- `useStreamingText` decodes UTF-8 characters split across chunks (#440)
 
 ## 0.7.9
 

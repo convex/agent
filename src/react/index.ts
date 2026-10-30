@@ -67,9 +67,11 @@ export function useStreamingText(
           if (done) {
             break;
           }
-          accumulatedText += decoder.decode(value);
+          accumulatedText += decoder.decode(value, { stream: true });
           setText(accumulatedText);
         }
+        accumulatedText += decoder.decode();
+        setText(accumulatedText);
       } catch (e) {
         if (e instanceof Error && e.name !== "AbortError") {
           setError(e);
