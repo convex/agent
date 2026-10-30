@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `streamObject` fails its pending message when the object fails its schema,
+  instead of leaving it pending
+
 ## 0.7.9
 
 - Uses built-in pagination instead of the paginator for listing threads by

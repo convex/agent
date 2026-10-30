@@ -775,19 +775,25 @@ export class Agent<
         return args.onError?.(error);
       },
       onFinish: async (result) => {
-        await save({
-          object: {
-            object: result.object,
-            finishReason: result.error ? "error" : "stop",
-            usage: result.usage,
-            warnings: result.warnings,
-            request: await stream.request,
-            response: result.response,
-            providerMetadata: result.providerMetadata,
-            toJsonResponse: stream.toTextStreamResponse,
-            reasoning: undefined,
-          },
-        });
+        try {
+          await save({
+            object: {
+              object: result.object,
+              finishReason: result.error ? "error" : "stop",
+              usage: result.usage,
+              warnings: result.warnings,
+              request: await stream.request,
+              response: result.response,
+              providerMetadata: result.providerMetadata,
+              toJsonResponse: stream.toTextStreamResponse,
+              reasoning: undefined,
+            },
+          });
+        } finally {
+          // A schema failure arrives here, not in onError. Without storage
+          // the save above still reports usage; with it, the save throws.
+          if (result.error) await fail(errorToString(result.error));
+        }
         return args.onFinish?.(result);
       },
     });
