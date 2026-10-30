@@ -133,7 +133,13 @@ Saving to the files has 3 components:
 2. Saving a reference (the storageId) to the file in the component. This will
    automatically keep track of how many messages are referencing the file, so
    you can vacuum files that are no longer used (see
-   [files/vacuum.ts](../example/convex/files/vacuum.ts)).
+   [files/vacuum.ts](../example/convex/files/vacuum.ts)). Files are kept for 24
+   hours after they were last used. To clean up sooner, e.g. in a development
+   reset, pass the same past `lastTouchedBefore` timestamp to `getFilesToDelete`
+   and `deleteFiles`, without an age filter of your own like the one in
+   `vacuum.ts`. Files used after it are kept, but unreferenced files from before
+   it are deleted, including uploads and generated files not yet saved in a
+   message, so stop those first.
 3. Inserting a URL in place of the data in the message sent to the LLM, along
    with the media type and other metadata provided. It will be inferred if not
    provided in
