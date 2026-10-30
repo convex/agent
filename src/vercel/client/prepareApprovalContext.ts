@@ -1,340 +1,232 @@
 import type { AssistantModelMessage, ModelMessage, ToolModelMessage } from "ai";
-import { convexToJson, type Value } from "convex/values";
+import type { MessageDoc } from "../../validators.js";
+import { docsToModelMessages } from "../mapping.js";
 
-type AssistantPart = Exclude<AssistantModelMessage["content"], string>[number];
-type Request = Extract<AssistantPart, { type: "tool-approval-request" }>;
-type Call = Extract<AssistantPart, { type: "tool-call" }>;
 type ToolPart = ToolModelMessage["content"][number];
-type Response = Extract<ToolPart, { type: "tool-approval-response" }>;
-type Result = Extract<ToolPart, { type: "tool-result" }>;
+type Part =
+  | Exclude<AssistantModelMessage["content"], string>[number]
+  | ToolPart;
+type Request = Extract<Part, { type: "tool-approval-request" }>;
+type Response = Extract<Part, { type: "tool-approval-response" }>;
 
-type ApprovalPart = Request | Call | Response | Result;
+export type ApprovalPlan = {
+  hidden: Set<string>;
+  replay: Map<string, Response[]>;
+  unit: ModelMessage[];
+};
 
-const validRole = {
-  "tool-approval-request": "assistant",
-  "tool-call": "assistant",
-  "tool-approval-response": "tool",
-  "tool-result": "tool",
-} as const;
-const addedNoun = {
-  "tool-approval-request": "approval requests",
-  "tool-call": "approved tool calls",
-  "tool-approval-response": "approval decisions",
-  "tool-result": "results for approved tool calls",
-} as const;
-const removedNoun = {
-  "tool-approval-request": "request",
-  "tool-call": "call",
-  "tool-approval-response": "decision",
-  "tool-result": "result",
-} as const;
+// The AI SDK runs only the decisions in the prompt's last message, so approval
+// requests and decisions are protocol, not context. A context handler never
+// sees them or a call whose approval has not run, and the continued approvals
+// are appended after it from storage. Providers read their own decisions from
+// anywhere in the prompt, so those of provider-executed approvals that ran are
+// replayed after their call.
+export function planApprovals(
+  stored: MessageDoc[],
+  search: MessageDoc[],
+  continued: string[],
+): ApprovalPlan {
+  const plan: ApprovalPlan = { hidden: new Set(), replay: new Map(), unit: [] };
+  const state = scan(docsToModelMessages(stored));
+  collect(plan, state);
+  collect(plan, scan(docsToModelMessages(search)));
+  const calls: Part[] = [];
+  const decisions: Response[] = [];
+  for (const id of continued) {
+    const [request] = only(state.requests, "tool-approval-request", id);
+    const [decision] = only(state.decisions, "tool-approval-response", id);
+    if (!decision || state.settled(request)) continue;
+    const [call, ...others] = state.calls.get(request.toolCallId) ?? [];
+    if (!call || others.length > 0 || calls.includes(call)) {
+      throw new Error(`Approval ${id} must name exactly one tool call`);
+    }
+    calls.push(call, request);
+    decisions.push(decision);
+  }
+  if (decisions.length > 0) {
+    plan.unit = [
+      { role: "assistant", content: calls },
+      { role: "tool", content: decisions },
+    ] as ModelMessage[];
+  }
+  return plan;
+}
 
-// The AI SDK runs the approvals in the context's last message whose call has
-// no result in that same message (collectToolApprovals), and never sends a
-// local approval's request or decision to the provider. So a local approval
-// appears as request and decision only in the final synthesized pair, and
-// elsewhere as just its call and result.
-export function prepareApprovalContext(
+// What the context handler is given, and what is kept of what it returns.
+// Siblings decided in separate batches store each result after its own
+// decision, so once the protocol is gone each result is moved to directly
+// follow its call, once, as providers require.
+export function hideApprovals(
+  plan: ApprovalPlan,
+  segments: ModelMessage[][],
+): ModelMessage[][] {
+  const answers = new Map<string, ToolModelMessage>();
+  return segments
+    .map((messages) =>
+      strip(plan, messages).flatMap((message): ModelMessage[] => {
+        if (message.role === "tool") {
+          const content = message.content.filter((part) => {
+            const answer =
+              part.type === "tool-result" && answers.get(part.toolCallId);
+            if (!answer) return true;
+            const answered = answer.content.some(
+              (other) =>
+                other.type === "tool-result" &&
+                other.toolCallId === part.toolCallId,
+            );
+            if (!answered) {
+              answer.providerOptions ??= message.providerOptions;
+              answer.content.push(part);
+            }
+            return false;
+          });
+          return content.length > 0 ? [{ ...message, content }] : [];
+        }
+        const answer: ToolModelMessage = { role: "tool", content: [] };
+        const callIds = partsOf(message).flatMap((part) =>
+          part.type === "tool-call" ? [part.toolCallId] : [],
+        );
+        callIds.forEach((id) => answers.set(id, answer));
+        return callIds.length > 0 ? [message, answer] : [message];
+      }),
+    )
+    .map((messages) =>
+      messages.filter((m) => m.role !== "tool" || m.content.length > 0),
+    );
+}
+
+// The plan's parts are cloned on the way out, since they are the stored docs'
+// own objects and the SDK hands the prompt to prepareStep, which may edit it in
+// place.
+export function finishApprovals(
+  plan: ApprovalPlan,
   messages: ModelMessage[],
-  approvalIds: ReadonlySet<string>,
-  storedContext: ModelMessage[],
 ): ModelMessage[] {
-  const storedRequests = new Map<string, Request>();
-  for (const part of partsOf(storedContext)) {
-    if (part.type === "tool-approval-request") {
-      storedRequests.set(part.approvalId, part);
-    }
-  }
-  const approvalCallIds = new Set(
-    [...storedRequests.values()].map((request) => request.toolCallId),
-  );
-
-  const stored = new Map<string, ApprovalPart>();
-  const waitingProviderApprovalIds = new Set<string>();
-  const consumedProviderApprovalIds = new Set<string>();
-  for (const message of storedContext) {
-    if (message.role === "assistant") {
-      // Provider-owned approvals do not always produce a tool-result. A later
-      // assistant response is the durable evidence that they were consumed.
-      for (const approvalId of waitingProviderApprovalIds) {
-        consumedProviderApprovalIds.add(approvalId);
-      }
-      waitingProviderApprovalIds.clear();
-    }
-    for (const [key, part] of approvalParts(message, approvalCallIds)) {
-      const first = stored.get(key);
-      if (first && !sameApprovalPart(first, part)) {
-        throw new Error(
-          `Stored context has more than one ${part.type} for ${partId(part)}`,
-        );
-      }
-      stored.set(key, first ?? part);
-      if (
-        part.type === "tool-approval-response" &&
-        isProviderCall(stored, storedRequests.get(part.approvalId)!.toolCallId)
-      ) {
-        waitingProviderApprovalIds.add(part.approvalId);
-      }
-    }
-  }
-
-  // Every approval part a handler returns is a copy of a stored one. A handler
-  // may repeat a part (cloning the context, say), so the first copy is
-  // canonical and carries any part-level provider options it added.
-  const supplied = new Map<string, ApprovalPart>();
-  for (const message of messages) {
-    for (const [key, part] of approvalParts(message, approvalCallIds)) {
-      if (message.role !== validRole[part.type]) {
-        throw new Error(
-          `Continuation context has a ${part.type} in a ${message.role} message`,
-        );
-      }
-      const original = stored.get(key);
-      if (!original) {
-        throw new Error(
-          `Continuation context cannot add ${addedNoun[part.type]}`,
-        );
-      }
-      if (!sameApprovalPart(original, part)) {
-        throw new Error(
-          `Continuation context must preserve the stored ${part.type} for ${partId(part)}`,
-        );
-      }
-      if (!supplied.has(key)) supplied.set(key, part);
-    }
-  }
-  // An approval is kept or dropped whole, and the ones being continued are
-  // kept, so a handler can trim history but not separate a decision or result
-  // from the call it belongs to.
-  for (const request of storedRequests.values()) {
-    const keys = unitKeys(request).filter((key) => stored.has(key));
-    if (
-      !approvalIds.has(request.approvalId) &&
-      !keys.some((key) => supplied.has(key))
-    ) {
-      continue;
-    }
-    const missing = keys.find((key) => !supplied.has(key));
-    if (missing) {
-      const part = stored.get(missing)!;
-      throw new Error(
-        `Continuation context removed ${removedNoun[part.type]} for ${partId(part)}`,
-      );
-    }
-  }
-
-  const activeCallIds = new Set<string>();
-  const executable = new Set<string>();
-  const undecided = new Set<string>();
-  const deferred = new Set<string>();
-  for (const [approvalId, { toolCallId }] of storedRequests) {
-    if (approvalIds.has(approvalId)) activeCallIds.add(toolCallId);
-    if (
-      stored.has(`tool-result:${toolCallId}`) ||
-      consumedProviderApprovalIds.has(approvalId)
-    ) {
-      continue;
-    }
-    if (!approvalIds.has(approvalId)) deferred.add(toolCallId);
-    else if (stored.has(`tool-approval-response:${approvalId}`)) {
-      executable.add(toolCallId);
-    } else undecided.add(toolCallId);
-  }
-
-  // A handler may clone or reorder the context. The final call/response pair
-  // is built once from the canonical parts, so every other occurrence is
-  // dropped, and a completed call's result is re-emitted directly after each
-  // message that carries the call, so nothing a handler inserts can separate
-  // them for providers that require that adjacency.
-  const relocated = new Map<string, ToolModelMessage>();
-  for (const message of messages) {
-    if (message.role !== "tool") continue;
-    for (const part of message.content) {
-      if (
-        part.type === "tool-result" &&
-        activeCallIds.has(part.toolCallId) &&
-        !relocated.has(part.toolCallId)
-      ) {
-        relocated.set(part.toolCallId, { ...message, content: [part] });
-      }
-    }
-  }
-  // Message-level provider options (cache control, say) are the handler's,
-  // and a handler that targets one message usually means the last one, so the
-  // synthesized pair takes the options of the last message it absorbs.
-  let assistantOptions: ModelMessage["providerOptions"];
-  let toolOptions: ModelMessage["providerOptions"];
-  const projected: ModelMessage[] = [];
-  for (const message of messages) {
-    if (!Array.isArray(message.content)) {
-      projected.push(message);
-      continue;
-    }
-    const content = message.content.filter((part) => {
-      if (part.type === "tool-call" || part.type === "tool-approval-request") {
-        if (deferred.has(part.toolCallId) || undecided.has(part.toolCallId)) {
-          return false;
-        }
-        if (executable.has(part.toolCallId)) {
-          assistantOptions = message.providerOptions;
-          return false;
-        }
-        return (
-          part.type === "tool-call" || isProviderCall(stored, part.toolCallId)
-        );
-      }
-      if (part.type === "tool-approval-response") {
-        const { toolCallId } = storedRequests.get(part.approvalId)!;
-        if (executable.has(toolCallId)) {
-          toolOptions = message.providerOptions;
-          return false;
-        }
-        return !deferred.has(toolCallId) && isProviderCall(stored, toolCallId);
-      }
-      if (part.type === "tool-result" && relocated.has(part.toolCallId)) {
-        return false;
-      }
-      return true;
-    });
-    if (content.length === 0) continue;
-    projected.push({ ...message, content } as ModelMessage);
-    if (message.role !== "assistant") continue;
-    const results = content.flatMap((part) =>
-      part.type === "tool-call" && relocated.has(part.toolCallId)
-        ? [relocated.get(part.toolCallId)!]
+  // A handler can return history the plan never fetched. Its pending calls are
+  // hidden too, but only stored decisions are replayed.
+  const returned = { ...plan, hidden: new Set(plan.hidden) };
+  collect(returned, scan(messages), false);
+  const [kept] = hideApprovals(returned, [messages]);
+  const context = kept.flatMap((message, i): ModelMessage[] => {
+    const replayed = partsOf(message).flatMap((part) =>
+      part.type === "tool-call"
+        ? structuredClone(plan.replay.get(part.toolCallId) ?? [])
         : [],
     );
-    if (results.length > 0) {
-      projected.push({
-        ...results[0],
-        content: results.flatMap((result) => result.content),
-      });
+    // The SDK takes decisions in the prompt's last message as fresh ones.
+    const followed = i < kept.length - 1 || plan.unit.length > 0;
+    return message.role === "assistant" && replayed.length > 0 && followed
+      ? [message, { role: "tool", content: replayed }]
+      : [message];
+  });
+  // The SDK runs the continued approvals before it validates the prompt, so a
+  // call unanswered by the next user or system message would fail the
+  // generation after they ran, and a retry would run them again.
+  const unanswered = new Set<string>();
+  const requireAnswered = () => {
+    const [toolCallId] = unanswered;
+    if (toolCallId) {
+      throw new Error(`Context has tool call ${toolCallId} without its result`);
+    }
+  };
+  for (const message of context) {
+    if (message.role === "user" || message.role === "system") requireAnswered();
+    for (const part of partsOf(message)) {
+      if (part.type === "tool-call" && !part.providerExecuted) {
+        unanswered.add(part.toolCallId);
+      } else if (part.type === "tool-result") {
+        unanswered.delete(part.toolCallId);
+      }
     }
   }
-  if (executable.size > 0) {
-    const assistant: AssistantPart[] = [];
-    const tool: Response[] = [];
-    for (const approvalId of approvalIds) {
-      const { toolCallId } = storedRequests.get(approvalId)!;
-      if (!executable.has(toolCallId)) continue;
-      assistant.push(
-        supplied.get(`tool-call:${toolCallId}`) as Call,
-        supplied.get(`tool-approval-request:${approvalId}`) as Request,
-      );
-      tool.push(
-        supplied.get(`tool-approval-response:${approvalId}`) as Response,
-      );
+  requireAnswered();
+  return [...context, ...structuredClone(plan.unit)];
+}
+
+// A pending approval's call is hidden, and the decisions of a provider-executed
+// approval that ran are kept to replay.
+function collect(
+  plan: ApprovalPlan,
+  { requests, decisions, providerCalls, settled }: ReturnType<typeof scan>,
+  replay = true,
+) {
+  for (const request of [...requests.values()].flat()) {
+    const { approvalId, toolCallId } = request;
+    if (plan.replay.has(toolCallId)) continue;
+    if (!settled(request)) plan.hidden.add(toolCallId);
+    else if (replay && providerCalls.has(toolCallId)) {
+      plan.replay.set(toolCallId, decisions.get(approvalId) ?? []);
     }
-    projected.push(
-      {
-        role: "assistant",
-        content: assistant,
-        ...withOptions(assistantOptions),
-      },
-      { role: "tool", content: tool, ...withOptions(toolOptions) },
+  }
+}
+
+function scan(messages: ModelMessage[]) {
+  const requests = new Map<string, Request[]>();
+  const decisions = new Map<string, Response[]>();
+  const calls = new Map<string, Part[]>();
+  const providerCalls = new Set<string>();
+  const results = new Set<string>();
+  const consumed = new Set<string>();
+  let waiting: string[] = [];
+  for (const message of messages) {
+    // Provider-owned approvals do not always produce a tool-result. Their
+    // continuation's response, saved before any later prompt, is the durable
+    // evidence that they were consumed.
+    if (message.role === "assistant") {
+      waiting.forEach((approvalId) => consumed.add(approvalId));
+    }
+    if (message.role === "assistant" || message.role === "user") waiting = [];
+    for (const part of partsOf(message)) {
+      if (part.type === "tool-approval-request") {
+        add(requests, part.approvalId, part);
+      } else if (part.type === "tool-approval-response") {
+        add(decisions, part.approvalId, part);
+        waiting.push(part.approvalId);
+      } else if (part.type === "tool-call") {
+        add(calls, part.toolCallId, part);
+        if (part.providerExecuted) providerCalls.add(part.toolCallId);
+      } else if (part.type === "tool-result") {
+        results.add(part.toolCallId);
+      }
+    }
+  }
+  const settled = ({ approvalId, toolCallId }: Request) =>
+    results.has(toolCallId) ||
+    (providerCalls.has(toolCallId) && consumed.has(approvalId));
+  return { requests, decisions, calls, providerCalls, settled };
+}
+
+function strip(plan: ApprovalPlan, messages: ModelMessage[]): ModelMessage[] {
+  return messages.flatMap((message): ModelMessage[] => {
+    if (!Array.isArray(message.content)) return [message];
+    const content = (message.content as Part[]).filter(
+      (part) =>
+        part.type !== "tool-approval-request" &&
+        part.type !== "tool-approval-response" &&
+        !(
+          (part.type === "tool-call" || part.type === "tool-result") &&
+          plan.hidden.has(part.toolCallId)
+        ),
     );
-  }
-  return projected;
-}
-
-function partsOf(messages: ModelMessage[]): (AssistantPart | ToolPart)[] {
-  return messages.flatMap((message) =>
-    Array.isArray(message.content)
-      ? (message.content as (AssistantPart | ToolPart)[])
-      : [],
-  );
-}
-
-function approvalParts(
-  message: ModelMessage,
-  approvalCallIds: ReadonlySet<string>,
-): [string, ApprovalPart][] {
-  return partsOf([message]).flatMap((part): [string, ApprovalPart][] => {
-    switch (part.type) {
-      case "tool-approval-request":
-      case "tool-approval-response":
-        return [[`${part.type}:${part.approvalId}`, part]];
-      case "tool-call":
-      case "tool-result":
-        return approvalCallIds.has(part.toolCallId)
-          ? [[`${part.type}:${part.toolCallId}`, part]]
-          : [];
-      default:
-        return [];
-    }
+    if (content.length === message.content.length) return [message];
+    return content.length > 0 ? [{ ...message, content } as ModelMessage] : [];
   });
 }
 
-function unitKeys({ approvalId, toolCallId }: Request): string[] {
-  return [
-    `tool-call:${toolCallId}`,
-    `tool-approval-request:${approvalId}`,
-    `tool-approval-response:${approvalId}`,
-    `tool-result:${toolCallId}`,
-  ];
-}
-
-function isProviderCall(
-  stored: ReadonlyMap<string, ApprovalPart>,
-  toolCallId: string,
-): boolean {
-  const call = stored.get(`tool-call:${toolCallId}`);
-  return call?.type === "tool-call" && call.providerExecuted === true;
-}
-
-function withOptions(providerOptions: ModelMessage["providerOptions"]) {
-  return providerOptions ? { providerOptions } : {};
-}
-
-function partId(part: ApprovalPart): string {
-  return part.type === "tool-approval-request" ||
-    part.type === "tool-approval-response"
-    ? `approval ${part.approvalId}`
-    : part.toolCallId;
-}
-
-// Part-level provider options are the handler's to add, and a result's output
-// is the handler's to redact or trim since it cannot cause execution;
-// everything else must match what was stored.
-function sameApprovalPart(a: ApprovalPart, b: ApprovalPart): boolean {
-  return approvalPartSignature(a) === approvalPartSignature(b);
-}
-
-function approvalPartSignature(part: ApprovalPart): string {
-  switch (part.type) {
-    case "tool-approval-request":
-      return signature({
-        type: part.type,
-        approvalId: part.approvalId,
-        toolCallId: part.toolCallId,
-        isAutomatic: part.isAutomatic ?? false,
-        signature: part.signature,
-      });
-    case "tool-call":
-      return signature({
-        type: part.type,
-        toolCallId: part.toolCallId,
-        toolName: part.toolName,
-        input: part.input,
-        providerExecuted: part.providerExecuted ?? false,
-      });
-    case "tool-approval-response":
-      return signature({
-        type: part.type,
-        approvalId: part.approvalId,
-        approved: part.approved,
-        reason: part.reason,
-        providerExecuted: part.providerExecuted ?? false,
-      });
-    case "tool-result":
-      return signature({
-        type: part.type,
-        toolCallId: part.toolCallId,
-        toolName: part.toolName,
-      });
+function only<T>(byId: Map<string, T[]>, type: string, approvalId: string) {
+  const parts = byId.get(approvalId) ?? [];
+  if (parts.length > 1) {
+    throw new Error(
+      `Stored context has more than one ${type} for approval ${approvalId}`,
+    );
   }
+  return parts;
 }
 
-function signature(value: unknown): string {
-  return JSON.stringify(convexToJson((value ?? null) as Value));
+function add<K, T>(byId: Map<K, T[]>, id: K, part: T) {
+  byId.set(id, [...(byId.get(id) ?? []), part]);
+}
+
+function partsOf(message: ModelMessage): Part[] {
+  return Array.isArray(message.content) ? (message.content as Part[]) : [];
 }

@@ -163,16 +163,15 @@ single-decision helpers so the request history is read only once.
 If a partial continuation requests another approval, that newer request also
 remains pending while you resume an earlier sibling.
 
-If an unrelated generation starts while approvals are still unresolved, they are
-**automatically denied** with the reason
-`"auto-denied: new generation started"`. This prevents broken message histories
-where tool calls lack results. These denials are synthetic and only added to the
-model's context for that request; they are not saved, so the approvals remain
-pending in storage.
+If an unrelated generation starts while approvals are still unresolved, their
+tool calls are left out of its context. The model does not see them, and they
+stay pending, so you can still approve or deny them later.
 
-This does not apply when resuming approvals: on that continuation, earlier
-approvals that were not part of the resume are omitted from that model request.
-No response is written for them, so they remain pending in storage.
+Approval requests and decisions are never passed to a
+[context handler](./context.mdx), nor are tool calls whose approval has not run.
+When generation continues from a decision, the stored calls and decisions are
+appended after the handler's messages, so only decisions saved with these
+methods can run a tool.
 
 ## Client-side flow
 
