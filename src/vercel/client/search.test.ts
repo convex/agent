@@ -1109,6 +1109,82 @@ describe("search.ts", () => {
         content: "Only prompt",
       });
     });
+    it("keeps the whole order being continued when it is longer than the window (#433)", async () => {
+      const threadId = await createTestThread("user433");
+      const save = (
+        messages: { role: "user" | "assistant"; content: string }[],
+      ) =>
+        t.run((mutCtx) =>
+          saveMessages(mutCtx, components.agent, {
+            threadId,
+            userId: "user433",
+            messages,
+            metadata: messages.map(() => ({})),
+          }),
+        );
+      await save([
+        { role: "user", content: "Earlier question" },
+        { role: "assistant", content: "Earlier answer" },
+      ]);
+      const steps = Array.from({ length: 1_103 }, (_, i) => ({
+        role: "assistant" as const,
+        content: `Step ${i + 1}`,
+      }));
+      const { messages: saved } = await save([
+        { role: "user", content: "Prompt" },
+        ...steps,
+      ]);
+
+      const result = await fetchContextWithPrompt(ctx, components.agent, {
+        ...baseArgs,
+        userId: "user433",
+        threadId,
+        prompt: undefined,
+        messages: undefined,
+        promptMessageId: saved[0]._id,
+      });
+
+      expect(result.messages.map((m) => m.content)).toEqual([
+        "Prompt",
+        ...steps.map((s) => s.content),
+      ]);
+    });
+
+    it("still omits an older order longer than the window when the continued one has no successful messages", async () => {
+      const threadId = await createTestThread("user433b");
+      const steps = Array.from({ length: 1_103 }, (_, i) => ({
+        role: "assistant" as const,
+        content: `Step ${i + 1}`,
+      }));
+      const older = [{ role: "user" as const, content: "Older" }, ...steps];
+      await t.run((mutCtx) =>
+        saveMessages(mutCtx, components.agent, {
+          threadId,
+          userId: "user433b",
+          messages: older,
+          metadata: older.map(() => ({})),
+        }),
+      );
+      const { messages: saved } = await t.run((mutCtx) =>
+        saveMessages(mutCtx, components.agent, {
+          threadId,
+          userId: "user433b",
+          messages: [{ role: "user", content: "Pending prompt" }],
+          metadata: [{ status: "pending" }],
+        }),
+      );
+
+      const result = await fetchContextWithPrompt(ctx, components.agent, {
+        ...baseArgs,
+        userId: "user433b",
+        threadId,
+        prompt: undefined,
+        messages: undefined,
+        promptMessageId: saved[0]._id,
+      });
+
+      expect(result.messages).toEqual([]);
+    });
   });
 
   describe("fetchContextWithPrompt - contextHandler Tests", () => {
