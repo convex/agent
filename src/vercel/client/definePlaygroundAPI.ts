@@ -27,6 +27,7 @@ import {
   getModelName,
   getProviderName,
   isTool,
+  withDerivedReasoning,
 } from "../../shared.js";
 import { serializeResponseMessages, toModelMessage } from "../mapping.js";
 import type { Agent } from "../index.js";
@@ -341,8 +342,8 @@ export function definePlaygroundActions<DataModel extends GenericDataModel>(
           step.response.messages,
         );
         outputMessages.push(
-          messages.map((messageWithMetadata, i) => {
-            return {
+          messages.map((messageWithMetadata, i) =>
+            withDerivedReasoning({
               ...messageWithMetadata,
               tool: isTool(messageWithMetadata.message),
               text: extractText(messageWithMetadata.message),
@@ -353,8 +354,8 @@ export function definePlaygroundActions<DataModel extends GenericDataModel>(
               _creationTime: Date.now(),
               order: 0,
               stepOrder: i + 1,
-            } satisfies MessageDoc;
-          }),
+            } satisfies MessageDoc),
+          ),
         );
       }
       return { text: await text, messages: outputMessages.flat() };

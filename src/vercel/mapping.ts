@@ -309,10 +309,6 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     model: resolvedModel ? getModelName(resolvedModel) : undefined,
     provider: resolvedModel ? getProviderName(resolvedModel) : undefined,
     providerMetadata: step.providerMetadata,
-    reasoning: step.reasoningText,
-    reasoningDetails: step.reasoning.filter(
-      (part) => part.type !== "reasoning-file",
-    ),
     usage: serializeUsage(step.usage),
     warnings: serializeWarnings(step.warnings),
     finishReason: step.finishReason,

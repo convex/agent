@@ -9,6 +9,8 @@
 - `useStreamingText` decodes UTF-8 characters split across chunks (#440)
 - Render a tool result with an `error-text` or `error-json` output as
   `output-error` (#162, #441)
+- Store a step's reasoning once, in content, so long reasoning fits the document
+  size limit (#418, #423)
 
 ## 0.7.9
 
