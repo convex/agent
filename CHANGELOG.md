@@ -7,6 +7,8 @@
 - Keep the whole order being continued in context, past the recent window (#433,
   #436)
 - `useStreamingText` decodes UTF-8 characters split across chunks (#440)
+- Render a tool result with an `error-text` or `error-json` output as
+  `output-error` (#162, #441)
 
 ## 0.7.9
 

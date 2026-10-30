@@ -886,6 +886,82 @@ describe("toUIMessages", () => {
     expect(toolPart.state).toBe("output-error");
   });
 
+  describe("tool result with an error output (issue #162)", () => {
+    const toolCall = baseMessageDoc({
+      _id: "msg1",
+      order: 1,
+      stepOrder: 1,
+      tool: true,
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolName: "explode",
+            toolCallId: "call1",
+            input: {},
+            args: {},
+          },
+        ],
+      },
+    });
+    const toolResult = (
+      output:
+        | { type: "error-text"; value: string }
+        | { type: "error-json"; value: { code: number } },
+    ) =>
+      baseMessageDoc({
+        _id: "msg2",
+        order: 1,
+        stepOrder: 2,
+        tool: true,
+        message: {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call1",
+              toolName: "explode",
+              output,
+            },
+          ],
+        },
+      });
+    const toolPart = (messages: MessageDoc[]) => {
+      const parts = toUIMessages(messages)[0].parts.filter(
+        (p) => p.type === "tool-explode",
+      );
+      expect(parts).toHaveLength(1);
+      return parts[0] as any;
+    };
+
+    it("renders error-text with its call as output-error", () => {
+      const part = toolPart([
+        toolCall,
+        toolResult({ type: "error-text", value: "Error: kaboom" }),
+      ]);
+      expect(part.state).toBe("output-error");
+      expect(part.errorText).toBe("Error: kaboom");
+    });
+
+    it("renders an orphan error-text result as output-error", () => {
+      const part = toolPart([
+        toolResult({ type: "error-text", value: "Error: kaboom" }),
+      ]);
+      expect(part.state).toBe("output-error");
+      expect(part.errorText).toBe("Error: kaboom");
+    });
+
+    it("renders error-json as output-error with the JSON as errorText", () => {
+      const part = toolPart([
+        toolCall,
+        toolResult({ type: "error-json", value: { code: 42 } }),
+      ]);
+      expect(part.state).toBe("output-error");
+      expect(part.errorText).toBe('{"code":42}');
+    });
+  });
+
   describe("userId preservation", () => {
     it("preserves userId in user messages", () => {
       const messages = [
