@@ -1,0 +1,154 @@
+---
+title: Batch Generation
+sidebar_label: "Batch Generation"
+sidebar_position: 850
+description: "Generating responses for many threads with a provider batch API"
+---
+
+Provider batch APIs (OpenAI, Anthropic) run many requests at a discount, with
+results arriving minutes or hours later. You can use them with the Agent by
+composing the AI SDK's batch functions with APIs you already use: `agent.start`
+builds each thread's context, and `agent.generateText` saves each result. There
+is no separate batch API to learn, and the saved messages are the same as a
+normal generation's.
+
+The AI SDK's batch API is experimental (`experimental_startBatch` and friends),
+so expect it to change. See the full example in
+[batch.ts](../example/convex/batch/batch.ts).
+
+## The flow
+
+1. Save each prompt as usual, e.g. with `saveMessage` in a mutation.
+2. For each thread, call `agent.start` to build the exact messages a generation
+   would send: instructions, recent and searched messages, your
+   `contextHandler`, and tools. Submit one batch request per prompt, using the
+   prompt's message id as the request id.
+3. When the batch is done, save each result with `agent.generateText`, passing
+   the prompt's `promptMessageId` and a model that replays the result.
+
+## Starting a batch
+
+```ts
+import { experimental_startBatch as startBatch } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+const requests = await Promise.all(
+  items.map(async ({ threadId, promptMessageId }) => {
+    const { args } = await agent.start(
+      ctx,
+      { promptMessageId },
+      // Build the context without saving anything yet.
+      { threadId, storageOptions: { saveMessages: "none" } },
+    );
+    const { model, runtimeContext, abortSignal, ...callArgs } = args;
+    return {
+      ...callArgs,
+      id: promptMessageId,
+      type: "text",
+      model: "gpt-4o-mini",
+    } as const;
+  }),
+);
+const batch = await startBatch({
+  provider: openai.experimental_batch(),
+  requests,
+});
+// Store `batch` ({ version, id, provider }) and the items in your own table.
+```
+
+## Saving the results
+
+A batch result is exactly what the model would have returned from a normal call.
+Hand it to `agent.generateText` through a model that replays it once and defers
+to the real model after that:
+
+```ts
+function replayModel(
+  result: LanguageModelV4GenerateResult,
+  model: LanguageModelV4,
+): LanguageModelV4 {
+  let replayed = false;
+  return {
+    specificationVersion: "v4",
+    provider: model.provider,
+    modelId: model.modelId,
+    supportedUrls: model.supportedUrls,
+    doGenerate: async (options) => {
+      if (replayed) return model.doGenerate(options);
+      replayed = true;
+      return result;
+    },
+    doStream: (options) => model.doStream(options),
+  };
+}
+
+const batchApi = openai.experimental_batch();
+const results = await batchApi.doGetBatchResults({ batchId: batch.id });
+for await (const item of results) {
+  // Claim the item in a mutation first, so a duplicate poll skips it.
+  if (item.status === "succeeded") {
+    await agent.generateText(
+      ctx,
+      { threadId },
+      { promptMessageId: item.id, model: replayModel(item.result, model) },
+    );
+  } else {
+    await agent.saveMessage(ctx, {
+      threadId,
+      promptMessageId: item.id,
+      message: { role: "assistant", content: [] },
+      metadata: { status: "failed", error: item.error?.message ?? item.status },
+    });
+  }
+}
+```
+
+Because the result goes through `generateText`:
+
+- The message is stored like any other: status, usage, model and provider,
+  finish reason, reasoning, and embeddings if you configured an
+  `embeddingModel`.
+- Your `usageHandler` is called for it.
+- If the result has tool calls, the tools run and the thread continues with
+  normal (non-batched) model calls, up to your `stopWhen`.
+
+The results are read from the provider's batch interface (`doGetBatchResults`)
+rather than `experimental_getBatchResults`, because its items are the raw model
+results that the replay model returns.
+
+## Polling and webhooks
+
+OpenAI and Anthropic don't notify a per-batch `webhookUrl`, so poll with the
+scheduler (or a cron) using `experimental_getBatchStatus` until the batch is no
+longer `"pending"`. For providers that do call a webhook, treat the call as a
+hint: have the `httpAction` schedule the same poll, so the request body is never
+trusted. The example puts an unguessable token in the webhook URL so strangers
+can't trigger polls.
+
+## Things to know
+
+- **Nothing shows in the thread while the batch runs.** The prompt is saved, but
+  the response is only saved when the result arrives. Show a "queued" state from
+  your own batch table if your UI needs one. Don't save a pending assistant
+  message yourself: `generateText` with the same `promptMessageId` will mark it
+  failed when it saves the result.
+- **Order is preserved.** The result is saved at the prompt's `order`, so if the
+  user sends more messages meanwhile, the batched answer stays above them. Those
+  later messages are generated without it.
+- **Claim each result once.** Polls can overlap and webhooks can repeat. Mark
+  each item done in a mutation before saving it, as the example does, or a
+  result can be saved and billed twice. This is at-most-once: if the action dies
+  between the claim and the save, that result is skipped rather than risking a
+  second answer and a second run of its tools.
+- **Keep polling through errors.** Schedule the next poll before doing the work,
+  and cancel it once the batch is done, so a failed poll doesn't strand the
+  batch. A very large batch may need its results split across several actions to
+  stay within the action time limit.
+- **Partial failures.** Each item succeeds or fails on its own. Items that never
+  come back should be failed explicitly once the batch is done.
+- **Context is rebuilt when saving.** `generateText` fetches the context again
+  (running your `contextHandler`), though the replayed step doesn't use it.
+  `rawRequestResponseHandler` sees the provider's batch result, not the original
+  request.
+- **Tool definitions must match** across all requests in a batch, which they do
+  when every request uses the same agent.

@@ -14,6 +14,8 @@ import type * as agents_fashion from "../agents/fashion.js";
 import type * as agents_simple from "../agents/simple.js";
 import type * as agents_story from "../agents/story.js";
 import type * as agents_weather from "../agents/weather.js";
+import type * as batch_batch from "../batch/batch.js";
+import type * as batch_tables from "../batch/tables.js";
 import type * as chat_approval from "../chat/approval.js";
 import type * as chat_basic from "../chat/basic.js";
 import type * as chat_human from "../chat/human.js";
@@ -64,6 +66,8 @@ declare const fullApi: ApiFromModules<{
   "agents/simple": typeof agents_simple;
   "agents/story": typeof agents_story;
   "agents/weather": typeof agents_weather;
+  "batch/batch": typeof batch_batch;
+  "batch/tables": typeof batch_tables;
   "chat/approval": typeof chat_approval;
   "chat/basic": typeof chat_basic;
   "chat/human": typeof chat_human;
