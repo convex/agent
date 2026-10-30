@@ -471,6 +471,17 @@ export async function timeoutStreamHandler(
   await ctx.db.patch("streamingMessages", args.streamId, {
     state: { kind: "aborted", reason: "timeout", cleanupFnId },
   });
+  const message =
+    stream.pendingMessageId &&
+    (await ctx.db.get("messages", stream.pendingMessageId));
+  if (message?.status === "pending") {
+    // Recovering the streamed text reads the deltas, so it runs in its own
+    // transaction, where going over a limit can't roll back the timeout.
+    await ctx.scheduler.runAfter(0, api.messages.finalizeMessage, {
+      messageId: message._id,
+      result: { status: "failed", error: "Stream timed out" },
+    });
+  }
 }
 
 async function deletePageForStreamId(
@@ -663,11 +674,13 @@ export const deleteAllStreamsForThreadIdSync = action({
   },
 });
 
+// Streams created without a pending message predate the link.
 export async function getStreamingMessages(
   ctx: MutationCtx,
   threadId: Id<"threads">,
   order: number,
   stepOrder: number,
+  messageId: Id<"messages">,
 ): Promise<Doc<"streamingMessages">[]> {
   return mergedStream(
     (["aborted", "streaming", "finished"] as const).map((state) =>
@@ -683,16 +696,26 @@ export async function getStreamingMessages(
         .order("desc"),
     ),
     ["stepOrder"],
-  ).take(MAX_MATERIALIZATION_STREAMS + 1);
+  )
+    .filterWith(
+      async (s) => !s.pendingMessageId || s.pendingMessageId === messageId,
+    )
+    .take(MAX_MATERIALIZATION_STREAMS + 1);
 }
 
 export async function getStreamingMessagesWithMetadata(
   ctx: MutationCtx,
   {
+    _id,
     threadId,
     order,
     stepOrder,
-  }: { threadId: Id<"threads">; order: number; stepOrder: number },
+  }: {
+    _id: Id<"messages">;
+    threadId: Id<"threads">;
+    order: number;
+    stepOrder: number;
+  },
   metadata: { status: "success" | "failed"; error?: string },
 ): Promise<{
   messages: MessageWithMetadataInternal[];
@@ -707,6 +730,7 @@ export async function getStreamingMessagesWithMetadata(
     threadId,
     order,
     stepOrder,
+    _id,
   );
   const failure = (streamId: Id<"streamingMessages">, reason: string) => ({
     messages: [],

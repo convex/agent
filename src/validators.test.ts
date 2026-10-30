@@ -14,7 +14,7 @@ expectTypeOf<Infer<typeof vStorageOptions>>().toExtend<StorageOptions>();
 expectTypeOf<StorageOptions>().toExtend<Infer<typeof vStorageOptions>>();
 
 type MessageBasedOnSchema = IdsToStrings<
-  Omit<Doc<"messages">, "files" | "stepId" | "parentMessageId">
+  Omit<Doc<"messages">, "files" | "stepId" | "parentMessageId" | "claim">
 >;
 expectTypeOf<Infer<typeof vMessageDoc>>().toEqualTypeOf<MessageBasedOnSchema>();
 expectTypeOf<MessageBasedOnSchema>().toEqualTypeOf<Infer<typeof vMessageDoc>>();

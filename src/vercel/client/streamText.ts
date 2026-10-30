@@ -141,6 +141,7 @@ export async function streamText<
             format: "UIMessageChunk",
             order,
             stepOrder,
+            pendingMessageId: call.pendingMessageId,
           },
         )
       : undefined;

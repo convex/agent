@@ -37,6 +37,11 @@ export const schema = defineSchema({
     fileIds: v.optional(v.array(v.id("files"))),
     error: v.optional(v.string()),
     status: vMessageStatus,
+    /**
+     * Set on the messages of a generation that claimed a pending message:
+     * `key` is that message, and `at` is when the claim was made.
+     */
+    claim: v.optional(v.object({ key: v.id("messages"), at: v.number() })),
 
     // Context on how it was generated
     agentName: v.optional(v.string()),
@@ -109,6 +114,8 @@ export const schema = defineSchema({
         }),
       ),
     ),
+    /** The pending message this stream's generation saves into next. */
+    pendingMessageId: v.optional(v.id("messages")),
     /**
      * The step order of the first message in the stream.
      * If the stream ends up with both a tool call and a tool result,

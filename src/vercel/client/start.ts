@@ -46,6 +46,21 @@ export function resolveUsageModel(
   return "step" in toSave ? (toSave.step.model ?? activeModel) : activeModel;
 }
 
+/**
+ * Thrown instead of generating when a `pendingMessageId` was already claimed:
+ * its generation is `"running"`, or its answer was saved (`"answered"`).
+ * `messageId` is the generation's latest message.
+ */
+export class AlreadyClaimedError extends Error {
+  constructor(
+    public readonly status: "running" | "answered",
+    public readonly messageId: string,
+  ) {
+    super(`The pending message's generation is ${status}`);
+    this.name = "AlreadyClaimedError";
+  }
+}
+
 type RawRequestResponseInclude = Record<string, boolean>;
 
 /**
@@ -103,6 +118,11 @@ export async function startGeneration<
      * the prompt for the LLM call in another call.
      */
     promptMessageId?: string;
+    /**
+     * A pending message to save the generation into. See
+     * {@link AgentPrompt.pendingMessageId}.
+     */
+    pendingMessageId?: string;
     /**
      * The model to use for the LLM calls. This will override the model specified
      * in the Agent constructor.
@@ -172,6 +192,7 @@ export async function startGeneration<
   stepOrder: number;
   userId: string | undefined;
   promptMessageId: string | undefined;
+  pendingMessageId: string | undefined;
   updateModel: (model: ModelOrMetadata | undefined) => void;
   save: <TOOLS extends ToolSet>(
     toSave:
@@ -215,27 +236,67 @@ export async function startGeneration<
         ?.userId) ??
     undefined;
 
+  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
+  let claimed:
+    | {
+        promptMessageId: string | undefined;
+        pendingMessage: MessageDoc;
+        savedMessages: MessageDoc[];
+      }
+    | undefined;
+  if (args.pendingMessageId) {
+    assert(
+      threadId && saveMessages !== "none",
+      "pendingMessageId needs a threadId and saved messages",
+    );
+    const claim = await ctx.runMutation(
+      component.messages.claimPendingMessage,
+      { messageId: args.pendingMessageId },
+    );
+    if (claim.status !== "claimed") {
+      throw new AlreadyClaimedError(claim.status, claim.messageId);
+    }
+    claimed = {
+      promptMessageId: claim.promptMessageId ?? args.promptMessageId,
+      pendingMessage: claim.message,
+      savedMessages: [],
+    };
+  }
+
+  // Fails the claimed message, so the next attempt can continue it rather
+  // than wait out the claim.
+  const failClaim = async (error: unknown): Promise<never> => {
+    if (claimed) {
+      await ctx.runMutation(component.messages.finalizeMessage, {
+        messageId: claimed.pendingMessage._id,
+        result: { status: "failed", error: errorToString(error) },
+      });
+    }
+    throw error;
+  };
   const context = await fetchContextWithPrompt(ctx, component, {
     ...opts,
     userId,
     threadId,
     messages: args.messages,
     prompt: args.prompt,
-    promptMessageId: args.promptMessageId,
-  });
+    promptMessageId: claimed?.promptMessageId ?? args.promptMessageId,
+  }).catch(failClaim);
   const allowSystemInMessages = args.allowSystemInMessages ?? true;
   if (
     !allowSystemInMessages &&
     context.messages.some((message) => message.role === "system")
   ) {
-    throw new Error(
-      "System messages in assembled message history require allowSystemInMessages: true. Use instructions for top-level system guidance.",
+    await failClaim(
+      new Error(
+        "System messages in assembled message history require allowSystemInMessages: true. Use instructions for top-level system guidance.",
+      ),
     );
   }
 
-  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
-  const { promptMessageId, pendingMessage, savedMessages } =
-    threadId && saveMessages !== "none"
+  const { promptMessageId, pendingMessage, savedMessages } = claimed
+    ? claimed
+    : threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
           userId,
@@ -326,6 +387,7 @@ export async function startGeneration<
   );
   const {
     promptMessageId: _promptMessageId,
+    pendingMessageId: _pendingMessageId,
     messages: _messages,
     prompt: _prompt,
     instructions: _instructions,
@@ -484,6 +546,7 @@ export async function startGeneration<
     stepOrder: stepOrder ?? 0,
     userId,
     promptMessageId,
+    pendingMessageId: pendingMessage?._id,
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {

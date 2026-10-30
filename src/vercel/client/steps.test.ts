@@ -196,7 +196,8 @@ function abortsOnReply(ctx: ActionCtx, abort: () => void): ActionCtx {
     ...ctx,
     runMutation: (async (reference, args) => {
       const result = await ctx.runMutation(reference, args);
-      if ((args as { pendingMessageId?: string }).pendingMessageId) {
+      const save = args as { pendingMessageId?: string; messages?: unknown };
+      if (save.pendingMessageId && save.messages) {
         abort();
         await new Promise((resolve) => setTimeout(resolve, 100));
       }

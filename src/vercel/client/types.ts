@@ -110,6 +110,15 @@ export type AgentPrompt = {
    */
   promptMessageId?: string | undefined;
   /**
+   * A pending assistant message to save the generation into, e.g. one saved
+   * with `promptMessageId` while the work was queued. The generation claims
+   * it before anything else, and answers its prompt at most once: while
+   * another claim is running, or once the answer was saved, it throws an
+   * `AlreadyClaimedError` instead of calling the model. After a failed
+   * or lapsed claim, it continues the answer from the steps already saved.
+   */
+  pendingMessageId?: string | undefined;
+  /**
    * The model to use for the LLM calls. This will override the languageModel
    * specified in the Agent config.
    */

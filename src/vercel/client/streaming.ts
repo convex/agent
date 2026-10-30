@@ -261,6 +261,7 @@ export class DeltaStreamer<T> {
       userId?: string;
       order: number;
       stepOrder: number;
+      pendingMessageId?: string;
       agentName?: string;
       model?: string;
       provider?: string;
