@@ -20,7 +20,7 @@ import type { QueryCtx } from "../_generated/server.js";
 // We only generate embeddings for non-tool, non-system messages
 const embeddings = {
   model: v.string(),
-  // What table it's stored in. (usually messages or memories)
+  // What table it's stored in. (usually messages)
   table: v.string(),
   userId: v.optional(v.string()),
   threadId: v.optional(v.string()),

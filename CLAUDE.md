@@ -39,7 +39,7 @@ npm run typecheck    # Full TypeScript validation including example/convex
    - `streaming.ts`, `search.ts`, `messages.ts`, `threads.ts` - Feature modules
 
 2. **Component** (`src/component/`) - Convex backend (runs on Convex servers)
-   - `schema.ts` - Database schema (threads, messages, streamingMessages, streamDeltas, memories, files)
+   - `schema.ts` - Database schema (threads, messages, streamingMessages, streamDeltas, files)
    - `index.ts` - Main component implementation
    - Backend operations for messages, threads, streaming, vector search
 
@@ -67,7 +67,6 @@ npm run typecheck    # Full TypeScript validation including example/convex
 - **messages** - Chat messages with order, stepOrder, status, metadata
 - **streamingMessages** - Real-time streaming state (streaming/finished/aborted)
 - **streamDeltas** - Stream chunks with start/end ranges
-- **memories** - User/thread memories for RAG with embedding references
 
 ## Convex-Specific Guidelines
 
