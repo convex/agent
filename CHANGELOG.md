@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `streamObject` fails its pending message when the object fails its schema,
-  instead of leaving it pending
+  instead of leaving it pending (#438)
 
 ## 0.7.9
 
