@@ -11,6 +11,10 @@
   `output-error` (#162, #441)
 - Store a step's reasoning once, in content, so long reasoning fits the document
   size limit (#418, #423)
+- Fix continuing a tool approval when a context handler returns older history.
+  Context handlers no longer see approval requests or decisions, and pending
+  approvals are left out of other generations' context instead of auto-denied
+  (#411, #416)
 
 ## 0.7.9
 

@@ -29,12 +29,12 @@ import type {
   ActionCtx,
 } from "./types.js";
 import { inlineMessagesFiles } from "./files.js";
+import { docsToModelMessages, toModelMessage } from "../mapping.js";
 import {
-  autoDenyUnresolvedApprovals,
-  docsToModelMessages,
-  toModelMessage,
-} from "../mapping.js";
-import { prepareApprovalContext } from "./prepareApprovalContext.js";
+  finishApprovals,
+  hideApprovals,
+  planApprovals,
+} from "./prepareApprovalContext.js";
 
 const DEFAULT_VECTOR_SCORE_THRESHOLD = 0.0;
 // Bound each page that completes an order split by the recent window.
@@ -340,12 +340,6 @@ export function filterOutOrphanedToolMessages(docs: MessageDoc[]) {
     return approvalId !== undefined && approvalResponseIds.has(approvalId);
   };
 
-  // Helper: check if tool call has a pending approval request
-  // (auto-deny handles these downstream, so they must survive the filter)
-  const hasApprovalRequest = (toolCallId: string) => {
-    return approvalRequestsByToolCallId.has(toolCallId);
-  };
-
   for (const doc of docs) {
     if (
       doc.message?.role === "assistant" &&
@@ -355,8 +349,7 @@ export function filterOutOrphanedToolMessages(docs: MessageDoc[]) {
         (p) =>
           p.type !== "tool-call" ||
           toolResultIds.has(p.toolCallId) ||
-          hasApprovalResponse(p.toolCallId) ||
-          hasApprovalRequest(p.toolCallId),
+          hasApprovalResponse(p.toolCallId),
       );
       if (content.length) {
         result.push({
@@ -693,15 +686,25 @@ export async function fetchContextWithPrompt(
     }
   }
 
-  const continuation =
+  const approvals = planApprovals(
+    recentMessages,
+    searchMessages,
     args.prompt === undefined
-      ? approvalContinuation(promptMessage, searchMessages, recentMessages)
-      : undefined;
-  const search = docsToModelMessages(searchMessages);
-  const recent = docsToModelMessages(prePromptDocs);
-  const inputMessages = messages.map(toModelMessage);
-  const inputPrompt = promptArray.map(toModelMessage);
-  const existingResponses = docsToModelMessages(existingResponseDocs);
+      ? continuedApprovals(promptMessage, recentMessages)
+      : [],
+  );
+  const [search] = hideApprovals(approvals, [
+    docsToModelMessages(searchMessages),
+  ]);
+  const [recent, inputMessages, inputPrompt, existingResponses] = hideApprovals(
+    approvals,
+    [
+      docsToModelMessages(prePromptDocs),
+      messages.map(toModelMessage),
+      promptArray.map(toModelMessage),
+      docsToModelMessages(existingResponseDocs),
+    ],
+  );
 
   const allMessages = [
     ...search,
@@ -710,31 +713,21 @@ export async function fetchContextWithPrompt(
     ...inputPrompt,
     ...existingResponses,
   ];
-  let processedMessages = args.contextHandler
-    ? await args.contextHandler(ctx, {
-        allMessages,
-        search,
-        recent,
-        inputMessages,
-        inputPrompt,
-        existingResponses,
-        userId,
-        threadId,
-      })
-    : allMessages;
-
-  if (continuation) {
-    processedMessages = prepareApprovalContext(
-      processedMessages,
-      continuation.approvalIds,
-      continuation.storedContext,
-    );
-  }
-
-  // Post-process: auto-deny unresolved approvals so the AI SDK sees a
-  // complete history. Applied after contextHandler so custom handlers
-  // don't need to handle this.
-  processedMessages = autoDenyUnresolvedApprovals(processedMessages);
+  let processedMessages = finishApprovals(
+    approvals,
+    args.contextHandler
+      ? await args.contextHandler(ctx, {
+          allMessages,
+          search,
+          recent,
+          inputMessages,
+          inputPrompt,
+          existingResponses,
+          userId,
+          threadId,
+        })
+      : allMessages,
+  );
 
   // Process messages to inline localhost files (if not, file urls pointing to localhost will be sent to LLM providers)
   if (process.env.CONVEX_CLOUD_URL?.startsWith("http://127.0.0.1")) {
@@ -748,59 +741,36 @@ export async function fetchContextWithPrompt(
   };
 }
 
-// Read before the context handler runs and from copies, since the messages
-// it is given share nested objects with these docs.
-function approvalContinuation(
+// A decision prompt continues every request in the one message on its order
+// that it answers.
+function continuedApprovals(
   promptMessage: MessageDoc | undefined,
-  searchMessages: MessageDoc[],
   recentMessages: MessageDoc[],
-): { approvalIds: Set<string>; storedContext: ModelMessage[] } | undefined {
+): string[] {
+  if (promptMessage?.message?.role !== "tool") return [];
+  const answered = promptMessage.message.content.flatMap((part) =>
+    part.type === "tool-approval-response" ? [part.approvalId] : [],
+  );
+  if (answered.length === 0) return [];
+  const requests = recentMessages
+    .filter((doc) => doc.order === promptMessage.order)
+    .map((doc) =>
+      doc.message?.role === "assistant" && Array.isArray(doc.message.content)
+        ? doc.message.content.flatMap((part) =>
+            part.type === "tool-approval-request" ? [part.approvalId] : [],
+          )
+        : [],
+    )
+    .filter((ids) => ids.some((id) => answered.includes(id)));
   if (
-    promptMessage?.message?.role !== "tool" ||
-    !promptMessage.message.content.some(
-      (part) => part.type === "tool-approval-response",
-    )
+    requests.length !== 1 ||
+    answered.some((id) => !requests[0].includes(id))
   ) {
-    return undefined;
-  }
-  const responseIds = new Set(
-    promptMessage.message.content.flatMap((part) =>
-      part.type === "tool-approval-response" ? [part.approvalId] : [],
-    ),
-  );
-  const requestContents = recentMessages.flatMap((doc) =>
-    doc.order === promptMessage.order &&
-    doc.message?.role === "assistant" &&
-    Array.isArray(doc.message.content) &&
-    doc.message.content.some(
-      (part) =>
-        part.type === "tool-approval-request" &&
-        responseIds.has(part.approvalId),
-    )
-      ? [doc.message.content]
-      : [],
-  );
-  if (requestContents.length !== 1) {
     throw new Error(
       "Approval continuation requires one complete request message",
     );
   }
-  const approvalIds = new Set(
-    requestContents[0].flatMap((part) =>
-      part.type === "tool-approval-request" ? [part.approvalId] : [],
-    ),
-  );
-  if ([...responseIds].some((approvalId) => !approvalIds.has(approvalId))) {
-    throw new Error(
-      "Approval continuation requires one complete request message",
-    );
-  }
-  return {
-    approvalIds,
-    storedContext: docsToModelMessages(
-      structuredClone([...searchMessages, ...recentMessages]),
-    ),
-  };
+  return requests[0];
 }
 
 export function getPromptArray(
