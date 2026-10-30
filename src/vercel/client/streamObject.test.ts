@@ -45,25 +45,27 @@ const run = app.action({
       // Drain.
     }
     await result.object.catch(() => {});
-    // onFinish runs after the object settles.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const messages = threadId
-      ? (
-          await ctx.runQuery(components.agent.messages.listMessagesByThreadId, {
-            threadId,
-            order: "asc",
-            paginationOpts: { cursor: null, numItems: 10 },
-          })
-        ).page
-      : [];
-    return {
-      statuses: (messages as MessageDoc[]).map((m) => [
-        m.message?.role,
-        m.status,
-      ]),
-      usage,
-      rawResponses,
+    const statuses = async () => {
+      if (!threadId) return [];
+      const { page } = await ctx.runQuery(
+        components.agent.messages.listMessagesByThreadId,
+        {
+          threadId,
+          order: "asc",
+          paginationOpts: { cursor: null, numItems: 10 },
+        },
+      );
+      return (page as MessageDoc[]).map((m) => [m.message?.role, m.status]);
     };
+    // onFinish runs after the object settles.
+    await vi.waitFor(async () => {
+      if (args.storage === "store") {
+        expect((await statuses()).at(-1)?.[1]).not.toBe("pending");
+      } else {
+        expect(usage).toHaveLength(1);
+      }
+    });
+    return { statuses: await statuses(), usage, rawResponses };
   },
 });
 
