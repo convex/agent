@@ -368,3 +368,276 @@ describe("streams", () => {
     expect([...cursors.values()]).toEqual([15, 15]);
   });
 });
+
+// A generation links its stream to the pending message it writes to, and step
+// saves move the link along, so a timeout fails only that message (#168).
+describe("a stream that times out", () => {
+  const MINUTE = 60 * 1000;
+
+  async function promptedThread(t: ReturnType<typeof initConvexTest>) {
+    vi.useFakeTimers();
+    const thread = await t.mutation(api.threads.createThread, {
+      userId: "stream-timeout",
+    });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const promptMessageId = messages[0]!._id as Id<"messages">;
+    const generate = async (
+      text: string | undefined,
+      { restart = false }: { restart?: boolean } = {},
+    ) => {
+      const { messages } = await t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId,
+        failPendingSteps: restart,
+        messages: [
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+      });
+      const pending = messages[0]!;
+      const messageId = pending._id as Id<"messages">;
+      const streamId = await t.mutation(api.streams.create, {
+        threadId,
+        order: pending.order,
+        stepOrder: pending.stepOrder,
+        format: "UIMessageChunk",
+        pendingMessageId: messageId,
+      });
+      if (text !== undefined) {
+        await t.mutation(api.streams.addDelta, {
+          streamId,
+          start: 0,
+          end: 3,
+          parts: [
+            { type: "text-start", id: "text" },
+            { type: "text-delta", id: "text", delta: text },
+            { type: "text-end", id: "text" },
+          ],
+        });
+      }
+      return { messageId, streamId };
+    };
+    // Also runs whatever those functions schedule to run right away.
+    const advance = async (ms: number) => {
+      for (const step of [ms, 1, 1]) {
+        vi.advanceTimersByTime(step);
+        await t.finishInProgressScheduledFunctions();
+      }
+    };
+    const message = (messageId: Id<"messages">) =>
+      t.run((ctx) => ctx.db.get("messages", messageId));
+    const streamState = async (streamId: Id<"streamingMessages">) =>
+      (await t.run((ctx) => ctx.db.get("streamingMessages", streamId)))?.state
+        .kind;
+    return { threadId, generate, advance, message, streamState };
+  }
+
+  test("fails its pending message and keeps the streamed text", async () => {
+    const t = initConvexTest();
+    const { generate, advance, message } = await promptedThread(t);
+    const { messageId } = await generate("streamed before the action died");
+
+    await advance(10 * MINUTE);
+
+    expect(await message(messageId)).toMatchObject({
+      status: "failed",
+      text: "streamed before the action died",
+      error: "Stream timed out",
+    });
+  });
+
+  test("fails a pending message that has no deltas", async () => {
+    const t = initConvexTest();
+    const { generate, advance, message } = await promptedThread(t);
+    const { messageId } = await generate(undefined);
+
+    await advance(10 * MINUTE);
+
+    expect(await message(messageId)).toMatchObject({
+      status: "failed",
+      error: "Stream timed out",
+    });
+  });
+
+  test("leaves a message that already ended as it was", async () => {
+    const t = initConvexTest();
+    const { threadId, generate, advance, message } = await promptedThread(t);
+    const failed = await generate("streamed before the client failed");
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: failed.messageId,
+      result: { status: "failed", error: "socket hang up" },
+    });
+    const saved = await generate("streamed");
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: saved.messageId,
+      streamId: saved.streamId,
+      failPendingSteps: false,
+      messages: [{ message: { role: "assistant", content: "saved" } }],
+    });
+
+    await advance(10 * MINUTE);
+
+    expect(await message(failed.messageId)).toMatchObject({
+      status: "failed",
+      text: "streamed before the client failed",
+      error: "socket hang up",
+    });
+    expect(await message(saved.messageId)).toMatchObject({
+      status: "success",
+      text: "saved",
+    });
+  });
+
+  test.each([
+    { restart: false, olderError: "Stream timed out" },
+    { restart: true, olderError: "Restarting" },
+  ])(
+    "leaves a newer generation at the same order alone (restart: $restart)",
+    async ({ restart, olderError }) => {
+      const t = initConvexTest();
+      const { generate, advance, message, streamState } =
+        await promptedThread(t);
+      const older = await generate("abandoned");
+      await advance(5 * MINUTE);
+      const newer = await generate("still streaming", { restart });
+
+      await advance(5 * MINUTE);
+
+      expect(await streamState(older.streamId)).toBe("aborted");
+      expect(await message(older.messageId)).toMatchObject({
+        status: "failed",
+        error: olderError,
+      });
+      expect(await streamState(newer.streamId)).toBe("streaming");
+      expect(await message(newer.messageId)).toMatchObject({
+        status: "pending",
+      });
+      expect((await message(newer.messageId))?.text).toBeUndefined();
+    },
+  );
+
+  test("follows the generation's pending message to the next step", async () => {
+    const t = initConvexTest();
+    const { threadId, generate, advance, message } = await promptedThread(t);
+    const { messageId, streamId } = await generate("step two");
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: messageId,
+      streamId,
+      failPendingSteps: false,
+      messages: [
+        { message: { role: "assistant", content: "step one" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const next = messages.at(-1)!._id as Id<"messages">;
+
+    await advance(10 * MINUTE);
+
+    expect(await message(messageId)).toMatchObject({
+      status: "success",
+      text: "step one",
+    });
+    expect(await message(next)).toMatchObject({
+      status: "failed",
+      error: "Stream timed out",
+    });
+  });
+
+  test("recovers only its own stream, not a replaced generation's", async () => {
+    const t = initConvexTest();
+    const { generate, advance, message } = await promptedThread(t);
+    const older = await generate(undefined);
+    // The older generation streamed a whole tool step and its answer, then
+    // died before saving any of it.
+    await t.mutation(api.streams.addDelta, {
+      streamId: older.streamId,
+      start: 0,
+      end: 9,
+      parts: [
+        { type: "start-step" },
+        {
+          type: "tool-input-available",
+          toolCallId: "call-1",
+          toolName: "lookup",
+          input: {},
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "call-1",
+          output: { type: "text", value: "found" },
+        },
+        { type: "finish-step" },
+        { type: "start-step" },
+        { type: "text-start", id: "text" },
+        { type: "text-delta", id: "text", delta: "older text" },
+        { type: "text-end", id: "text" },
+        { type: "finish-step" },
+      ],
+    });
+    const newer = await generate("newer text", { restart: true });
+
+    await advance(15 * MINUTE);
+
+    expect(await message(older.messageId)).toMatchObject({
+      status: "failed",
+      error: "Restarting",
+    });
+    expect(await message(newer.messageId)).toMatchObject({
+      status: "failed",
+      text: "newer text",
+      error: "Stream timed out",
+    });
+    expect(
+      (await t.run((ctx) => ctx.db.query("messages").collect())).map(
+        (m) => m.text,
+      ),
+    ).not.toContain("older text");
+  });
+
+  test("commits the timeout within transaction limits", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const { generate, advance, message, streamState } = await promptedThread(t);
+    const older = await generate("x".repeat(700_000));
+    for (let i = 3; i < 10; i++) {
+      await t.mutation(api.streams.addDelta, {
+        streamId: older.streamId,
+        start: i,
+        end: i + 1,
+        parts: [{ type: "text-delta", id: "text", delta: "x".repeat(700_000) }],
+      });
+    }
+    await advance(5 * MINUTE);
+    const newer = [];
+    for (let i = 0; i < 3; i++) {
+      newer.push(await generate("x".repeat(700_000)));
+    }
+
+    await advance(5 * MINUTE);
+
+    expect(await streamState(older.streamId)).toBe("aborted");
+    expect(await message(older.messageId)).toMatchObject({ status: "failed" });
+    for (const { messageId } of newer) {
+      expect(await message(messageId)).toMatchObject({ status: "pending" });
+    }
+  });
+
+  test("aborts a stream with no pending message", async () => {
+    const t = initConvexTest();
+    const { threadId, advance, streamState } = await promptedThread(t);
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+
+    await advance(10 * MINUTE);
+
+    expect(await streamState(streamId)).toBe("aborted");
+  });
+});

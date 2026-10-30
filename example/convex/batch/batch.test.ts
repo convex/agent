@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type {
   Experimental_BatchV4 as BatchApi,
   Experimental_BatchV4ItemResult as BatchItemResult,
@@ -24,6 +24,8 @@ import * as batchModule from "./batch.js";
 import { saveBatchResults, startThreadBatch } from "./batch.js";
 
 const app = defineTestApp({ schema, components: { agent: agentTest } });
+
+afterEach(() => vi.useRealTimers());
 
 const USAGE = {
   inputTokens: { total: 3, noCache: 3, cacheRead: 0, cacheWrite: 0 },
@@ -186,14 +188,45 @@ const list = app.query({
     (
       await agent.listMessages(ctx, {
         threadId,
+        statuses: ["pending", "success", "failed"],
         paginationOpts: { numItems: 50, cursor: null },
       })
     ).page.reverse(),
 });
 
+// A poll that claims a result and then dies (e.g. the action hits its time
+// limit) before saving it.
+let claimed: () => void = () => {};
+const crashWhileSaving = app.action({
+  args: { threadId: v.string(), pendingMessageId: v.string() },
+  handler: async (ctx, { threadId, pendingMessageId }) => {
+    await agent.generateText(
+      ctx,
+      { threadId },
+      {
+        pendingMessageId,
+        model: mockModel({
+          doGenerate: () => {
+            claimed();
+            return new Promise(() => {});
+          },
+        }),
+      },
+    );
+  },
+});
+
 const { api, createTest } = app.defineModules({
   "batch/batch": batchModule,
-  "batch/test": { setup, start, save, sendMessage, generateNormally, list },
+  "batch/test": {
+    setup,
+    start,
+    save,
+    sendMessage,
+    generateNormally,
+    list,
+    crashWhileSaving,
+  },
 });
 
 function storedShape(m: MessageDoc) {
@@ -221,9 +254,6 @@ describe("batch generation by composition", () => {
     });
     const [providerBatchId] = [...batches.keys()].slice(-1);
     const { requests } = batches.get(providerBatchId)!;
-    expect(requests.map((r) => r.id)).toEqual(
-      [a, b, c, d].map((x) => x.promptMessageId),
-    );
     expect(requests[0].modelId).toBe(MODEL_ID);
     expect(requests[0].options.prompt).toEqual([
       { role: "system", content: "You are a concise assistant." },
@@ -237,11 +267,22 @@ describe("batch generation by composition", () => {
       "weather",
     ]);
 
-    // Nothing is saved while the batch is pending.
+    // Each thread shows a pending answer while the batch runs, and each
+    // request is keyed by that placeholder.
     expect(await t.action(api.batch.test.save, { batchId })).toBe("pending");
-    expect(
-      await t.query(api.batch.test.list, { threadId: a.threadId }),
-    ).toHaveLength(1);
+    const placeholders: string[] = [];
+    for (const x of [a, b, c, d]) {
+      const thread = await t.query(api.batch.test.list, {
+        threadId: x.threadId,
+      });
+      expect(thread.map((m) => [m.message?.role, m.status])).toEqual([
+        ["user", "success"],
+        ["assistant", "pending"],
+      ]);
+      placeholders.push(thread[1]._id);
+    }
+    expect(requests.map((r) => r.id)).toEqual(placeholders);
+    const [pendingA] = placeholders;
 
     // The user keeps talking in thread A while the batch runs.
     await t.mutation(api.batch.test.sendMessage, {
@@ -250,7 +291,7 @@ describe("batch generation by composition", () => {
     });
 
     completeBatch(providerBatchId, (request) => {
-      if (request.id === a.promptMessageId) {
+      if (request.id === pendingA) {
         return {
           type: "text",
           id: request.id,
@@ -258,7 +299,7 @@ describe("batch generation by composition", () => {
           result: generated(ANSWER),
         };
       }
-      if (request.id === b.promptMessageId) {
+      if (request.id === placeholders[1]) {
         return {
           type: "text",
           id: request.id,
@@ -276,7 +317,7 @@ describe("batch generation by composition", () => {
           ),
         };
       }
-      if (request.id === c.promptMessageId) {
+      if (request.id === placeholders[2]) {
         return {
           type: "text",
           id: request.id,
@@ -288,13 +329,28 @@ describe("batch generation by composition", () => {
       return undefined;
     });
 
-    // Overlapping polls (or a duplicate webhook) save each result once.
+    // A poll claims A's result and dies before saving it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const crashed = new Promise<void>((resolve) => (claimed = resolve));
+    void t.action(api.batch.test.crashWhileSaving, {
+      threadId: a.threadId,
+      pendingMessageId: pendingA,
+    });
+    await crashed;
+
+    // Overlapping polls (or a duplicate webhook) save each result once, and
+    // keep the batch open while A's claim may still be live.
     expect(
       await Promise.all([
         t.action(api.batch.test.save, { batchId }),
         t.action(api.batch.test.save, { batchId }),
       ]),
-    ).toEqual(["done", "done"]);
+    ).toEqual(["pending", "pending"]);
+
+    // Once the claiming action must have hit its time limit, a poll takes A
+    // over, so the paid result isn't lost.
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
     expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
 
     // A: the answer lands at the prompt's order, before the follow-up, with
@@ -309,6 +365,7 @@ describe("batch generation by composition", () => {
         [1, 0, "user"],
       ],
     );
+    expect(threadA[1]._id).toBe(pendingA);
     const normalThreadId = await t.action(api.batch.test.generateNormally, {
       prompt: "Question A",
     });
@@ -346,9 +403,9 @@ describe("batch generation by composition", () => {
     expect(threadB[3].text).toBe("It is sunny in Paris.");
 
     // C and D: failed, like a failed generation.
-    for (const [x, error] of [
-      [c, "context_length_exceeded"],
-      [d, "Missing from batch results"],
+    for (const [x, placeholder, error] of [
+      [c, placeholders[2], "context_length_exceeded"],
+      [d, placeholders[3], "Missing from batch results"],
     ] as const) {
       const thread = await t.query(api.batch.test.list, {
         threadId: x.threadId,
@@ -357,14 +414,15 @@ describe("batch generation by composition", () => {
         ["user", "success", undefined],
         ["assistant", "failed", error],
       ]);
+      expect(thread[1]._id).toBe(placeholder);
     }
 
-    // Usage reaches the usageHandler once per model call: A, B's two steps,
-    // and the normal control generation.
+    // Usage reaches the usageHandler once per model call: B's two steps, A
+    // once it was taken over, and the normal control generation.
     expect(usageCalls.map((u) => [u.threadId, u.model, u.provider])).toEqual([
+      [b.threadId, MODEL_ID, PROVIDER],
+      [b.threadId, MODEL_ID, PROVIDER],
       [a.threadId, MODEL_ID, PROVIDER],
-      [b.threadId, MODEL_ID, PROVIDER],
-      [b.threadId, MODEL_ID, PROVIDER],
       [normalThreadId, MODEL_ID, PROVIDER],
     ]);
   });
