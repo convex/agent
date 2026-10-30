@@ -306,7 +306,6 @@ export async function streamText<
         } catch (saveError) {
           console.error("Failed to save deferred final step:", saveError);
         }
-        pendingFinalStep = undefined;
       }
       throw e;
     }
@@ -328,7 +327,6 @@ export async function streamText<
     if (finishStreamId) {
       await call.save(pendingFinalStep, false, finishStreamId);
     }
-    pendingFinalStep = undefined;
   } else if (willAwaitStream && streamer) {
     // No final step was deferred (e.g. the generation produced none), so no
     // save will finish the stream. The streamer doesn't finish itself, so do
