@@ -22,7 +22,7 @@ import {
 import type { Infer } from "convex/values";
 import { toModelMessage, fromModelMessage, toUIFilePart } from "./mapping.js";
 import {
-  extractReasoning,
+  deriveReasoning,
   extractText,
   isTool,
   joinText,
@@ -108,7 +108,7 @@ export async function fromUIMessages<METADATA = unknown>(
               message,
               tool,
               text: extractText(message),
-              reasoning: extractReasoning(message),
+              ...deriveReasoning(message),
               finishReason: tool ? "tool-calls" : "stop",
               sources: fromSourceParts(uiMessage.parts),
             };

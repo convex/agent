@@ -11,6 +11,7 @@ import {
   extractText,
   isTool,
   sorted,
+  withDerivedReasoning,
 } from "../shared.js";
 import {
   vMessageDoc,
@@ -53,7 +54,9 @@ import {
 } from "../approvals.js";
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
-  return omit(message, ["parentMessageId", "stepId", "files"]);
+  return withDerivedReasoning(
+    omit(message, ["parentMessageId", "stepId", "files"]),
+  );
 }
 
 export async function deleteMessage(

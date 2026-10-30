@@ -138,7 +138,6 @@ describe("projectPersistedUIMessageChunks", () => {
             title: "Example",
           },
         ],
-        reasoning: "Think",
         error: "interrupted",
       },
       {
@@ -159,7 +158,6 @@ describe("projectPersistedUIMessageChunks", () => {
         model: "model-1",
         provider: "provider-1",
         sources: [],
-        reasoning: "",
         error: "interrupted",
       },
       {
@@ -179,7 +177,6 @@ describe("projectPersistedUIMessageChunks", () => {
         model: "model-1",
         provider: "provider-1",
         sources: [],
-        reasoning: "",
         error: "interrupted",
       },
     ]);
@@ -295,7 +292,6 @@ describe("projectPersistedUIMessageChunks", () => {
         provider: "provider-1",
         providerMetadata: { openai: { phase: "end" } },
         sources: [],
-        reasoning: "",
       },
     ]);
   });
@@ -322,7 +318,6 @@ describe("projectPersistedUIMessageChunks", () => {
         model: "model-1",
         provider: "provider-1",
         sources: [],
-        reasoning: "",
       },
     ]);
   });
@@ -358,7 +353,6 @@ describe("projectPersistedUIMessageChunks", () => {
         model: "model-1",
         provider: "provider-1",
         sources: [],
-        reasoning: "",
       },
       {
         message: {
@@ -377,7 +371,6 @@ describe("projectPersistedUIMessageChunks", () => {
         model: "model-1",
         provider: "provider-1",
         sources: [],
-        reasoning: "",
       },
     ]);
   });

@@ -30,6 +30,19 @@ const { generateText: generateTextSplit } = definePlaygroundActions(
   components.agent,
   { agents: [agent] },
 );
+const reasoningAgent = new Agent(components.agent, {
+  name: "reasoning-agent",
+  languageModel: mockModel({
+    content: [
+      { type: "reasoning", text: "thinking" },
+      { type: "text", text: "answer" },
+    ],
+  }),
+});
+const { generateText: generateTextReasoning } = definePlaygroundActions(
+  components.agent,
+  { agents: [reasoningAgent] },
+);
 const { listAgents: listAgentsCombined } = definePlaygroundAPI(
   components.agent,
   { agents: () => [agent] },
@@ -40,6 +53,7 @@ const { api, createTest } = app.defineModules({
     listAgentsFromInfos,
     listAgentsCombined,
     generateTextSplit,
+    generateTextReasoning,
     createThread,
   },
 });
@@ -74,6 +88,26 @@ describe("split playground API", () => {
       prompt: "hi",
     });
     expect(result.text).toBe("hello from the split");
+  });
+
+  test("generateText returns derived reasoning fields (#418)", async () => {
+    const t = createTest();
+    const apiKey = await t.mutation(components.agent.apiKeys.issue, {});
+    const { threadId } = await t.mutation(api.playground.createThread, {
+      apiKey,
+      userId: "u",
+    });
+    const result = await t.action(api.playground.generateTextReasoning, {
+      apiKey,
+      agentName: reasoningAgent.options.name,
+      userId: "u",
+      threadId,
+      prompt: "hi",
+    });
+    expect(result.messages.at(-1)).toMatchObject({
+      reasoning: "thinking",
+      reasoningDetails: [{ type: "reasoning", text: "thinking" }],
+    });
   });
 
   test("combined API lists agent instances from a callback", async () => {

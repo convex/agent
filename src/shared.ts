@@ -1,3 +1,5 @@
+import type { MessageDoc } from "./validators.js";
+
 type MessagePartLike = {
   type: string;
   text?: string;
@@ -53,17 +55,33 @@ export function joinText(parts: readonly MessagePartLike[]) {
     .join(" ");
 }
 
-export function extractReasoning(message: MessageLike) {
-  if (typeof message.content === "string") {
-    return undefined;
+// A step's reasoning is stored once, in content (#418). Older documents also
+// stored `reasoning` and `reasoningDetails`, and those are returned as stored.
+export function deriveReasoning(
+  message: MessageDoc["message"],
+): Pick<MessageDoc, "reasoning" | "reasoningDetails"> {
+  const content = message?.content;
+  const parts = Array.isArray(content)
+    ? content.filter((part) => part.type === "reasoning")
+    : [];
+  if (parts.length === 0) {
+    return {};
   }
-  return message.content
-    .filter(
-      (part): part is MessagePartLike & { text: string } =>
-        part.type === "reasoning" && typeof part.text === "string",
-    )
-    .map((part) => part.text)
-    .join(" ");
+  // Joined and emptied as the AI SDK's reasoningText is.
+  const reasoning = parts.map((part) => part.text).join("");
+  return {
+    reasoning: reasoning || undefined,
+    reasoningDetails: parts,
+  };
+}
+
+export function withDerivedReasoning<
+  T extends Pick<MessageDoc, "message" | "reasoning" | "reasoningDetails">,
+>(doc: T): T {
+  if (doc.reasoning !== undefined || doc.reasoningDetails !== undefined) {
+    return doc;
+  }
+  return { ...doc, ...deriveReasoning(doc.message) };
 }
 
 export const DEFAULT_MESSAGE_RANGE = { before: 2, after: 1 };

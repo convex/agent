@@ -281,13 +281,6 @@ export function projectPersistedUIMessageChunkParts(
         ? { providerMetadata: providerMetadataValue }
         : {}),
       sources,
-      reasoning: content
-        .filter(
-          (part): part is Extract<MessageContentParts, { type: "reasoning" }> =>
-            part.type === "reasoning",
-        )
-        .map((part) => part.text)
-        .join(" "),
       ...(fileIds.length > 0
         ? { fileIds: fileIds as MessageWithMetadataInternal["fileIds"] }
         : {}),

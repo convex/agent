@@ -152,6 +152,19 @@ describe("fromUIMessages round-trip tests", () => {
     expect(backToMessageDocs[0].reasoning).toBe("Let me think about this...");
   });
 
+  it("derives multipart reasoning like publicMessage (#418)", async () => {
+    const parts = [
+      { type: "reasoning" as const, text: "foo" },
+      { type: "reasoning" as const, text: "bar" },
+    ];
+    const [doc] = await fromUIMessages(
+      [{ id: "m", role: "assistant", parts }] as unknown as UIMessage[],
+      { threadId: "thread1" },
+    );
+    expect(doc.reasoning).toBe("foobar");
+    expect(doc.reasoningDetails).toMatchObject(parts);
+  });
+
   it("handles tool calls and groups them correctly", async () => {
     // Tool calls get grouped into single UI message but expanded back to multiple message docs
     const originalMessages = [
