@@ -150,16 +150,6 @@ export const schema = defineSchema({
     parts: v.array(v.any()),
   }).index("streamId_start_end", ["streamId", "start", "end"]),
 
-  memories: defineTable({
-    threadId: v.optional(v.id("threads")),
-    userId: v.optional(v.string()),
-    memory: v.string(),
-    embeddingId: v.optional(vVectorId),
-  })
-    .index("threadId", ["threadId"])
-    .index("userId", ["userId"])
-    .index("embeddingId", ["embeddingId"]),
-
   files: defineTable({
     storageId: v.string(),
     mediaType: v.optional(v.string()),
