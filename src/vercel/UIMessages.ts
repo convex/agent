@@ -588,10 +588,19 @@ function createAssistantUIMessage<
               : typedPart.output;
           // Check for error at both the content part level (isError) and message level
           // isError may exist on stored tool results but isn't in ToolResultPart type
+          const outputType = typedPart.output?.type;
           const hasError =
-            (contentPart as { isError?: boolean }).isError || message.error;
+            (contentPart as { isError?: boolean }).isError ||
+            message.error ||
+            outputType === "error-text" ||
+            outputType === "error-json";
           const errorText =
-            message.error || (hasError ? String(output) : undefined);
+            message.error ||
+            (hasError
+              ? outputType === "error-json"
+                ? JSON.stringify(output)
+                : String(output)
+              : undefined);
           const call = allParts.find(
             (part) =>
               part.type === `tool-${contentPart.toolName}` &&
