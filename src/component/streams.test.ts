@@ -343,9 +343,7 @@ describe("streams", () => {
           streamId,
           start: i,
           end: i + 1,
-          parts: [
-            { type: "text-delta", id: "t", delta: "x".repeat(600_000) },
-          ],
+          parts: [{ type: "text-delta", id: "t", delta: "x".repeat(600_000) }],
         });
       }
     }
@@ -639,5 +637,111 @@ describe("a stream that times out", () => {
     await advance(10 * MINUTE);
 
     expect(await streamState(streamId)).toBe("aborted");
+  });
+});
+
+describe("claiming a pending message", () => {
+  test("a lapsed claim's recovered text doesn't hide the claim that replaced it", async () => {
+    vi.useFakeTimers();
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hello" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const placeholder = messages[1]!;
+    const messageId = placeholder._id as Id<"messages">;
+    const claim = () =>
+      t.mutation(api.messages.claimPendingMessage, { threadId, messageId });
+    expect(await claim()).toMatchObject({ status: "claimed" });
+    // The first attempt streams a tool step and an answer, then dies.
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: placeholder.order,
+      stepOrder: placeholder.stepOrder,
+      format: "UIMessageChunk",
+      pendingMessageId: messageId,
+    });
+    await t.mutation(api.streams.addDelta, {
+      streamId,
+      start: 0,
+      end: 9,
+      parts: [
+        { type: "start-step" },
+        {
+          type: "tool-input-available",
+          toolCallId: "call-1",
+          toolName: "lookup",
+          input: {},
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "call-1",
+          output: { type: "text", value: "found" },
+        },
+        { type: "finish-step" },
+        { type: "start-step" },
+        { type: "text-start", id: "text" },
+        { type: "text-delta", id: "text", delta: "first attempt" },
+        { type: "text-end", id: "text" },
+        { type: "finish-step" },
+      ],
+    });
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+    expect(await claim()).toMatchObject({ status: "claimed" });
+
+    // The first attempt's text is recovered after the second claim.
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(1);
+      await t.finishInProgressScheduledFunctions();
+    }
+    expect(
+      (await t.run((ctx) => ctx.db.query("messages").collect())).at(-1)?.text,
+    ).toBe("first attempt");
+
+    expect(await claim()).toMatchObject({ status: "running" });
+  });
+
+  test("refuses a message from another thread, and leaves it alone", async () => {
+    const t = initConvexTest();
+    const seed = async () => {
+      const thread = await t.mutation(api.threads.createThread, {});
+      const threadId = thread._id as Id<"threads">;
+      const { messages } = await t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [
+          { message: { role: "user", content: "hello" } },
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+      });
+      return { threadId, messageId: messages[1]!._id as Id<"messages"> };
+    };
+    const mine = await seed();
+    const theirs = await seed();
+
+    await expect(
+      t.mutation(api.messages.claimPendingMessage, {
+        threadId: mine.threadId,
+        messageId: theirs.messageId,
+      }),
+    ).rejects.toThrow();
+
+    const { page } = await t.query(api.messages.listMessagesByThreadId, {
+      threadId: mine.threadId,
+      order: "asc",
+    });
+    await expect(
+      t.mutation(api.messages.claimPendingMessage, {
+        threadId: mine.threadId,
+        messageId: page[0]!._id as Id<"messages">,
+      }),
+    ).rejects.toThrow();
+    expect(
+      await t.mutation(api.messages.claimPendingMessage, theirs),
+    ).toMatchObject({ status: "claimed" });
   });
 });

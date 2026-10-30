@@ -124,8 +124,58 @@ const read = app.action({
   handler: (ctx, { threadId }) => readThread(ctx, threadId),
 });
 
+// Delays creating the stream row, which writing deltas waits on.
+const streamWithSlowStreamCreation = app.action({
+  args: { threadId: v.string(), pendingMessageId: v.string() },
+  handler: async (ctx, { threadId, pendingMessageId }) => {
+    const stepSaveStreamIds: (string | undefined)[] = [];
+    const slow = {
+      ...ctx,
+      runMutation: (async (reference, args) => {
+        if (reference === components.agent.streams.create) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const save = args as {
+          pendingMessageId?: string;
+          streamId?: string;
+          messages?: MessageDoc[];
+        };
+        if (save.pendingMessageId && save.messages?.at(-1)?.status) {
+          stepSaveStreamIds.push(save.streamId);
+        }
+        return ctx.runMutation(reference, args);
+      }) as ActionCtx["runMutation"],
+    };
+    const result = await agent.streamText(
+      slow,
+      { threadId },
+      {
+        pendingMessageId,
+        model: mockModel({
+          contentSteps: [
+            [
+              {
+                type: "tool-call",
+                toolCallId: "tc-lookup",
+                toolName: "lookup",
+                input: "{}",
+              },
+            ],
+            [{ type: "text", text: "Looked it up" }],
+          ],
+        }),
+      },
+      { saveStreamDeltas: { throttleMs: 0, returnImmediately: true } },
+    );
+    await result.consumeStream();
+    // Let the background stream consumer finish.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return stepSaveStreamIds;
+  },
+});
+
 const { api, createTest } = app.defineModules({
-  "claims/test": { queue, answer, read },
+  "claims/test": { queue, answer, read, streamWithSlowStreamCreation },
 });
 
 function reset() {
@@ -255,5 +305,24 @@ describe("answering once (workflow retries, duplicate webhooks)", () => {
     expect(
       await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
     ).toBe("answered");
+  });
+});
+
+describe("a stream follows the pending message it saves into", () => {
+  test("each step save passes the stream, even if creating it is slow", async () => {
+    reset();
+    const t = createTest();
+    const { threadId, pendingMessageId } = await t.action(
+      api.claims.test.queue,
+      {},
+    );
+
+    const streamIds = await t.action(
+      api.claims.test.streamWithSlowStreamCreation,
+      { threadId, pendingMessageId },
+    );
+
+    expect(streamIds).toHaveLength(1);
+    expect(streamIds[0]).toEqual(expect.any(String));
   });
 });

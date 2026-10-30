@@ -59,15 +59,29 @@ const usageHandler: UsageHandler = async (_ctx, args) => {
 const weather = createTool({
   description: "Get the weather",
   inputSchema: z.object({ city: z.string() }),
-  execute: async (_ctx, { city }) => `Sunny in ${city}`,
+  execute: async (_ctx, { city }) => {
+    weatherRuns++;
+    return `Sunny in ${city}`;
+  },
 });
+let weatherRuns = 0;
+let failContinuation = false;
 
 // The model only serves the steps after a batch result, i.e. the follow-up
 // generation once a batched tool call has run.
 const continuationModel = mockModel({
   provider: PROVIDER,
   modelId: MODEL_ID,
-  content: [{ type: "text", text: "It is sunny in Paris." }],
+  doGenerate: async () => {
+    if (failContinuation) {
+      failContinuation = false;
+      throw new Error("provider unavailable");
+    }
+    return generated([{ type: "text", text: "It is sunny in Paris." }]);
+  },
+  doStream: async () => {
+    throw new Error("not streamed");
+  },
 });
 const agent = new Agent(app.components.agent, {
   name: "Batch Agent",
@@ -430,5 +444,46 @@ describe("batch generation by composition", () => {
       [a.threadId, MODEL_ID, PROVIDER],
       [normalThreadId, MODEL_ID, PROVIDER],
     ]);
+  });
+
+  test("a failed save keeps the batch open, and the retry doesn't rerun the batched tool", async () => {
+    const t = createTest();
+    const [, b] = await t.action(api.batch.test.setup, {});
+    const batchId = await t.action(api.batch.test.start, { items: [b] });
+    const [providerBatchId] = [...batches.keys()].slice(-1);
+    completeBatch(providerBatchId, (request) => ({
+      type: "text",
+      id: request.id,
+      status: "succeeded",
+      result: generated(
+        [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "weather",
+            input: JSON.stringify({ city: "Paris" }),
+          },
+        ],
+        "tool-calls",
+      ),
+    }));
+    weatherRuns = 0;
+    failContinuation = true;
+
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("pending");
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
+
+    expect(weatherRuns).toBe(1);
+    const thread = await t.query(api.batch.test.list, {
+      threadId: b.threadId,
+    });
+    expect(thread.map((m) => [m.message?.role, m.status])).toEqual([
+      ["user", "success"],
+      ["assistant", "success"],
+      ["tool", "success"],
+      ["assistant", "failed"],
+      ["assistant", "success"],
+    ]);
+    expect(thread.at(-1)?.text).toBe("It is sunny in Paris.");
   });
 });
