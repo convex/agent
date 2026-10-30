@@ -4,6 +4,7 @@
 
 - `streamObject` fails its pending message when the object fails its schema,
   instead of leaving it pending (#438)
+- Keep the whole order being continued in context, past the recent window (#436)
 
 ## 0.7.9
 

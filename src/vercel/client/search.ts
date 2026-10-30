@@ -37,7 +37,7 @@ import {
 import { prepareApprovalContext } from "./prepareApprovalContext.js";
 
 const DEFAULT_VECTOR_SCORE_THRESHOLD = 0.0;
-// Bound the rare boundary-extension query; incomplete orders are trimmed below.
+// Bound each page that completes an order split by the recent window.
 const MAX_ORDER_COMPLETION_MESSAGES = 1_000;
 // 10k characters should be more than enough for most cases, and stays under
 // the 8k token limit for some models.
@@ -165,7 +165,7 @@ export async function fetchRecentAndSearchMessages(
       opts.recentMessages ?? DEFAULT_RECENT_MESSAGES,
       null,
     );
-    let page = firstPage.page;
+    const page = [...firstPage.page];
     const oldest = page.at(-1);
     if (
       oldest &&
@@ -173,16 +173,32 @@ export async function fetchRecentAndSearchMessages(
       !firstPage.isDone &&
       firstPage.continueCursor
     ) {
-      const completionPage = await fetchRecentPage(
-        Math.min(oldest.stepOrder, MAX_ORDER_COMPLETION_MESSAGES),
-        firstPage.continueCursor,
+      // The order being continued holds the prompt, so it is read whole. An
+      // older order gets one page, and is trimmed below if still split.
+      const continued =
+        !!targetMessageId &&
+        page[0].order === oldest.order &&
+        (
+          page.find((m) => m._id === targetMessageId) ??
+          (
+            await ctx.runQuery(component.messages.getMessagesByIds, {
+              messageIds: [targetMessageId],
+            })
+          )[0]
+        )?.order === oldest.order;
+      let next = firstPage;
+      do {
+        next = await fetchRecentPage(
+          Math.min(page.at(-1)!.stepOrder, MAX_ORDER_COMPLETION_MESSAGES),
+          next.continueCursor,
+        );
+        page.push(...next.page.filter((m) => m.order === oldest.order));
+      } while (
+        continued &&
+        !next.isDone &&
+        next.page.at(-1)?.order === oldest.order &&
+        page.at(-1)!.stepOrder > 0
       );
-      page = [
-        ...page,
-        ...completionPage.page.filter(
-          (message) => message.order === oldest.order,
-        ),
-      ];
     }
     const retained = trimIncompleteOldestOrder(sorted(page));
     included = new Set(retained.map((m) => m._id));
