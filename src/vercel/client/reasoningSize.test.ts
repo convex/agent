@@ -81,6 +81,29 @@ describe("step reasoning is stored once and derived on read (#418)", () => {
     expect(ui.parts.filter((p) => p.type === "reasoning")).toHaveLength(2);
   });
 
+  test("redacted reasoning reads back as the SDK reports it", async () => {
+    const t = initConvexTest();
+    const agent = agentWith({
+      content: [
+        { type: "reasoning", text: "", providerMetadata: SIGNED },
+        { type: "text", text: "done" },
+      ],
+    });
+    const { threadId, step } = await t.action(async (ctx) => {
+      const threadId = await createThread(ctx, component, {});
+      const result = await agent.generateText(
+        ctx,
+        { threadId },
+        { prompt: "think" },
+      );
+      const [{ reasoningText, reasoning }] = result.steps;
+      return { threadId, step: { reasoningText, reasoning } };
+    });
+    const assistant = await readAssistant(t, threadId);
+    expect(assistant.reasoning).toBe(step.reasoningText);
+    expect(assistant.reasoningDetails).toEqual(step.reasoning);
+  });
+
   test("a failed stream saves its reasoning once", async () => {
     const t = initConvexTest();
     const agent = agentWith({

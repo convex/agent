@@ -67,8 +67,10 @@ export function deriveReasoning(
   if (parts.length === 0) {
     return {};
   }
+  // Joined and emptied as the AI SDK's reasoningText is.
+  const reasoning = parts.map((part) => part.text).join("");
   return {
-    reasoning: parts.map((part) => part.text).join(""),
+    reasoning: reasoning || undefined,
     reasoningDetails: parts,
   };
 }
