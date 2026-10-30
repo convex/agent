@@ -15,14 +15,13 @@ export default {
     status: v.union(v.literal("pending"), v.literal("done")),
     // Lets a provider webhook trigger a poll without being trusted otherwise.
     webhookToken: v.string(),
+    // Each request's id is its prompt message, answered in pendingMessageId.
+    items: v.array(
+      v.object({
+        threadId: v.string(),
+        promptMessageId: v.string(),
+        pendingMessageId: v.string(),
+      }),
+    ),
   }),
-  batchItems: defineTable({
-    batchId: v.id("batches"),
-    threadId: v.string(),
-    // The prompt message is the request id, so each result knows its thread.
-    promptMessageId: v.string(),
-    status: v.union(v.literal("pending"), v.literal("done")),
-  })
-    .index("batchId_status", ["batchId", "status"])
-    .index("batchId_promptMessageId", ["batchId", "promptMessageId"]),
 };

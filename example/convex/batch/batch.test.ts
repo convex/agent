@@ -267,8 +267,7 @@ describe("batch generation by composition", () => {
       "weather",
     ]);
 
-    // Each thread shows a pending answer while the batch runs, and each
-    // request is keyed by that placeholder.
+    // Each thread shows a pending answer while the batch runs.
     expect(await t.action(api.batch.test.save, { batchId })).toBe("pending");
     const placeholders: string[] = [];
     for (const x of [a, b, c, d]) {
@@ -281,7 +280,9 @@ describe("batch generation by composition", () => {
       ]);
       placeholders.push(thread[1]._id);
     }
-    expect(requests.map((r) => r.id)).toEqual(placeholders);
+    expect(requests.map((r) => r.id)).toEqual(
+      [a, b, c, d].map((x) => x.promptMessageId),
+    );
     const [pendingA] = placeholders;
 
     // The user keeps talking in thread A while the batch runs.
@@ -291,7 +292,7 @@ describe("batch generation by composition", () => {
     });
 
     completeBatch(providerBatchId, (request) => {
-      if (request.id === pendingA) {
+      if (request.id === a.promptMessageId) {
         return {
           type: "text",
           id: request.id,
@@ -299,7 +300,7 @@ describe("batch generation by composition", () => {
           result: generated(ANSWER),
         };
       }
-      if (request.id === placeholders[1]) {
+      if (request.id === b.promptMessageId) {
         return {
           type: "text",
           id: request.id,
@@ -317,7 +318,7 @@ describe("batch generation by composition", () => {
           ),
         };
       }
-      if (request.id === placeholders[2]) {
+      if (request.id === c.promptMessageId) {
         return {
           type: "text",
           id: request.id,
@@ -355,16 +356,20 @@ describe("batch generation by composition", () => {
 
     // A: the answer lands at the prompt's order, before the follow-up, with
     // the same stored shape as a normal generation.
+    vi.useFakeTimers();
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
     const threadA = await t.query(api.batch.test.list, {
       threadId: a.threadId,
     });
-    expect(threadA.map((m) => [m.order, m.stepOrder, m.message?.role])).toEqual(
-      [
-        [0, 0, "user"],
-        [0, 1, "assistant"],
-        [1, 0, "user"],
-      ],
-    );
+    expect(
+      threadA.map((m) => [m.order, m.stepOrder, m.message?.role, m.status]),
+    ).toEqual([
+      [0, 0, "user", "success"],
+      // The claim that crashed.
+      [0, 1, "assistant", "failed"],
+      [0, 2, "assistant", "success"],
+      [1, 0, "user", "success"],
+    ]);
     expect(threadA[1]._id).toBe(pendingA);
     const normalThreadId = await t.action(api.batch.test.generateNormally, {
       prompt: "Question A",
@@ -372,8 +377,8 @@ describe("batch generation by composition", () => {
     const normal = await t.query(api.batch.test.list, {
       threadId: normalThreadId,
     });
-    expect(storedShape(threadA[1])).toEqual(storedShape(normal[1]));
-    expect(storedShape(threadA[1])).toMatchObject({
+    expect(storedShape(threadA[2])).toEqual(storedShape(normal[1]));
+    expect(storedShape(threadA[2])).toMatchObject({
       status: "success",
       agentName: "Batch Agent",
       model: MODEL_ID,
