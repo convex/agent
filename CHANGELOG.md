@@ -11,6 +11,8 @@
   `output-error` (#162, #441)
 - Store a step's reasoning once, in content, so long reasoning fits the document
   size limit (#418, #423)
+- `getFilesToDelete` and `deleteFiles` take a `lastTouchedBefore` cutoff to
+  clean up recent unreferenced files (#361, #437)
 
 ## 0.7.9
 

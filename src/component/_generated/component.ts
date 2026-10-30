@@ -73,7 +73,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       deleteFiles: FunctionReference<
         "mutation",
         "internal",
-        { fileIds: Array<string>; force?: boolean },
+        {
+          fileIds: Array<string>;
+          force?: boolean;
+          lastTouchedBefore?: number;
+        },
         Array<string>,
         Name
       >;
@@ -98,6 +102,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "query",
         "internal",
         {
+          lastTouchedBefore?: number;
           paginationOpts: {
             cursor: string | null;
             endCursor?: string | null;
