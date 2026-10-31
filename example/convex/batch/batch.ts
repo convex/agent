@@ -57,7 +57,11 @@ export async function startThreadBatch(
   agent: Agent,
   batchApi: BatchApi,
   items: { threadId: string; promptMessageId: string }[],
-  webhookUrl?: (batchId: Id<"batches">, token: string) => string,
+  options: {
+    webhookUrl?: (batchId: Id<"batches">, token: string) => string;
+    /** Schedules `pollBatch`, which polls with `batchAgent`. */
+    pollAfterMs?: number;
+  } = {},
 ) {
   const model = languageModelOf(agent);
   const requests = await Promise.all(
@@ -81,17 +85,17 @@ export async function startThreadBatch(
       } as TextBatchRequest;
     }),
   );
-  // Saved before submitting, so a crash before the provider's reference is
-  // saved leaves a batch for the poll to find instead of paid work nobody
-  // asks for.
+  // Saved, with the first poll, before submitting, so a crash before the
+  // provider's reference is saved leaves a batch for the poll to find instead
+  // of paid work nobody asks for.
   const { batchId, webhookToken } = await ctx.runMutation(
     internal.batch.batch.createBatch,
-    { items },
+    { items, pollAfterMs: options.pollAfterMs },
   );
   const batch = await startBatch({
     provider: batchApi,
     requests,
-    webhookUrl: webhookUrl?.(batchId, webhookToken),
+    webhookUrl: options.webhookUrl?.(batchId, webhookToken),
   });
   await ctx.runMutation(internal.batch.batch.recordBatch, {
     batchId,
@@ -253,11 +257,9 @@ export const startBatchForThreads = internalAction({
   returns: v.id("batches"),
   handler: async (ctx, { items }): Promise<Id<"batches">> => {
     const batchApi = batchApiFor(languageModelOf(batchAgent));
-    const batchId = await startThreadBatch(ctx, batchAgent, batchApi, items);
-    await ctx.scheduler.runAfter(60_000, internal.batch.batch.pollBatch, {
-      batchId,
+    return startThreadBatch(ctx, batchAgent, batchApi, items, {
+      pollAfterMs: 60_000,
     });
-    return batchId;
   },
 });
 
@@ -317,9 +319,10 @@ export const createBatch = internalMutation({
     items: v.array(
       v.object({ threadId: v.string(), promptMessageId: v.string() }),
     ),
+    pollAfterMs: v.optional(v.number()),
   },
   returns: v.object({ batchId: v.id("batches"), webhookToken: v.string() }),
-  handler: async (ctx, { items }) => {
+  handler: async (ctx, { items, pollAfterMs }) => {
     const queued = [];
     for (const item of items) {
       const { messageId } = await saveMessage(ctx, components.agent, {
@@ -335,6 +338,15 @@ export const createBatch = internalMutation({
       webhookToken,
       items: queued,
     });
+    if (pollAfterMs !== undefined) {
+      await ctx.scheduler.runAfter(
+        pollAfterMs,
+        internal.batch.batch.pollBatch,
+        {
+          batchId,
+        },
+      );
+    }
     return { batchId, webhookToken };
   },
 });

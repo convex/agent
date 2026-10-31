@@ -155,9 +155,10 @@ can't trigger polls.
   while any claim is `"running"`.
 - **Save before submitting.** If the action dies after the provider accepts the
   batch but before its reference is saved, the batch is still paid for. Because
-  the items were saved first, a later poll can find it: the example lists the
-  provider's batches created since, once the submitting action must have ended,
-  and adopts the one whose results answer its prompt messages.
+  the items were saved first, with the first poll scheduled in the same
+  mutation, a later poll can find it: the example lists the provider's batches
+  created since, once the submitting action must have ended, and adopts the one
+  whose results answer its prompt messages.
 - **Keep polling through errors.** Schedule the next poll before doing the work,
   and cancel it once the batch is done, so a failed poll doesn't strand the
   batch. A very large batch may need its results split across several actions to
