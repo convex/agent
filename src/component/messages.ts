@@ -337,6 +337,13 @@ async function addMessagesHandler(
     // Defend against there being existing messages with this parent.
     const maxMessage = await getMaxMessage(ctx, threadId, order);
     stepOrder = maxMessage?.stepOrder ?? promptMessage.stepOrder;
+  } else if (pendingMessageId) {
+    // Saved into its pending message's order, e.g. recovered stream steps.
+    const pendingMessage = await ctx.db.get("messages", pendingMessageId);
+    assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
+    order = pendingMessage.order;
+    const maxMessage = await getMaxMessage(ctx, threadId, order);
+    stepOrder = maxMessage?.stepOrder ?? pendingMessage.stepOrder;
   } else {
     const maxMessage = await getMaxMessage(ctx, threadId);
     order = maxMessage?.order ?? -1;
