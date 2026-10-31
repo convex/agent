@@ -267,11 +267,12 @@ code), plus about 1,570 lines of tests (library and the batch example).
    a separate `answerClaim` mutation, but then the answer and its save are two
    transactions, and a crash between them leaves a finished answer that a
    takeover would regenerate.
-9. **Batch replay** replays the result only into an answer with nothing saved
-   yet, on the first model call, so a retried batch item doesn't replay its tool
-   call. It is a recipe-level rule; should the replay model live in the library?
-   Finding a lost batch also relies on `doListBatches` (OpenAI and Anthropic
-   have it); without it, the items are failed after the action time limit.
+9. **Batch replay** replays the result until its tool calls are in the context
+   the claimed generation loaded, so neither a retry nor an overlapping poll
+   replays a tool call that was saved. It is a recipe-level rule; should the
+   replay model live in the library? Finding a lost batch also relies on
+   `doListBatches` (OpenAI and Anthropic have it); without it, the items are
+   failed after the action time limit.
 10. **Stream creation timing**: the link is set from the pending message when
     the stream row is created. Codex flagged that a row created after the first
     step save would link the replaced message. I couldn't reproduce it (writing
