@@ -10,6 +10,7 @@ import {
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
 import {
+  serializeMessage,
   serializeResponseMessages,
   serializeObjectResult,
 } from "../mapping.js";
@@ -24,7 +25,11 @@ import type {
   Config,
   Options,
 } from "./types.js";
-import type { Message, MessageDoc } from "../../validators.js";
+import type {
+  Message,
+  MessageDoc,
+  MessageWithMetadata,
+} from "../../validators.js";
 import {
   getModelName,
   getProviderName,
@@ -38,9 +43,7 @@ import { errorToString } from "./utils.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
-  toSave:
-    | { step: { model?: ModelOrMetadata } }
-    | { object: unknown },
+  toSave: { step: { model?: ModelOrMetadata } } | { object: unknown },
   activeModel: ModelOrMetadata,
 ): ModelOrMetadata {
   return "step" in toSave ? (toSave.step.model ?? activeModel) : activeModel;
@@ -89,7 +92,7 @@ function rawRequestResponseInclude(
   return {
     ...requested,
     requestBody: requested.requestBody ?? true,
-    ...((operation === "generateText" || operation === "generateObject")
+    ...(operation === "generateText" || operation === "generateObject"
       ? { responseBody: requested.responseBody ?? true }
       : {}),
   };
@@ -325,12 +328,12 @@ export async function startGeneration<
   assert(model, "model is required");
   let activeModel: ModelOrMetadata = model;
 
-  let initialResponseMessages: ModelMessage[] = [];
   let held:
     | {
         step: StepResult<ToolSet, RUNTIME_CONTEXT>;
         responseMessages: ModelMessage[];
       }
+    | { toolResults: ModelMessage[] }
     | undefined;
   let failure: string | undefined;
   let stopped: { error: unknown } | undefined;
@@ -439,7 +442,8 @@ export async function startGeneration<
         step: StepResult<TOOLS, RUNTIME_CONTEXT>;
         responseMessages?: ModelMessage[];
       }
-    | { object: GenerateObjectResult<unknown> };
+    | { object: GenerateObjectResult<unknown> }
+    | { toolResults: ModelMessage[] };
   const persist = async <TOOLS extends ToolSet>(
     toSave: ToSave<TOOLS>,
     createPendingMessage: boolean | undefined,
@@ -464,6 +468,15 @@ export async function startGeneration<
           toSave.object,
           activeModel,
         );
+      } else if ("toolResults" in toSave) {
+        serialized = {
+          messages: await Promise.all(
+            toSave.toolResults.map(
+              (message): Promise<MessageWithMetadata> =>
+                serializeMessage(ctx, component, message),
+            ),
+          ),
+        };
       } else {
         const newResponseMessages =
           toSave.responseMessages ?? toSave.step.response.messages;
@@ -530,6 +543,7 @@ export async function startGeneration<
         savedMessages.push(...saved.messages);
       }
     }
+    if ("toolResults" in toSave) return;
     const output = "object" in toSave ? toSave.object : toSave.step;
     if (opts.rawRequestResponseHandler) {
       await opts.rawRequestResponseHandler(ctx, {
@@ -568,19 +582,14 @@ export async function startGeneration<
     },
     fail,
     endStep: (step) => {
-      held = {
-        step,
-        responseMessages: [
-          ...initialResponseMessages,
-          ...step.response.messages,
-        ],
-      };
-      initialResponseMessages = [];
+      held = { step, responseMessages: step.response.messages };
     },
     beforeStep: async ({ stepNumber, responseMessages }, streamId) => {
       if (stepNumber === 0) {
-        initialResponseMessages = [...responseMessages];
-        return;
+        if (responseMessages.length === 0) return;
+        // Approved tools ran before the first request. Saving their results
+        // first means a retry after that request fails doesn't run them again.
+        held = { toolResults: [...responseMessages] };
       }
       try {
         if (failure === undefined) {
