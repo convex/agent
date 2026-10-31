@@ -48,7 +48,7 @@ export function planToolCallResponses(
     requestMessageId = doc._id;
   };
   const providerExecuted = new Set<string>();
-  const answeredApprovals = new Map<string, boolean>();
+  const answeredApprovals = new Set<string>();
   const answeredCalls = new Set<string>();
 
   // Newest first, so a call's answers are seen before the call itself.
@@ -57,7 +57,7 @@ export function planToolCallResponses(
     const content = doc.message.content;
     for (const part of content) {
       if (part.type === "tool-approval-response") {
-        answeredApprovals.set(part.approvalId, part.approved);
+        answeredApprovals.add(part.approvalId);
       } else if (part.type === "tool-result") {
         answeredCalls.add(part.toolCallId);
       }
@@ -90,12 +90,13 @@ export function planToolCallResponses(
         pendingCalls.has(part.toolCallId)
       ) {
         const approvalId = approvalRequests.get(part.toolCallId);
-        const approved =
-          approvalId === undefined || answeredApprovals.get(approvalId);
-        if (answeredCalls.has(part.toolCallId) || approved === false) {
+        if (
+          answeredCalls.has(part.toolCallId) ||
+          (approvalId && answeredApprovals.has(approvalId))
+        ) {
           throw new Error(`Tool call ${part.toolCallId} was already handled`);
         }
-        if (approved === undefined) {
+        if (approvalId) {
           throw new Error(`Tool call ${part.toolCallId} is awaiting approval`);
         }
         if (part.providerExecuted) {

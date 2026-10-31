@@ -224,8 +224,8 @@ A tool without `execute` runs in the browser. Generation stops at its call, and
 the tool part waits in the `input-available` state until the client answers it
 with `addToolOutput`. Like an approval, the output is saved next to its call,
 and a second answer is rejected. Naming the tool keeps a client from answering a
-call to any other tool. A client tool can also set `needsApproval`; it then
-takes its output once approved.
+call to any other tool. A client tool cannot set `needsApproval`: ask the user
+in the client before answering.
 
 ```ts
 const getLocation = createTool({

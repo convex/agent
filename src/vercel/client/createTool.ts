@@ -280,6 +280,12 @@ export function createTool<
   }
 
   const executeHandler = def.execute ?? (def as any).handler;
+  if (!executeHandler && def.needsApproval) {
+    throw new Error(
+      "A client tool (one without execute) cannot need approval." +
+        " Ask the user in the client before calling addToolOutput.",
+    );
+  }
 
   const t = tool<INPUT, OUTPUT, TOOL_CONTEXT>({
     type: "function",

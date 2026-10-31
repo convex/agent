@@ -1211,7 +1211,7 @@ export class Agent<
    * with `promptMessageId` set to the returned `messageId`.
    *
    * Rejects a call to another tool, a call that is not found or awaits
-   * approval, and a call that already has a result or was denied.
+   * approval, and a call that was already handled.
    *
    * @param ctx A ctx object from a mutation.
    * @param args.threadId The thread containing the tool call.
@@ -1233,9 +1233,6 @@ export class Agent<
       | { state: "output-error"; errorText: string; output?: never }
     ),
   ): Promise<{ messageId: string }> {
-    if (this.options.tools?.[tool]?.execute) {
-      throw new Error(`Tool ${tool} runs on the server, not the client`);
-    }
     return ctx.runMutation(this.component.messages.respondToToolCallApprovals, {
       threadId,
       agentName: this.options.name,

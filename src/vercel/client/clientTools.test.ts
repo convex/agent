@@ -27,16 +27,10 @@ const deleteFile = createTool({
   },
 });
 
-const confirmLocation = createTool({
-  inputSchema: z.object({ precise: z.boolean() }),
-  needsApproval: true,
-});
-
-const tools = { getLocation, deleteFile, confirmLocation };
+const tools = { getLocation, deleteFile };
 const callIds: Record<string, string> = {
   getLocation: "tc-client",
   deleteFile: "tc-delete",
-  confirmLocation: "tc-confirm",
 };
 
 const models = new Map<string, MockLanguageModel>();
@@ -241,6 +235,15 @@ describe("addToolOutput", () => {
     expect(getLocation.execute).toBeUndefined();
   });
 
+  test("createTool rejects a client tool that needs approval", () => {
+    expect(() =>
+      createTool({
+        inputSchema: z.object({ precise: z.boolean() }),
+        needsApproval: true,
+      }),
+    ).toThrow(/cannot need approval/);
+  });
+
   for (const stream of [false, true]) {
     const mode = stream ? "streamText" : "generateText";
 
@@ -349,49 +352,41 @@ describe("addToolOutput", () => {
     ).rejects.toThrow(/Tool call tc-client was already handled/);
   });
 
-  test("an output after a denial is rejected", async () => {
-    const t = createTest();
-    const threadId = await t.action(api.clientTools.start, {
-      name: "after-denial",
-      stream: false,
-      toolNames: ["confirmLocation"],
+  for (const approved of [true, false]) {
+    test(`an output after ${approved ? "an approval" : "a denial"} is rejected`, async () => {
+      const t = createTest();
+      const threadId = await t.action(api.clientTools.start, {
+        name: `after-${approved}`,
+        stream: false,
+        toolNames: ["deleteFile"],
+      });
+      await t.mutation(api.clientTools.decide, { threadId, approved });
+      await expect(
+        t.mutation(api.clientTools.addOutput, {
+          threadId,
+          tool: "deleteFile",
+          toolCallId: "tc-delete",
+          output: "done",
+        }),
+      ).rejects.toThrow(/Tool call tc-delete was already handled/);
     });
-    await t.mutation(api.clientTools.decide, { threadId, approved: false });
-    await expect(
-      t.mutation(api.clientTools.addOutput, {
-        threadId,
-        tool: "confirmLocation",
-        toolCallId: "tc-confirm",
-        output: { city: "Paris" },
-      }),
-    ).rejects.toThrow(/Tool call tc-confirm was already handled/);
-  });
+  }
 
-  test("an output for an approved server tool is rejected", async () => {
+  test("an output naming another tool is rejected", async () => {
     const t = createTest();
     const threadId = await t.action(api.clientTools.start, {
-      name: "server-tool",
+      name: "other-tool",
       stream: false,
-      toolNames: ["deleteFile"],
     });
-    await t.mutation(api.clientTools.decide, { threadId, approved: true });
     await expect(
       t.mutation(api.clientTools.addOutput, {
         threadId,
         tool: "deleteFile",
-        toolCallId: "tc-delete",
-        output: "done",
-      }),
-    ).rejects.toThrow(/Tool deleteFile runs on the server/);
-    await expect(
-      t.mutation(api.clientTools.addOutput, {
-        threadId,
-        tool: "getLocation",
-        toolCallId: "tc-delete",
+        toolCallId: "tc-client",
         output: "done",
       }),
     ).rejects.toThrow(
-      /Tool call tc-delete is a call to deleteFile, not getLocation/,
+      /Tool call tc-client is a call to getLocation, not deleteFile/,
     );
   });
 
@@ -448,51 +443,21 @@ describe("addToolOutput", () => {
     }
   }
 
-  test("an approved client tool accepts its output", async () => {
-    const t = createTest();
-    const name = "approved-client";
-    const threadId = await t.action(api.clientTools.start, {
-      name,
-      stream: false,
-      toolNames: ["confirmLocation"],
-    });
-    await t.mutation(api.clientTools.decide, { threadId, approved: true });
-    const { messageId } = await t.mutation(api.clientTools.addOutput, {
-      threadId,
-      tool: "confirmLocation",
-      toolCallId: "tc-confirm",
-      output: { city: "Paris" },
-    });
-    const next = await t.action(api.clientTools.cont, {
-      name,
-      threadId,
-      promptMessageId: messageId,
-      stream: false,
-    });
-    expect(next.text).toBe("You are in Paris.");
-    expect(next.prompt.at(-1).content).toContainEqual(
-      expect.objectContaining({
-        toolCallId: "tc-confirm",
-        output: { type: "json", value: { city: "Paris" } },
-      }),
-    );
-  });
-
   test("an output for a call awaiting approval is rejected", async () => {
     const t = createTest();
     const threadId = await t.action(api.clientTools.start, {
       name: "awaiting",
       stream: false,
-      toolNames: ["confirmLocation"],
+      toolNames: ["deleteFile"],
     });
     await expect(
       t.mutation(api.clientTools.addOutput, {
         threadId,
-        tool: "confirmLocation",
-        toolCallId: "tc-confirm",
-        output: { city: "Paris" },
+        tool: "deleteFile",
+        toolCallId: "tc-delete",
+        output: "done",
       }),
-    ).rejects.toThrow(/Tool call tc-confirm is awaiting approval/);
+    ).rejects.toThrow(/Tool call tc-delete is awaiting approval/);
   });
 
   test("an output for a provider-executed call is rejected", async () => {
