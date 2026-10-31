@@ -99,8 +99,14 @@ Where the row is written:
 - `deleteMessage` deletes the row of the key it deletes.
 
 Recovery skips the messages a stream already saved by a count kept on the stream
-(`savedMessages`, bumped by each save that passes the stream), not by
-`stepOrder`, which other answers at the same order interleave.
+(`savedMessages`, 0 for a linked stream and bumped by each step save that passes
+the stream), not by `stepOrder`, which other answers at the same order
+interleave. A stream's link follows its pending message: any save into that
+message moves the link to the new pending message (by an index on
+`pendingMessageId`), whether or not it passes the stream. Approved tools'
+results are saved without the stream, since they aren't one of its steps, and
+recovery skips a result whose tool call came before the stream instead of
+stopping at it.
 
 The client passes `final` from `end()` when the AI SDK finished
 (`generateText`'s end, `streamText`'s `finish` part without an error) and from
@@ -173,7 +179,7 @@ save that passes the stream moves the link to the new pending message.
   `claimedAt`, `latestMessageId`, `answered`. Indexes `threadId_messageId`
   (claim lookup, scoped to the thread) and `latestMessageId` (the step save that
   moves it).
-- `streamingMessages.pendingMessageId?: Id<"messages">` and
+- `streamingMessages.pendingMessageId?: Id<"messages">` (indexed) and
   `streamingMessages.savedMessages?: number`.
 
 Nothing on `messages`. Old rows have no claim and no link and behave as before.
