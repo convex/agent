@@ -106,7 +106,8 @@ message moves the link to the new pending message (by an index on
 `pendingMessageId`), whether or not it passes the stream. Approved tools'
 results are saved without the stream, since they aren't one of its steps, and
 recovery skips a result whose tool call came before the stream instead of
-stopping at it.
+stopping at it. A save into a pending message without a prompt (recovery) stays
+at that message's order, after a newer prompt too.
 
 The client passes `final` from `end()` when the AI SDK finished
 (`generateText`'s end, `streamText`'s `finish` part without an error) and from
