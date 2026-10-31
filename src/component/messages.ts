@@ -649,11 +649,17 @@ export const claimPendingMessage = mutation({
     if (claim?.answered) {
       return { status: "answered" as const, messageId: claim.latestMessageId };
     }
-    assert(
-      claim ||
-        (key.message?.role === "assistant" && key.status !== "success"),
-      `Message ${messageId} is not a pending assistant message`,
-    );
+    if (!claim) {
+      assert(
+        key.message?.role === "assistant" && key.status !== "success",
+        `Message ${messageId} is not a pending assistant message`,
+      );
+      const owner = await ctx.db
+        .query("claims")
+        .withIndex("latestMessageId", (q) => q.eq("latestMessageId", messageId))
+        .first();
+      assert(!owner, `Message ${messageId} is claimed as ${owner?.messageId}`);
+    }
     const latest = claim
       ? await ctx.db.get("messages", claim.latestMessageId)
       : key;
