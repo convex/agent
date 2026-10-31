@@ -237,6 +237,9 @@ function incrementMessagePosition(value: number, field: "order" | "stepOrder") {
   return value + 1;
 }
 
+// Normally one: the stream of the generation saving into the message.
+const MAX_LINKED_STREAMS = 10;
+
 async function addMessagesHandler(
   ctx: MutationCtx,
   args: ObjectType<typeof addMessagesArgs>,
@@ -450,11 +453,23 @@ async function addMessagesHandler(
     // TODO: delete the associated stream data for the order/stepOrder
     toReturn.push((await ctx.db.get("messages", messageId))!);
   }
+  const next = toReturn.at(-1);
+  if (pendingMessageId && next?.status === "pending") {
+    const linked = await ctx.db
+      .query("streamingMessages")
+      .withIndex("pendingMessageId", (q) =>
+        q.eq("pendingMessageId", pendingMessageId),
+      )
+      .take(MAX_LINKED_STREAMS);
+    for (const s of linked) {
+      await ctx.db.patch("streamingMessages", s._id, {
+        pendingMessageId: next._id,
+      });
+    }
+  }
   if (stream) {
-    const next = toReturn.at(-1);
     await ctx.db.patch("streamingMessages", stream._id, {
-      pendingMessageId:
-        next?.status === "pending" ? next._id : stream.pendingMessageId,
+      ...(next?.status === "pending" && { pendingMessageId: next._id }),
       savedMessages:
         (stream.savedMessages ?? 0) +
         toReturn.filter((m) => m.status !== "pending").length,

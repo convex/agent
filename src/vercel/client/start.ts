@@ -593,7 +593,11 @@ export async function startGeneration<
       }
       try {
         if (failure === undefined) {
-          await saveHeld({ createPendingMessage: true, streamId });
+          // The approved results aren't one of the stream's steps.
+          await saveHeld({
+            createPendingMessage: true,
+            streamId: stepNumber === 0 ? undefined : streamId,
+          });
         }
         if (failure !== undefined) throw new Error(failure);
       } catch (error) {

@@ -329,9 +329,9 @@ export function reducePersistedUIMessageChunks(
         const toolCallId = stringField(chunk, "toolCallId");
         const part = toolPart(toolCallId);
         if (!part) {
-          // Orphan continuation of a prior message's tool call: stop reducing
-          // rather than persist parts referencing results this stream lacks.
-          break chunkLoop;
+          // The result of a tool called before this stream (e.g. an approved
+          // one), which its generation saves on its own.
+          break;
         }
         Object.assign(part, {
           state: "output-available" as const,
@@ -350,7 +350,7 @@ export function reducePersistedUIMessageChunks(
         const toolCallId = stringField(chunk, "toolCallId");
         const part = toolPart(toolCallId);
         if (!part) {
-          break chunkLoop;
+          break;
         }
         Object.assign(part, {
           state: "output-error" as const,
@@ -370,7 +370,7 @@ export function reducePersistedUIMessageChunks(
         const toolCallId = stringField(chunk, "toolCallId");
         const part = toolPart(toolCallId);
         if (!part) {
-          break chunkLoop;
+          break;
         }
         if (!part.approval) {
           throw new PersistedUIMessageChunkError(
@@ -630,7 +630,9 @@ function stringField(record: Record<string, unknown>, field: string): string {
 function booleanField(record: Record<string, unknown>, field: string): boolean {
   const value = record[field];
   if (typeof value !== "boolean") {
-    throw new Error(`Persisted UIMessageChunk field ${field} must be a boolean`);
+    throw new Error(
+      `Persisted UIMessageChunk field ${field} must be a boolean`,
+    );
   }
   return value;
 }

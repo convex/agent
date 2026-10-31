@@ -194,6 +194,7 @@ export const create = mutation({
   args: omit(schema.tables.streamingMessages.validator.fields, [
     "state",
     "fileRefs",
+    "savedMessages",
   ]),
   returns: v.id("streamingMessages"),
   handler: async (ctx, args) => {
@@ -202,6 +203,7 @@ export const create = mutation({
     const streamId = await ctx.db.insert("streamingMessages", {
       ...args,
       state,
+      savedMessages: args.pendingMessageId ? 0 : undefined,
     });
     const timeoutFnId = await ctx.scheduler.runAfter(
       TIMEOUT_INTERVAL,

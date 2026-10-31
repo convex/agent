@@ -168,7 +168,7 @@ describe("reducePersistedUIMessageChunks", () => {
     expect(part.preliminary).toBeUndefined();
   });
 
-  it("requires boolean approval responses and stops at orphan continuations", () => {
+  it("requires boolean approval responses and skips results of earlier tool calls", () => {
     const approvalPrefix = [
       {
         type: "tool-input-available",
@@ -196,10 +196,13 @@ describe("reducePersistedUIMessageChunks", () => {
     const orphaned = reducePersistedUIMessageChunks(
       createPersistedUIMessageChunkState(),
       [
-        { type: "tool-output-available", toolCallId: "orphan", output: 1 },
-        { type: "text-start", id: "unreachable" },
+        { type: "tool-output-available", toolCallId: "approved", output: 1 },
+        { type: "tool-output-denied", toolCallId: "denied" },
+        { type: "text-start", id: "after" },
       ],
     );
-    expect(orphaned.state.parts).toEqual([]);
+    expect(orphaned.state.parts).toEqual([
+      expect.objectContaining({ type: "text" }),
+    ]);
   });
 });

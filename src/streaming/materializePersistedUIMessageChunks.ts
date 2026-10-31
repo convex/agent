@@ -392,7 +392,8 @@ function isToolPart(part: PersistedUIMessagePart): part is PersistedToolPart {
 
 function getToolName(part: PersistedToolPart): string {
   if (part.type === "dynamic-tool") {
-    if (!part.toolName) throw new Error("Dynamic tool part is missing toolName");
+    if (!part.toolName)
+      throw new Error("Dynamic tool part is missing toolName");
     return part.toolName;
   }
   // AI SDK's UI wire format encodes static tools as `tool-${name}`.

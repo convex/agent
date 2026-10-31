@@ -160,6 +160,7 @@ export const schema = defineSchema({
       }),
     ),
   })
+    .index("pendingMessageId", ["pendingMessageId"])
     // There should only be one per "order" index
     // If another exists, it's deleted and replaced
     .index("threadId_state_order_stepOrder", [
