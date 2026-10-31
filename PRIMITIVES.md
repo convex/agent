@@ -140,7 +140,10 @@ save that passes the stream moves the link to the new pending message.
    refuses to save into a pending message that was already saved.
 4. Steps and tool results that were saved, or that a lapsed attempt streamed in
    full, are never redone by a retry: takeover recovers them in the same
-   transaction, before the new attempt can load its context.
+   transaction, before the new attempt can load its context. A tool whose result
+   was neither saved nor streamed when its action died (including an approved
+   tool, which runs before the first step) can run again: its side effect needs
+   its own idempotency key, e.g. the `toolCallId`.
 5. A message's role or status never decides a claim, except that a first claim
    needs a pending or failed assistant message.
 6. A stream timeout fails only the message its stream is linked to, recovers
@@ -270,3 +273,8 @@ code), plus about 1,570 lines of tests (library and the batch example).
     deltas waits on creating the row, and the SDK stream waits on the deltas,
     even with a slow `streams.create`), so there is a regression test and no
     fix. Creating the row before the first step would close it for sure.
+11. **Tools in flight when an action dies** run again after the takeover
+    (invariant 4). Codex asks for per-call execution state and treating
+    uncertain executions as needing reconciliation. That is a tool-level
+    exactly-once problem the claim can't solve alone; should the library record
+    "started" per `toolCallId` and refuse to rerun those without the app's say?
