@@ -717,6 +717,100 @@ describe("claiming a pending message", () => {
     expect(await claim()).toMatchObject({ status: "running" });
   });
 
+  async function claimedWithStreamedToolStep(
+    t: ReturnType<typeof initConvexTest>,
+  ) {
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const promptMessageId = messages[0]!._id as Id<"messages">;
+    const pending = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const messageId = pending.messages[0]!._id as Id<"messages">;
+    const claimed = await t.mutation(api.messages.claimPendingMessage, {
+      threadId,
+      messageId,
+    });
+    assert(claimed.status === "claimed");
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: claimed.message.order,
+      stepOrder: claimed.message.stepOrder,
+      format: "UIMessageChunk",
+      pendingMessageId: messageId,
+    });
+    await t.mutation(api.streams.addDelta, {
+      streamId,
+      start: 0,
+      end: 4,
+      parts: [
+        { type: "start-step" },
+        {
+          type: "tool-input-available",
+          toolCallId: "call-1",
+          toolName: "lookup",
+          input: {},
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "call-1",
+          output: "found",
+        },
+        { type: "finish-step" },
+      ],
+    });
+    return { threadId, promptMessageId, messageId };
+  }
+
+  test("a generation can't save into its message once it was recovered", async () => {
+    const t = initConvexTest();
+    const { threadId, messageId } = await claimedWithStreamedToolStep(t);
+    // E.g. an app's timeout, while the generation is still running.
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId,
+      result: { status: "failed", error: "Too slow" },
+    });
+    const recovered = await t.run((ctx) => ctx.db.get("messages", messageId));
+    expect(recovered).toMatchObject({ status: "success", tool: true });
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        pendingMessageId: messageId,
+        failPendingSteps: false,
+        messages: [{ message: { role: "assistant", content: "late" } }],
+      }),
+    ).rejects.toThrow();
+    expect(await t.run((ctx) => ctx.db.get("messages", messageId))).toEqual(
+      recovered,
+    );
+  });
+
+  test("a recovered key still answers its own prompt", async () => {
+    const t = initConvexTest();
+    const { threadId, promptMessageId, messageId } =
+      await claimedWithStreamedToolStep(t);
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId,
+      result: { status: "failed", error: "Stream timed out" },
+    });
+
+    expect(
+      await t.mutation(api.messages.claimPendingMessage, {
+        threadId,
+        messageId,
+      }),
+    ).toMatchObject({ status: "claimed", promptMessageId });
+  });
+
   test("refuses a pending message another claim saves into", async () => {
     vi.useFakeTimers();
     const t = initConvexTest();
