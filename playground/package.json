@@ -25,8 +25,8 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
-    "alpha": "rm -rf dist && npm run build && V=`npm version prerelease --preid alpha` && git add package-lock.json && git add package.json && git commit -m playground/$V && git tag playground/$V && npm publish --tag alpha && git push --tags",
-    "release": "rm -rf dist && npm run build && V=`npm version patch` && git add package-lock.json && git add package.json && git commit -m playground/$V && git tag playground/$V && npm publish && git push --tags",
+    "alpha": "rm -rf dist && npm run build && npm version prerelease --preid alpha && V=playground/v$(node -p \"require('./package.json').version\") && git add package.json ../package-lock.json && git commit -m $V && git tag $V && npm publish --tag alpha && git push --tags",
+    "release": "rm -rf dist && npm run build && npm version patch && V=playground/v$(node -p \"require('./package.json').version\") && git add package.json ../package-lock.json && git commit -m $V && git tag $V && npm publish && git push --tags",
     "preview": "vite preview"
   },
   "bin": {

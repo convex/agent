@@ -1,27 +1,48 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:best-practices"],
-  "schedule": ["* * * * 1-5"],
+  "extends": [
+    "config:best-practices",
+    ":disableDependencyDashboard",
+    "group:vite"
+  ],
   "timezone": "America/Los_Angeles",
-  "minimumReleaseAge": "14 days",
+  "schedule": ["* 0-8 * * 1"],
+  "prConcurrentLimit": 5,
+  "postUpdateOptions": ["npmDedupe"],
+  "osvVulnerabilityAlerts": true,
   "packageRules": [
     {
-      "groupName": "Routine updates",
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"]
+      "description": "Overrides security:minimumReleaseAgeNpm's 3 days. Keep it at or above minimumReleaseAge in .npmrc, which Renovate doesn't read.",
+      "matchUpdateTypes": ["major", "minor", "patch"],
+      "minimumReleaseAge": "14 days"
     },
     {
-      "description": "Each @vitejs plugin major peers on one vite major, so they can only land together.",
-      "groupName": "vite",
-      "matchPackageNames": ["vite", "@vitejs/**"],
-      "matchUpdateTypes": ["major"]
+      "groupName": "GitHub Actions",
+      "matchManagers": ["github-actions"]
+    },
+    {
+      "groupName": "eslint",
+      "matchPackageNames": [
+        "eslint",
+        "@eslint/**",
+        "eslint-plugin-*",
+        "typescript-eslint",
+        "globals"
+      ]
+    },
+    {
+      "groupName": "AI SDK",
+      "matchPackageNames": ["ai", "@ai-sdk/**"]
+    },
+    {
+      "description": "The supported Node floor is a release decision.",
+      "matchDepTypes": ["engines"],
+      "enabled": false
     },
     {
       "description": "typescript-eslint's peer range; raise when it supports newer TypeScript.",
       "matchPackageNames": ["typescript"],
       "allowedVersions": "<6.1.0"
     }
-  ],
-  "constraints": {
-    "npm": "^10"
-  }
+  ]
 }
