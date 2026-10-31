@@ -81,23 +81,25 @@ const batch = await startBatch({
 ## Saving the results
 
 A batch result is exactly what the model would have returned from a normal call.
-Hand it to `agent.generateText` through a model that replays it for the prompt
-the batch saw, and defers to the real model once steps after it were saved:
+Hand it to `agent.generateText` through a model that replays it on its first
+call and defers to the real model after that:
 
 ```ts
 function replayModel(
   result: LanguageModelV4GenerateResult,
   model: LanguageModelV4,
 ): LanguageModelV4 {
+  let replayed = false;
   return {
     specificationVersion: "v4",
     provider: model.provider,
     modelId: model.modelId,
     supportedUrls: model.supportedUrls,
-    doGenerate: async (options) =>
-      options.prompt.at(-1)?.role === "user"
-        ? result
-        : model.doGenerate(options),
+    doGenerate: async (options) => {
+      if (replayed) return model.doGenerate(options);
+      replayed = true;
+      return result;
+    },
     doStream: (options) => model.doStream(options),
   };
 }
@@ -107,11 +109,21 @@ const results = await batchApi.doGetBatchResults({ batchId: batch.id });
 for await (const item of results) {
   // item.id is the pendingMessageId; look up the item's threadId by it.
   if (item.status === "succeeded") {
+    // Once the result's step was saved into the answer (e.g. a retry after
+    // its tool call ran), continue with the real model instead.
+    const [answer] = await ctx.runQuery(
+      components.agent.messages.getMessagesByIds,
+      { messageIds: [pendingMessageId] },
+    );
+    const replay = !answer?.message?.content.length;
     // Throws AlreadyClaimedError if another poll saved or is saving it.
     await agent.generateText(
       ctx,
       { threadId },
-      { pendingMessageId, model: replayModel(item.result, model) },
+      {
+        pendingMessageId,
+        model: replay ? replayModel(item.result, model) : model,
+      },
     );
   } else {
     await agent.finalizeMessage(ctx, {

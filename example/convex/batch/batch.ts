@@ -144,13 +144,12 @@ async function findSubmittedBatch(
       ) {
         return waiting ? "pending" : undefined;
       }
-      // A failed batch has no results to save, ours or not.
-      if (listed.status === "failed") continue;
       // A pending batch, or one whose results can't be read yet, may be ours.
+      // A failed (e.g. expired) batch can still have results.
       const first =
-        listed.status === "completed"
-          ? await firstResult(batchApi, listed.batchId)
-          : undefined;
+        listed.status === "pending"
+          ? undefined
+          : await firstResult(batchApi, listed.batchId);
       if (first === undefined) {
         waiting = true;
         continue;
@@ -165,25 +164,27 @@ async function findSubmittedBatch(
 }
 
 /**
- * A model that answers the prompt the batch saw with the batch's result, and
- * defers to the real model once steps after it were saved, e.g. when a retry
- * continues after the batched tool call already ran. Passing it to `agent.generateText` saves the
- * result through the normal path: the stored message shape, usage reporting,
- * embeddings, and tool execution plus any follow-up steps.
+ * A model that answers its first call with the batch's result, and defers to
+ * the real model after that, e.g. for the steps after a batched tool call.
+ * Passing it to `agent.generateText` saves the result through the normal path:
+ * the stored message shape, usage reporting, embeddings, and tool execution
+ * plus any follow-up steps.
  */
 function replayModel(
   result: LanguageModelV4GenerateResult,
   model: LanguageModelV4,
 ): LanguageModelV4 {
+  let replayed = false;
   return {
     specificationVersion: "v4",
     provider: model.provider,
     modelId: model.modelId,
     supportedUrls: model.supportedUrls,
-    doGenerate: async (options) =>
-      options.prompt.at(-1)?.role === "user"
-        ? result
-        : model.doGenerate(options),
+    doGenerate: async (options) => {
+      if (replayed) return model.doGenerate(options);
+      replayed = true;
+      return result;
+    },
     doStream: (options) => model.doStream(options),
   };
 }
@@ -235,13 +236,20 @@ export async function saveBatchResults(
       await fail(queued.pendingMessageId, item.error?.message ?? item.status);
       continue;
     }
+    // Once the result's step was saved into the answer, a retry continues
+    // after it with the real model.
+    const [answer] = await ctx.runQuery(
+      components.agent.messages.getMessagesByIds,
+      { messageIds: [queued.pendingMessageId] },
+    );
+    const replay = !answer?.message?.content.length;
     try {
       await agent.generateText(
         ctx,
         { threadId: queued.threadId },
         {
           pendingMessageId: queued.pendingMessageId,
-          model: replayModel(item.result, model),
+          model: replay ? replayModel(item.result, model) : model,
         },
       );
     } catch (error) {
