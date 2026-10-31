@@ -811,6 +811,110 @@ describe("claiming a pending message", () => {
     ).toMatchObject({ status: "claimed", promptMessageId });
   });
 
+  test("a takeover recovers every streamed step when another answer shares the order", async () => {
+    vi.useFakeTimers();
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const promptMessageId = messages[0]!._id as Id<"messages">;
+    const queue = async () =>
+      (
+        await t.mutation(api.messages.addMessages, {
+          threadId,
+          promptMessageId,
+          messages: [
+            { message: { role: "assistant", content: [] }, status: "pending" },
+          ],
+        })
+      ).messages[0]!;
+    const key = await queue();
+    // E.g. a second batch answering the same prompt.
+    await queue();
+    const messageId = key._id as Id<"messages">;
+    await t.mutation(api.messages.claimPendingMessage, { threadId, messageId });
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: key.order,
+      stepOrder: key.stepOrder,
+      format: "UIMessageChunk",
+      pendingMessageId: messageId,
+    });
+    const toolStep = (id: string) => [
+      { type: "start-step" },
+      {
+        type: "tool-input-available",
+        toolCallId: id,
+        toolName: "lookup",
+        input: {},
+      },
+      { type: "tool-output-available", toolCallId: id, output: "found" },
+      { type: "finish-step" },
+    ];
+    await t.mutation(api.streams.addDelta, {
+      streamId,
+      start: 0,
+      end: 8,
+      parts: [...toolStep("call-1"), ...toolStep("call-2")],
+    });
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      pendingMessageId: messageId,
+      streamId,
+      failPendingSteps: false,
+      messages: [
+        {
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "call-1",
+                toolName: "lookup",
+                input: {},
+              },
+            ],
+          },
+        },
+        {
+          message: {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call-1",
+                toolName: "lookup",
+                output: { type: "text", value: "found" },
+              },
+            ],
+          },
+        },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+    expect(
+      await t.mutation(api.messages.claimPendingMessage, {
+        threadId,
+        messageId,
+      }),
+    ).toMatchObject({ status: "claimed" });
+
+    const all = await t.run((ctx) => ctx.db.query("messages").collect());
+    const toolCallIds = (role: string) =>
+      all
+        .filter((m) => m.status === "success" && m.message?.role === role)
+        .flatMap((m) => m.message!.content as { toolCallId?: string }[])
+        .map((part) => part.toolCallId);
+    expect(toolCallIds("assistant")).toEqual(["call-1", "call-2"]);
+    expect(toolCallIds("tool")).toEqual(["call-1", "call-2"]);
+  });
+
   test("refuses a pending message another claim saves into", async () => {
     vi.useFakeTimers();
     const t = initConvexTest();

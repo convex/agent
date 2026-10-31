@@ -98,7 +98,7 @@ const agent = new Agent(app.components.agent, {
 
 type MockBatch = {
   requests: TextBatchV4Request[];
-  status: "pending" | "completed";
+  status: "pending" | "completed" | "failed";
   results: BatchItemResult[];
   createdAt: string;
 };
@@ -159,9 +159,10 @@ const diesAfterSubmitting: BatchApi = {
 function completeBatch(
   batchId: string,
   results: (request: TextBatchV4Request) => BatchItemResult | undefined,
+  status: "completed" | "failed" = "completed",
 ) {
   const batch = batches.get(batchId)!;
-  batch.status = "completed";
+  batch.status = status;
   batch.results = batch.requests.flatMap((r) => results(r) ?? []);
 }
 
@@ -566,6 +567,66 @@ describe("batch generation by composition", () => {
     expect(thread.map((m) => [m.status, m.text])).toEqual([
       ["success", "Question A"],
       ["success", "Answer for A"],
+    ]);
+  });
+
+  test("a lost batch that expired keeps the results it has", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = createTest();
+    const [a] = await t.action(api.batch.test.setup, {});
+    await expect(
+      t.action(api.batch.test.startAndDie, { items: [a] }),
+    ).rejects.toThrow("action died");
+    const batchId = await t.query(api.batch.test.latestBatch, {});
+    const [providerBatchId] = [...batches.keys()].slice(-1);
+    completeBatch(
+      providerBatchId,
+      (request) => ({
+        type: "text",
+        id: request.id,
+        status: "succeeded",
+        result: generated(ANSWER),
+      }),
+      "failed",
+    );
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
+    const thread = await t.query(api.batch.test.list, {
+      threadId: a.threadId,
+    });
+    expect(thread.map((m) => [m.status, m.text])).toEqual([
+      ["success", "Question A"],
+      ["success", "Answer for A"],
+    ]);
+  });
+
+  test("two batches for the same prompt each save their own result", async () => {
+    const t = createTest();
+    const [a] = await t.action(api.batch.test.setup, {});
+    const saved = [];
+    for (const text of ["First batch", "Second batch"]) {
+      const batchId = await t.action(api.batch.test.start, { items: [a] });
+      const [providerBatchId] = [...batches.keys()].slice(-1);
+      completeBatch(providerBatchId, (request) => ({
+        type: "text",
+        id: request.id,
+        status: "succeeded",
+        result: generated([{ type: "text", text }]),
+      }));
+      saved.push(batchId);
+    }
+    for (const batchId of saved) {
+      expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
+    }
+
+    const thread = await t.query(api.batch.test.list, {
+      threadId: a.threadId,
+    });
+    expect(thread.map((m) => [m.status, m.text])).toEqual([
+      ["success", "Question A"],
+      ["success", "First batch"],
+      ["success", "Second batch"],
     ]);
   });
 
