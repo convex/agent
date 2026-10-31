@@ -10,6 +10,7 @@ import {
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
 import {
+  serializeMessage,
   serializeResponseMessages,
   serializeObjectResult,
 } from "../mapping.js";
@@ -24,7 +25,11 @@ import type {
   Config,
   Options,
 } from "./types.js";
-import type { Message, MessageDoc } from "../../validators.js";
+import type {
+  Message,
+  MessageDoc,
+  MessageWithMetadata,
+} from "../../validators.js";
 import {
   getModelName,
   getProviderName,
@@ -34,15 +39,29 @@ import { wrapTools, type ToolCtx } from "./createTool.js";
 import type { Agent } from "../index.js";
 import { assert, omit } from "convex-helpers";
 import { saveInputMessages } from "./saveInputMessages.js";
+import { errorToString } from "./utils.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
-  toSave:
-    | { step: { model?: ModelOrMetadata } }
-    | { object: unknown },
+  toSave: { step: { model?: ModelOrMetadata } } | { object: unknown },
   activeModel: ModelOrMetadata,
 ): ModelOrMetadata {
   return "step" in toSave ? (toSave.step.model ?? activeModel) : activeModel;
+}
+
+/**
+ * Thrown instead of generating when a `pendingMessageId` was already claimed:
+ * its generation is `"running"`, or its answer was saved (`"answered"`).
+ * `messageId` is the generation's latest message.
+ */
+export class AlreadyClaimedError extends Error {
+  constructor(
+    public readonly status: "running" | "answered",
+    public readonly messageId: string,
+  ) {
+    super(`The pending message's generation is ${status}`);
+    this.name = "AlreadyClaimedError";
+  }
 }
 
 type RawRequestResponseInclude = Record<string, boolean>;
@@ -73,7 +92,7 @@ function rawRequestResponseInclude(
   return {
     ...requested,
     requestBody: requested.requestBody ?? true,
-    ...((operation === "generateText" || operation === "generateObject")
+    ...(operation === "generateText" || operation === "generateObject"
       ? { responseBody: requested.responseBody ?? true }
       : {}),
   };
@@ -102,6 +121,11 @@ export async function startGeneration<
      * the prompt for the LLM call in another call.
      */
     promptMessageId?: string;
+    /**
+     * A pending message to save the generation into. See
+     * {@link AgentPrompt.pendingMessageId}.
+     */
+    pendingMessageId?: string;
     /**
      * The model to use for the LLM calls. This will override the model specified
      * in the Agent constructor.
@@ -171,6 +195,7 @@ export async function startGeneration<
   stepOrder: number;
   userId: string | undefined;
   promptMessageId: string | undefined;
+  pendingMessageId: string | undefined;
   updateModel: (model: ModelOrMetadata | undefined) => void;
   save: <TOOLS extends ToolSet>(
     toSave:
@@ -183,6 +208,33 @@ export async function startGeneration<
     finishStreamId?: string,
   ) => Promise<void>;
   fail: (reason: string) => Promise<void>;
+  /**
+   * Call from the AI SDK's onStepEnd. Holds the step until the SDK says what
+   * follows it.
+   */
+  endStep: <TOOLS extends ToolSet>(
+    step: StepResult<TOOLS, RUNTIME_CONTEXT>,
+  ) => void;
+  /**
+   * Call from the AI SDK's prepareStep. Saves the held step with a pending
+   * message for this one, and throws if that fails or the generation was
+   * replaced or stopped.
+   */
+  beforeStep: (
+    options: { stepNumber: number; responseMessages: ModelMessage[] },
+    streamId?: string,
+  ) => Promise<void>;
+  /**
+   * Saves the held step as the last one, failed with `error` if the AI SDK
+   * finished with one, and waits for any failure. Rejects with what stopped
+   * the generation, which the AI SDK swallows, also when called again.
+   * `unfinished` ends a generation that didn't finish, e.g. a stopped stream.
+   */
+  end: (options?: {
+    error?: string;
+    streamId?: string;
+    unfinished?: boolean;
+  }) => Promise<void>;
   getSavedMessages: () => MessageDoc[];
 }> {
   const userId =
@@ -192,27 +244,67 @@ export async function startGeneration<
         ?.userId) ??
     undefined;
 
+  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
+  let claimed:
+    | {
+        promptMessageId: string | undefined;
+        pendingMessage: MessageDoc;
+        savedMessages: MessageDoc[];
+      }
+    | undefined;
+  if (args.pendingMessageId) {
+    assert(
+      threadId && saveMessages !== "none",
+      "pendingMessageId needs a threadId and saved messages",
+    );
+    const claim = await ctx.runMutation(
+      component.messages.claimPendingMessage,
+      { threadId, messageId: args.pendingMessageId },
+    );
+    if (claim.status !== "claimed") {
+      throw new AlreadyClaimedError(claim.status, claim.messageId);
+    }
+    claimed = {
+      promptMessageId: claim.promptMessageId ?? args.promptMessageId,
+      pendingMessage: claim.message,
+      savedMessages: [],
+    };
+  }
+
+  // Fails the claimed message, so the next attempt can continue it rather
+  // than wait out the claim.
+  const failClaim = async (error: unknown): Promise<never> => {
+    if (claimed) {
+      await ctx.runMutation(component.messages.finalizeMessage, {
+        messageId: claimed.pendingMessage._id,
+        result: { status: "failed", error: errorToString(error) },
+      });
+    }
+    throw error;
+  };
   const context = await fetchContextWithPrompt(ctx, component, {
     ...opts,
     userId,
     threadId,
     messages: args.messages,
     prompt: args.prompt,
-    promptMessageId: args.promptMessageId,
-  });
+    promptMessageId: claimed?.promptMessageId ?? args.promptMessageId,
+  }).catch(failClaim);
   const allowSystemInMessages = args.allowSystemInMessages ?? true;
   if (
     !allowSystemInMessages &&
     context.messages.some((message) => message.role === "system")
   ) {
-    throw new Error(
-      "System messages in assembled message history require allowSystemInMessages: true. Use instructions for top-level system guidance.",
+    await failClaim(
+      new Error(
+        "System messages in assembled message history require allowSystemInMessages: true. Use instructions for top-level system guidance.",
+      ),
     );
   }
 
-  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
-  const { promptMessageId, pendingMessage, savedMessages } =
-    threadId && saveMessages !== "none"
+  const { promptMessageId, pendingMessage, savedMessages } = claimed
+    ? claimed
+    : threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
           userId,
@@ -236,23 +328,50 @@ export async function startGeneration<
   assert(model, "model is required");
   let activeModel: ModelOrMetadata = model;
 
-  // Both the caller's AbortSignal listener and AI SDK's onAbort can report
-  // the same cancellation. Share the one finalization instead of racing two
-  // mutations for the pending message.
-  let pendingMessageFailure: Promise<void> | undefined;
-  const fail = (reason: string): Promise<void> => {
-    if (!pendingMessageId) return Promise.resolve();
-    if (!pendingMessageFailure) {
-      const messageId = pendingMessageId;
-      pendingMessageFailure = ctx
-        .runMutation(component.messages.finalizeMessage, {
-          messageId,
-          result: { status: "failed", error: reason },
-        })
-        .then(() => undefined);
-    }
-    return pendingMessageFailure;
+  let held:
+    | {
+        step: StepResult<ToolSet, RUNTIME_CONTEXT>;
+        responseMessages: ModelMessage[];
+      }
+    | { toolResults: ModelMessage[] }
+    | undefined;
+  let failure: string | undefined;
+  let stopped: { error: unknown } | undefined;
+  let ended: Promise<void> | undefined;
+  // A failure can arrive while a step save is in flight, and must fail the
+  // pending message that save leaves.
+  let saving: Promise<unknown> = Promise.resolve();
+  const saveHeld = (options: {
+    createPendingMessage: boolean;
+    streamId?: string;
+    error?: string;
+    final?: boolean;
+  }) => {
+    const toSave = held;
+    held = undefined;
+    if (!toSave) return Promise.resolve();
+    const saved = persist(toSave, options.createPendingMessage, options);
+    saving = saved.catch(() => {});
+    return saved;
   };
+  // Both the caller's AbortSignal listener and AI SDK's onAbort can report
+  // the same cancellation, so there is one failure.
+  let failing: Promise<void> | undefined;
+  const fail = (reason: string): Promise<void> =>
+    (failing ??= (async () => {
+      failure ??= reason;
+      await saving;
+      // A step the SDK finished is kept.
+      await saveHeld({ createPendingMessage: false }).catch((error) => {
+        stopped ??= { error };
+      });
+      if (pendingMessageId) {
+        await ctx.runMutation(component.messages.finalizeMessage, {
+          messageId: pendingMessageId,
+          result: { status: "failed", error: reason },
+        });
+      }
+    })());
   if (args.abortSignal) {
     const abortSignal = args.abortSignal;
     abortSignal.addEventListener(
@@ -277,6 +396,7 @@ export async function startGeneration<
   );
   const {
     promptMessageId: _promptMessageId,
+    pendingMessageId: _pendingMessageId,
     messages: _messages,
     prompt: _prompt,
     instructions: _instructions,
@@ -317,12 +437,143 @@ export async function startGeneration<
   // tool execution IDs, message IDs, etc.) and they must be unique.
   // The pending message is linked via the explicit `pendingMessageId`
   // parameter passed to addMessages in the save closure.
+  type ToSave<TOOLS extends ToolSet> =
+    | {
+        step: StepResult<TOOLS, RUNTIME_CONTEXT>;
+        responseMessages?: ModelMessage[];
+      }
+    | { object: GenerateObjectResult<unknown> }
+    | { toolResults: ModelMessage[] };
+  const persist = async <TOOLS extends ToolSet>(
+    toSave: ToSave<TOOLS>,
+    createPendingMessage: boolean | undefined,
+    {
+      finishStreamId,
+      streamId,
+      error,
+      final,
+    }: {
+      finishStreamId?: string;
+      streamId?: string;
+      error?: string;
+      final?: boolean;
+    },
+  ) => {
+    if (threadId && saveMessages !== "none") {
+      let serialized;
+      if ("object" in toSave) {
+        serialized = await serializeObjectResult(
+          ctx,
+          component,
+          toSave.object,
+          activeModel,
+        );
+      } else if ("toolResults" in toSave) {
+        serialized = {
+          messages: await Promise.all(
+            toSave.toolResults.map(
+              (message): Promise<MessageWithMetadata> =>
+                serializeMessage(ctx, component, message),
+            ),
+          ),
+        };
+      } else {
+        const newResponseMessages =
+          toSave.responseMessages ?? toSave.step.response.messages;
+        // Even an empty completed step needs a durable assistant result so
+        // the pending message can be finalized at the storage boundary.
+        const responseMessagesToSave: ModelMessage[] =
+          newResponseMessages.length > 0
+            ? newResponseMessages
+            : [{ role: "assistant", content: [] }];
+        serialized = await serializeResponseMessages(
+          ctx,
+          component,
+          toSave.step,
+          activeModel,
+          responseMessagesToSave,
+        );
+      }
+      if (error !== undefined) {
+        for (const message of serialized.messages) {
+          message.status = "failed";
+          message.error = error;
+        }
+      }
+      const embeddings = await embedMessages(
+        ctx,
+        { threadId, ...opts, userId },
+        serialized.messages.map((m) => m.message),
+      );
+      if (createPendingMessage) {
+        serialized.messages.push({
+          message: { role: "assistant", content: [] },
+          status: "pending",
+        });
+        embeddings?.vectors.push(null);
+      }
+      const saved = await ctx.runMutation(component.messages.addMessages, {
+        userId,
+        threadId,
+        agentName: opts.agentName,
+        promptMessageId,
+        abandonIfPromptMissing: true,
+        pendingMessageId,
+        messages: serialized.messages,
+        embeddings,
+        failPendingSteps: false,
+        finishStreamId,
+        streamId,
+        final,
+      });
+      const lastMessage = saved.messages.at(-1)!;
+      if (createPendingMessage) {
+        if (lastMessage.status === "failed") {
+          pendingMessageId = undefined;
+          savedMessages.push(...saved.messages);
+          failure ??=
+            lastMessage.error ??
+            "Aborting - the pending message was marked as failed";
+        } else {
+          pendingMessageId = lastMessage._id;
+          savedMessages.push(...saved.messages.slice(0, -1));
+        }
+      } else {
+        pendingMessageId = undefined;
+        savedMessages.push(...saved.messages);
+      }
+    }
+    if ("toolResults" in toSave) return;
+    const output = "object" in toSave ? toSave.object : toSave.step;
+    if (opts.rawRequestResponseHandler) {
+      await opts.rawRequestResponseHandler(ctx, {
+        userId,
+        threadId,
+        agentName: opts.agentName,
+        request: output.request,
+        response: output.response,
+      });
+    }
+    if (opts.usageHandler && output.usage) {
+      const usageModel = resolveUsageModel(toSave, activeModel);
+      await opts.usageHandler(ctx, {
+        userId,
+        threadId,
+        agentName: opts.agentName,
+        model: getModelName(usageModel),
+        provider: getProviderName(usageModel),
+        usage: output.usage,
+        providerMetadata: output.providerMetadata,
+      });
+    }
+  };
   return {
     args: aiArgs,
     order: order ?? 0,
     stepOrder: stepOrder ?? 0,
     userId,
     promptMessageId,
+    pendingMessageId: pendingMessage?._id,
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {
@@ -330,111 +581,64 @@ export async function startGeneration<
       }
     },
     fail,
-    save: async <TOOLS extends ToolSet>(
-      toSave:
-        | {
-            step: StepResult<TOOLS, RUNTIME_CONTEXT>;
-            responseMessages?: ModelMessage[];
+    endStep: (step) => {
+      held = { step, responseMessages: step.response.messages };
+    },
+    beforeStep: async ({ stepNumber, responseMessages }, streamId) => {
+      if (stepNumber === 0) {
+        if (responseMessages.length === 0) return;
+        // Approved tools ran before the first request. Saving their results
+        // first means a retry after that request fails doesn't run them again.
+        held = { toolResults: [...responseMessages] };
+      }
+      try {
+        if (failure === undefined) {
+          // The approved results aren't one of the stream's steps.
+          await saveHeld({
+            createPendingMessage: true,
+            streamId: stepNumber === 0 ? undefined : streamId,
+          });
+        }
+        if (failure !== undefined) throw new Error(failure);
+      } catch (error) {
+        stopped ??= { error };
+        await fail(errorToString(error));
+        throw error;
+      }
+    },
+    end: async ({ unfinished, ...options } = {}) => {
+      if (held) {
+        ended = (async () => {
+          await saving;
+          try {
+            await saveHeld({
+              createPendingMessage: false,
+              final: !unfinished && options.error === undefined,
+              ...options,
+            });
+          } catch (error) {
+            await fail(errorToString(error));
+            throw error;
           }
-        | { object: GenerateObjectResult<unknown> },
+        })();
+      }
+      await ended;
+      await failing?.catch(() => {});
+      await saving;
+      if (stopped) throw stopped.error;
+    },
+    save: <TOOLS extends ToolSet>(
+      toSave: ToSave<TOOLS>,
       createPendingMessage?: boolean,
       /**
        * If provided, finish this stream atomically with the message save.
        * This prevents UI flickering from separate mutations (issue #181).
        */
       finishStreamId?: string,
-    ) => {
-      if (threadId && saveMessages !== "none") {
-        let serialized;
-        if ("object" in toSave) {
-          serialized = await serializeObjectResult(
-            ctx,
-            component,
-            toSave.object,
-            activeModel,
-          );
-        } else {
-          const newResponseMessages =
-            toSave.responseMessages ?? toSave.step.response.messages;
-          // Even an empty completed step needs a durable assistant result so
-          // the pending message can be finalized at the storage boundary.
-          const responseMessagesToSave: ModelMessage[] =
-            newResponseMessages.length > 0
-              ? newResponseMessages
-              : [{ role: "assistant", content: [] }];
-          serialized = await serializeResponseMessages(
-            ctx,
-            component,
-            toSave.step,
-            activeModel,
-            responseMessagesToSave,
-          );
-        }
-        const embeddings = await embedMessages(
-          ctx,
-          { threadId, ...opts, userId },
-          serialized.messages.map((m) => m.message),
-        );
-        if (createPendingMessage) {
-          serialized.messages.push({
-            message: { role: "assistant", content: [] },
-            status: "pending",
-          });
-          embeddings?.vectors.push(null);
-        }
-        const saved = await ctx.runMutation(component.messages.addMessages, {
-          userId,
-          threadId,
-          agentName: opts.agentName,
-          promptMessageId,
-          abandonIfPromptMissing: true,
-          pendingMessageId,
-          messages: serialized.messages,
-          embeddings,
-          failPendingSteps: false,
-          finishStreamId,
-        });
-        const lastMessage = saved.messages.at(-1)!;
-        if (createPendingMessage) {
-          if (lastMessage.status === "failed") {
-            pendingMessageId = undefined;
-            savedMessages.push(...saved.messages);
-            await fail(
-              lastMessage.error ??
-                "Aborting - the pending message was marked as failed",
-            );
-          } else {
-            pendingMessageId = lastMessage._id;
-            pendingMessageFailure = undefined;
-            savedMessages.push(...saved.messages.slice(0, -1));
-          }
-        } else {
-          pendingMessageId = undefined;
-          savedMessages.push(...saved.messages);
-        }
-      }
-      const output = "object" in toSave ? toSave.object : toSave.step;
-      if (opts.rawRequestResponseHandler) {
-        await opts.rawRequestResponseHandler(ctx, {
-          userId,
-          threadId,
-          agentName: opts.agentName,
-          request: output.request,
-          response: output.response,
-        });
-      }
-      if (opts.usageHandler && output.usage) {
-        const usageModel = resolveUsageModel(toSave, activeModel);
-        await opts.usageHandler(ctx, {
-          userId,
-          threadId,
-          agentName: opts.agentName,
-          model: getModelName(usageModel),
-          provider: getProviderName(usageModel),
-          usage: output.usage,
-          providerMetadata: output.providerMetadata,
-        });
-      }
-    },
+    ) =>
+      persist(toSave, createPendingMessage, {
+        finishStreamId,
+        final: !createPendingMessage,
+      }),
   };
 }

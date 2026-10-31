@@ -10,7 +10,7 @@ import { errorToString } from "./utils.js";
 
 const FINAL_TEXT = "Hello from the model";
 const PROVIDER_FAILURE_TEXT = "Mock provider failure";
-const CLEANUP_FAILURE_TEXT = "finalizeMessage rejected";
+const CLEANUP_FAILURE_TEXT = "saving the failure rejected";
 
 function hasKeys(
   value: unknown,
@@ -230,7 +230,11 @@ const streamTextCleanupFailure = app.action({
     const failingCtx = {
       ...ctx,
       runMutation: (async (reference, args) => {
-        if (hasKeys(args, ["messageId", "result"])) {
+        if (
+          hasKeys(args, ["messageId", "result"]) ||
+          (hasKeys(args, ["failPendingSteps"]) &&
+            JSON.stringify(args).includes('"status":"failed"'))
+        ) {
           throw new Error(CLEANUP_FAILURE_TEXT);
         }
         return ctx.runMutation(reference, args);
@@ -256,6 +260,23 @@ const streamTextCleanupFailure = app.action({
       caught = errorToString(error);
     }
     return { providerErrors, aborts, caught };
+  },
+});
+
+const streamTextFullStreamErrors = app.action({
+  args: { threadId: v.string(), returnImmediately: v.boolean() },
+  handler: async (ctx, { threadId, returnImmediately }) => {
+    const result = await failingAgent.streamText(
+      ctx,
+      { threadId },
+      { prompt: "Test", onError: () => {} },
+      { saveStreamDeltas: { returnImmediately, throttleMs: 0 } },
+    );
+    const errors: string[] = [];
+    for await (const part of result.fullStream) {
+      if (part.type === "error") errors.push(errorToString(part.error));
+    }
+    return errors;
   },
 });
 
@@ -374,6 +395,7 @@ const { api, createTest } = app.defineModules({
     streamTextNoStorage,
     streamTextNoStorageImmediate,
     streamTextCleanupFailure,
+    streamTextFullStreamErrors,
     streamTextRejectedRequest,
     streamTextAbortedMidStream,
     streamTextEmptyNoStorageAwaited,
@@ -569,6 +591,23 @@ describe("streamText abort cleanup", () => {
   });
 });
 
+describe("provider errors reach fullStream", () => {
+  test.each([false, true])(
+    "with saveStreamDeltas (returnImmediately: %s)",
+    async (returnImmediately) => {
+      const t = createTest();
+      const threadId = await t.run(async (ctx) =>
+        createThread(ctx, components.agent, { userId: "u1" }),
+      );
+      const errors = await t.action(api.streamText.streamTextFullStreamErrors, {
+        threadId,
+        returnImmediately,
+      });
+      expect(errors).toEqual([PROVIDER_FAILURE_TEXT]);
+    },
+  );
+});
+
 describe("provider rejects the first request (issue #387)", () => {
   test.each([
     ["awaited deltas", { chunking: "word" as const, throttleMs: 250 }],
@@ -700,10 +739,7 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
     expect(types.at(0)).toBe("start");
     expect(types).toContain("text-start");
     expect(types).toContain("text-end");
-    // The stream-level "finish" chunk is emitted after the last step ends, so
-    // it cannot exist yet; the row's finished status carries that instead.
-    expect(types.at(-1)).toBe("finish-step");
-    expect(types).not.toContain("finish");
+    expect(types.at(-1)).toBe("finish");
     expect(
       parts
         .filter((p) => p.type === "text-delta")

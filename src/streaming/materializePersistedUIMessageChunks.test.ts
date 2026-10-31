@@ -517,7 +517,9 @@ describe("projectPersistedUIMessageChunks", () => {
     expect(
       actual.flatMap((message) =>
         Array.isArray(message.message.content)
-          ? message.message.content.filter((part) => part.type === "tool-result")
+          ? message.message.content.filter(
+              (part) => part.type === "tool-result",
+            )
           : [],
       ),
     ).toHaveLength(2);

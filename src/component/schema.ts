@@ -83,6 +83,26 @@ export const schema = defineSchema({
     // Allows finding messages by vector embedding id
     .index("embeddingId_threadId", ["embeddingId", "threadId"]),
 
+  /**
+   * Generations' claim on a pending message an app saved, `messageId`. The
+   * messages saved under it can change role and status; only the claim says
+   * whether it was answered.
+   */
+  claims: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    /** When the current attempt claimed it. */
+    claimedAt: v.number(),
+    /** The current attempt's pending message, or the last one it saved. */
+    latestMessageId: v.id("messages"),
+    /** The key's prompt, which saving into the key can overwrite. */
+    promptMessageId: v.optional(v.id("messages")),
+    /** Set only by the save that ends a generation that finished. */
+    answered: v.boolean(),
+  })
+    .index("threadId_messageId", ["threadId", "messageId"])
+    .index("latestMessageId", ["latestMessageId"]),
+
   // Status: if it's done, it's deleted, then deltas are vacuumed
   streamingMessages: defineTable({
     // extra metadata?
@@ -109,6 +129,13 @@ export const schema = defineSchema({
         }),
       ),
     ),
+    /** The pending message this stream's generation saves into next. */
+    pendingMessageId: v.optional(v.id("messages")),
+    /**
+     * How many of the stream's messages were saved. Recovery starts after
+     * them; other answers at the same order make stepOrder unreliable.
+     */
+    savedMessages: v.optional(v.number()),
     /**
      * The step order of the first message in the stream.
      * If the stream ends up with both a tool call and a tool result,
@@ -133,6 +160,7 @@ export const schema = defineSchema({
       }),
     ),
   })
+    .index("pendingMessageId", ["pendingMessageId"])
     // There should only be one per "order" index
     // If another exists, it's deleted and replaced
     .index("threadId_state_order_stepOrder", [

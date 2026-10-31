@@ -1,0 +1,432 @@
+// See the docs at https://docs.convex.dev/agents/batch
+import type {
+  Experimental_BatchV4 as BatchApi,
+  LanguageModelV4,
+  LanguageModelV4GenerateResult,
+} from "@ai-sdk/provider";
+import {
+  experimental_getBatchStatus as getBatchStatus,
+  experimental_startBatch as startBatch,
+  type Experimental_TextBatchRequest as TextBatchRequest,
+} from "ai";
+import { openai } from "@ai-sdk/openai";
+import { anthropic } from "@ai-sdk/anthropic";
+import { type Infer, v } from "convex/values";
+import { Agent, AlreadyClaimedError, saveMessage } from "@convex-dev/agent";
+import { components, internal } from "../_generated/api";
+import type { Id } from "../_generated/dataModel";
+import {
+  type ActionCtx,
+  httpAction,
+  internalAction,
+  internalMutation,
+  internalQuery,
+} from "../_generated/server";
+import { defaultConfig } from "../agents/config";
+
+export const batchAgent = new Agent(components.agent, {
+  name: "Batch Agent",
+  instructions: "You are a concise assistant.",
+  ...defaultConfig,
+});
+
+function batchApiFor(model: LanguageModelV4): BatchApi {
+  if (model.provider.startsWith("openai")) return openai.experimental_batch();
+  if (model.provider.startsWith("anthropic")) {
+    return anthropic.experimental_batch();
+  }
+  throw new Error(`No batch API for ${model.provider}`);
+}
+
+function languageModelOf(agent: Agent): LanguageModelV4 {
+  const model = agent.options.languageModel;
+  if (typeof model !== "object" || model.specificationVersion !== "v4") {
+    throw new Error("Batching needs a LanguageModelV4 instance");
+  }
+  return model;
+}
+
+/**
+ * Saves a pending answer for each prompt message, so the thread shows it as
+ * queued, builds each thread's context exactly as a normal generation would,
+ * and submits one batch request per pending answer. The prompts must already
+ * be saved, e.g. with `saveMessage` in the mutation that queues the work.
+ */
+export async function startThreadBatch(
+  ctx: ActionCtx,
+  agent: Agent,
+  batchApi: BatchApi,
+  items: { threadId: string; promptMessageId: string }[],
+  options: {
+    webhookUrl?: (batchId: Id<"batches">, token: string) => string;
+    /** Schedules `pollBatch`, which polls with `batchAgent`. */
+    pollAfterMs?: number;
+  } = {},
+) {
+  const model = languageModelOf(agent);
+  // Saved, with the first poll, before submitting, so a crash before the
+  // provider's reference is saved leaves a batch for the poll to find instead
+  // of paid work nobody asks for.
+  const { batchId, webhookToken, queued } = await ctx.runMutation(
+    internal.batch.batch.createBatch,
+    { items, pollAfterMs: options.pollAfterMs },
+  );
+  const requests = await Promise.all(
+    queued.map(async ({ threadId, promptMessageId, pendingMessageId }) => {
+      const { args } = await agent.start(
+        ctx,
+        { promptMessageId },
+        { threadId, storageOptions: { saveMessages: "none" } },
+      );
+      const {
+        model: _model,
+        runtimeContext: _runtimeContext,
+        abortSignal: _abortSignal,
+        ...callArgs
+      } = args;
+      return {
+        ...callArgs,
+        // Unique to this submission, unlike the prompt, so results and a
+        // lost batch can't be confused with another batch for the prompt.
+        id: pendingMessageId,
+        type: "text",
+        model: model.modelId,
+      } as TextBatchRequest;
+    }),
+  );
+  const batch = await startBatch({
+    provider: batchApi,
+    requests,
+    webhookUrl: options.webhookUrl?.(batchId, webhookToken),
+  });
+  await ctx.runMutation(internal.batch.batch.recordBatch, {
+    batchId,
+    batch: { version: batch.version, id: batch.id, provider: batch.provider },
+  });
+  return batchId;
+}
+
+// No action runs longer than this, so one that submitted a batch earlier and
+// didn't save its reference never will.
+const ACTION_TIME_LIMIT_MS = 10 * 60 * 1000;
+const CLOCK_SKEW_MS = 60 * 1000;
+
+async function firstResult(batchApi: BatchApi, batchId: string) {
+  try {
+    const reader = (await batchApi.doGetBatchResults({ batchId })).getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    return value ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Finds a batch whose submitting action died before saving its reference:
+ * the provider's newer batch whose results answer these pending answers.
+ * Returns "pending" while it may still be saved or completed.
+ */
+async function findSubmittedBatch(
+  batchApi: BatchApi,
+  doc: { createdAt: number; items: { pendingMessageId: string }[] },
+): Promise<BatchReference | "pending" | undefined> {
+  if (Date.now() < doc.createdAt + ACTION_TIME_LIMIT_MS) return "pending";
+  const ours = new Set(doc.items.map((i) => i.pendingMessageId));
+  let waiting = false;
+  let cursor: string | undefined;
+  do {
+    const page = await batchApi.doListBatches?.({ cursor });
+    for (const listed of page?.batches ?? []) {
+      if (
+        listed.createdAt &&
+        Date.parse(listed.createdAt) < doc.createdAt - CLOCK_SKEW_MS
+      ) {
+        return waiting ? "pending" : undefined;
+      }
+      // A pending batch, or one whose results can't be read yet, may be ours.
+      // A failed (e.g. expired) batch can still have results.
+      const first =
+        listed.status === "pending"
+          ? undefined
+          : await firstResult(batchApi, listed.batchId);
+      if (first === undefined) {
+        waiting = true;
+        continue;
+      }
+      if (first && ours.has(first.id)) {
+        return { version: 2, id: listed.batchId, provider: batchApi.provider };
+      }
+    }
+    cursor = page?.nextCursor;
+  } while (cursor);
+  return waiting ? "pending" : undefined;
+}
+
+/**
+ * A model that answers with the batch's result, and defers to the real model
+ * once the result's tool calls are in the context: for the steps after them,
+ * and for a retry after an earlier attempt saved them. It decides from the
+ * context the claimed generation loaded, so overlapping polls agree. Passing
+ * it to `agent.generateText` saves the result through the normal path: the
+ * stored message shape, usage reporting, embeddings, and tool execution plus
+ * any follow-up steps.
+ */
+function replayModel(
+  result: LanguageModelV4GenerateResult,
+  model: LanguageModelV4,
+): LanguageModelV4 {
+  const toolCallIds = new Set(
+    result.content.flatMap((part) =>
+      part.type === "tool-call" ? [part.toolCallId] : [],
+    ),
+  );
+  return {
+    specificationVersion: "v4",
+    provider: model.provider,
+    modelId: model.modelId,
+    supportedUrls: model.supportedUrls,
+    doGenerate: async (options) => {
+      const applied = options.prompt.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.some(
+            (part) =>
+              part.type === "tool-call" && toolCallIds.has(part.toolCallId),
+          ),
+      );
+      return applied ? model.doGenerate(options) : result;
+    },
+    doStream: (options) => model.doStream(options),
+  };
+}
+
+/**
+ * Saves every finished result into its pending answer. Safe to call
+ * repeatedly: `generateText` claims the pending answer before replaying the
+ * result, so a duplicate webhook or an overlapping poll skips a result that is
+ * saved or being saved, and a poll after a crashed one picks it back up.
+ */
+export async function saveBatchResults(
+  ctx: ActionCtx,
+  agent: Agent,
+  batchApi: BatchApi,
+  batchId: Id<"batches">,
+): Promise<"pending" | "done"> {
+  const doc = await ctx.runQuery(internal.batch.batch.getBatch, { batchId });
+  if (!doc) return "pending";
+  if (doc.status === "done") return "done";
+  const fail = (messageId: string, error: string) =>
+    agent.finalizeMessage(ctx, {
+      messageId,
+      result: { status: "failed", error },
+    });
+  const batch = doc.batch ?? (await findSubmittedBatch(batchApi, doc));
+  if (batch === "pending") return "pending";
+  if (!batch) {
+    for (const { pendingMessageId } of doc.items) {
+      await fail(pendingMessageId, "The batch was not submitted");
+    }
+    await ctx.runMutation(internal.batch.batch.closeBatch, { batchId });
+    return "done";
+  }
+  if (!doc.batch) {
+    await ctx.runMutation(internal.batch.batch.recordBatch, { batchId, batch });
+  }
+  const { status } = await getBatchStatus({ provider: batchApi, batch });
+  if (status === "pending") return "pending";
+
+  const model = languageModelOf(agent);
+  const missing = new Map(doc.items.map((i) => [i.pendingMessageId, i]));
+  let unfinished = false;
+  const results = await batchApi.doGetBatchResults({ batchId: batch.id });
+  for await (const item of results) {
+    const queued = missing.get(item.id);
+    if (item.type !== "text" || !queued) continue;
+    missing.delete(item.id);
+    if (item.status !== "succeeded") {
+      await fail(queued.pendingMessageId, item.error?.message ?? item.status);
+      continue;
+    }
+    try {
+      await agent.generateText(
+        ctx,
+        { threadId: queued.threadId },
+        {
+          pendingMessageId: queued.pendingMessageId,
+          model: replayModel(item.result, model),
+        },
+      );
+    } catch (error) {
+      if (error instanceof AlreadyClaimedError) {
+        unfinished ||= error.status === "running";
+      } else {
+        // generateText failed its message, and the next poll continues it.
+        console.error("Saving batch result", error);
+        unfinished = true;
+      }
+    }
+  }
+  if (unfinished) return "pending";
+  for (const { pendingMessageId } of missing.values()) {
+    await fail(pendingMessageId, "Missing from batch results");
+  }
+  await ctx.runMutation(internal.batch.batch.closeBatch, { batchId });
+  return "done";
+}
+
+export const startBatchForThreads = internalAction({
+  args: {
+    items: v.array(
+      v.object({ threadId: v.string(), promptMessageId: v.string() }),
+    ),
+  },
+  returns: v.id("batches"),
+  handler: async (ctx, { items }): Promise<Id<"batches">> => {
+    const batchApi = batchApiFor(languageModelOf(batchAgent));
+    return startThreadBatch(ctx, batchAgent, batchApi, items, {
+      pollAfterMs: 60_000,
+    });
+  },
+});
+
+export const pollBatch = internalAction({
+  args: { batchId: v.id("batches") },
+  returns: v.null(),
+  handler: async (ctx, { batchId }) => {
+    // Scheduled first so a failed poll still leaves the next one queued.
+    const next = await ctx.scheduler.runAfter(
+      60_000,
+      internal.batch.batch.pollBatch,
+      { batchId },
+    );
+    const batchApi = batchApiFor(languageModelOf(batchAgent));
+    const result = await saveBatchResults(ctx, batchAgent, batchApi, batchId);
+    if (result === "done") await ctx.scheduler.cancel(next);
+    return null;
+  },
+});
+
+// For providers that notify a webhookUrl. The body is not trusted: the
+// request only triggers a poll, which asks the provider for the real status.
+export const batchWebhook = httpAction(async (ctx, request) => {
+  const url = new URL(request.url);
+  const batchId = url.searchParams.get("batchId");
+  const token = url.searchParams.get("token");
+  if (!batchId || !token) return new Response(null, { status: 400 });
+  const ok = await ctx.runMutation(internal.batch.batch.pollFromWebhook, {
+    batchId,
+    token,
+  });
+  return new Response(null, { status: ok ? 200 : 404 });
+});
+
+export const pollFromWebhook = internalMutation({
+  args: { batchId: v.string(), token: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, { batchId, token }) => {
+    const id = ctx.db.normalizeId("batches", batchId);
+    const doc = id && (await ctx.db.get("batches", id));
+    if (!doc || doc.webhookToken !== token) return false;
+    await ctx.scheduler.runAfter(0, internal.batch.batch.pollBatch, {
+      batchId: doc._id,
+    });
+    return true;
+  },
+});
+
+const vItem = v.object({
+  threadId: v.string(),
+  promptMessageId: v.string(),
+  pendingMessageId: v.string(),
+});
+
+export const createBatch = internalMutation({
+  args: {
+    items: v.array(
+      v.object({ threadId: v.string(), promptMessageId: v.string() }),
+    ),
+    pollAfterMs: v.optional(v.number()),
+  },
+  returns: v.object({
+    batchId: v.id("batches"),
+    webhookToken: v.string(),
+    queued: v.array(vItem),
+  }),
+  handler: async (ctx, { items, pollAfterMs }) => {
+    const queued = [];
+    for (const item of items) {
+      const { messageId } = await saveMessage(ctx, components.agent, {
+        ...item,
+        message: { role: "assistant", content: [] },
+        metadata: { status: "pending" },
+      });
+      queued.push({ ...item, pendingMessageId: messageId });
+    }
+    const webhookToken = crypto.randomUUID();
+    const batchId = await ctx.db.insert("batches", {
+      status: "pending",
+      webhookToken,
+      items: queued,
+    });
+    if (pollAfterMs !== undefined) {
+      await ctx.scheduler.runAfter(
+        pollAfterMs,
+        internal.batch.batch.pollBatch,
+        {
+          batchId,
+        },
+      );
+    }
+    return { batchId, webhookToken, queued };
+  },
+});
+
+const vBatchReference = v.object({
+  version: v.literal(2),
+  id: v.string(),
+  provider: v.string(),
+});
+type BatchReference = Infer<typeof vBatchReference>;
+
+export const recordBatch = internalMutation({
+  args: { batchId: v.id("batches"), batch: vBatchReference },
+  returns: v.null(),
+  handler: async (ctx, { batchId, batch }) => {
+    await ctx.db.patch("batches", batchId, { batch });
+    return null;
+  },
+});
+
+export const getBatch = internalQuery({
+  args: { batchId: v.id("batches") },
+  returns: v.union(
+    v.null(),
+    v.object({
+      batch: v.optional(vBatchReference),
+      status: v.union(v.literal("pending"), v.literal("done")),
+      items: v.array(vItem),
+      createdAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, { batchId }) => {
+    const doc = await ctx.db.get("batches", batchId);
+    return (
+      doc && {
+        batch: doc.batch,
+        status: doc.status,
+        items: doc.items,
+        createdAt: doc._creationTime,
+      }
+    );
+  },
+});
+
+export const closeBatch = internalMutation({
+  args: { batchId: v.id("batches") },
+  returns: v.null(),
+  handler: async (ctx, { batchId }) => {
+    await ctx.db.patch("batches", batchId, { status: "done" });
+    return null;
+  },
+});

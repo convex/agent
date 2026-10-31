@@ -1,0 +1,191 @@
+---
+title: Batch Generation
+sidebar_label: "Batch Generation"
+sidebar_position: 850
+description: "Generating responses for many threads with a provider batch API"
+---
+
+Provider batch APIs (OpenAI, Anthropic) run many requests at a discount, with
+results arriving minutes or hours later. You can use them with the Agent by
+composing the AI SDK's batch functions with APIs you already use: `agent.start`
+builds each thread's context, and `agent.generateText` saves each result. There
+is no separate batch API to learn, and the saved messages are the same as a
+normal generation's.
+
+The AI SDK's batch API is experimental (`experimental_startBatch` and friends),
+so expect it to change. See the full example in
+[batch.ts](../example/convex/batch/batch.ts).
+
+## The flow
+
+1. Save each prompt as usual, e.g. with `saveMessage` in a mutation.
+2. Save a pending answer for each prompt, so the thread shows it as queued,
+   along with the batch's items, before submitting anything.
+3. For each thread, call `agent.start` to build the exact messages a generation
+   would send: instructions, recent and searched messages, your
+   `contextHandler`, and tools.
+4. Submit one batch request per pending answer, using its message id as the
+   request id, and save the provider's batch reference.
+5. When the batch is done, save each result with `agent.generateText`, passing
+   the `pendingMessageId` and a model that replays the result.
+
+## Starting a batch
+
+```ts
+import { experimental_startBatch as startBatch } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+// In a mutation, before submitting:
+const queued = [];
+for (const { threadId, promptMessageId } of items) {
+  const { messageId: pendingMessageId } = await saveMessage(
+    ctx,
+    components.agent,
+    {
+      threadId,
+      promptMessageId,
+      message: { role: "assistant", content: [] },
+      metadata: { status: "pending" },
+    },
+  );
+  queued.push({ threadId, promptMessageId, pendingMessageId });
+}
+// Store `queued` in your own table, and return it to the action.
+
+// Back in the action:
+const requests = await Promise.all(
+  queued.map(async ({ threadId, promptMessageId, pendingMessageId }) => {
+    const { args } = await agent.start(
+      ctx,
+      { promptMessageId },
+      // Build the context without saving anything.
+      { threadId, storageOptions: { saveMessages: "none" } },
+    );
+    const { model, runtimeContext, abortSignal, ...callArgs } = args;
+    return {
+      ...callArgs,
+      // Unique to this submission, unlike the prompt.
+      id: pendingMessageId,
+      type: "text",
+      model: "gpt-4o-mini",
+    } as const;
+  }),
+);
+const batch = await startBatch({
+  provider: openai.experimental_batch(),
+  requests,
+});
+// In a mutation, store `batch` ({ version, id, provider }) with the items.
+```
+
+## Saving the results
+
+A batch result is exactly what the model would have returned from a normal call.
+Hand it to `agent.generateText` through a model that replays it, and defers to
+the real model once the result's tool calls are in the context (the steps after
+them, or a retry after an earlier attempt saved them). It decides from the
+context the claimed generation loaded, so overlapping polls agree:
+
+```ts
+function replayModel(
+  result: LanguageModelV4GenerateResult,
+  model: LanguageModelV4,
+): LanguageModelV4 {
+  const toolCallIds = new Set(
+    result.content.flatMap((part) =>
+      part.type === "tool-call" ? [part.toolCallId] : [],
+    ),
+  );
+  return {
+    specificationVersion: "v4",
+    provider: model.provider,
+    modelId: model.modelId,
+    supportedUrls: model.supportedUrls,
+    doGenerate: async (options) => {
+      const applied = options.prompt.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.some(
+            (part) =>
+              part.type === "tool-call" && toolCallIds.has(part.toolCallId),
+          ),
+      );
+      return applied ? model.doGenerate(options) : result;
+    },
+    doStream: (options) => model.doStream(options),
+  };
+}
+
+const batchApi = openai.experimental_batch();
+const results = await batchApi.doGetBatchResults({ batchId: batch.id });
+for await (const item of results) {
+  // item.id is the pendingMessageId; look up the item's threadId by it.
+  if (item.status === "succeeded") {
+    // Throws AlreadyClaimedError if another poll saved or is saving it.
+    await agent.generateText(
+      ctx,
+      { threadId },
+      { pendingMessageId, model: replayModel(item.result, model) },
+    );
+  } else {
+    await agent.finalizeMessage(ctx, {
+      messageId: pendingMessageId,
+      result: { status: "failed", error: item.error?.message ?? item.status },
+    });
+  }
+}
+```
+
+Because the result goes through `generateText`:
+
+- The message is stored like any other: status, usage, model and provider,
+  finish reason, reasoning, and embeddings if you configured an
+  `embeddingModel`.
+- Your `usageHandler` is called for it.
+- If the result has tool calls, the tools run and the thread continues with
+  normal (non-batched) model calls, up to your `stopWhen`.
+
+The results are read from the provider's batch interface (`doGetBatchResults`)
+rather than `experimental_getBatchResults`, because its items are the raw model
+results that the replay model returns.
+
+## Polling and webhooks
+
+OpenAI and Anthropic don't notify a per-batch `webhookUrl`, so poll with the
+scheduler (or a cron) using `experimental_getBatchStatus` until the batch is no
+longer `"pending"`. For providers that do call a webhook, treat the call as a
+hint: have the `httpAction` schedule the same poll, so the request body is never
+trusted. The example puts an unguessable token in the webhook URL so strangers
+can't trigger polls.
+
+## Things to know
+
+- **The answer shows as pending while the batch runs**, and the result is saved
+  into that same message.
+- **Order is preserved.** The result is saved at the prompt's `order`, so if the
+  user sends more messages meanwhile, the batched answer stays above them. Those
+  later messages are generated without it.
+- **Each result is saved once.** Polls can overlap and webhooks can repeat.
+  `generateText` with a `pendingMessageId` claims the message before replaying
+  the result, so a second poll gets an `AlreadyClaimedError` instead of saving a
+  second answer or running its tools again. If the action dies after claiming, a
+  poll after the action time limit picks the result back up, so keep polling
+  while any claim is `"running"`.
+- **Save before submitting.** If the action dies after the provider accepts the
+  batch but before its reference is saved, the batch is still paid for. Because
+  the items were saved first, with the first poll scheduled in the same
+  mutation, a later poll can find it: the example lists the provider's batches
+  created since, once the submitting action must have ended, and adopts the one
+  whose results answer its pending answers.
+- **Keep polling through errors.** Schedule the next poll before doing the work,
+  and cancel it once the batch is done, so a failed poll doesn't strand the
+  batch. A very large batch may need its results split across several actions to
+  stay within the action time limit.
+- **Partial failures.** Each item succeeds or fails on its own. Items that never
+  come back should be failed explicitly once the batch is done.
+- **Context is rebuilt when saving.** `generateText` fetches the context again
+  (running your `contextHandler`), though the replayed step doesn't use it.
+  `rawRequestResponseHandler` sees the provider's batch result, not the original
+  request.
+- **Tool definitions must match** across all requests in a batch, which they do
+  when every request uses the same agent.
