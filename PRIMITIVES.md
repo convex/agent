@@ -152,9 +152,11 @@ save that passes the stream moves the link to the new pending message.
 4. Steps and tool results that were saved, or that a lapsed attempt streamed in
    full, are never redone by a retry: takeover recovers them in the same
    transaction, before the new attempt can load its context. A tool whose result
-   was neither saved nor streamed when its action died (including an approved
-   tool, which runs before the first step) can run again: its side effect needs
-   its own idempotency key, e.g. the `toolCallId`.
+   was neither saved nor streamed when its action died can run again: its side
+   effect needs its own idempotency key, e.g. the `toolCallId`. So can an
+   approved tool whose output was streamed but whose save (before the first
+   request) hadn't committed, since recovery skips outputs of tool calls made
+   before the stream (open question 11).
 5. A message's role or status never decides a claim, except that a first claim
    needs a pending or failed assistant message.
 6. A stream timeout fails only the message its stream is linked to, recovers
@@ -293,3 +295,6 @@ code), plus about 1,570 lines of tests (library and the batch example).
     uncertain executions as needing reconciliation. That is a tool-level
     exactly-once problem the claim can't solve alone; should the library record
     "started" per `toolCallId` and refuse to rerun those without the app's say?
+    The narrowest known case: an approved tool's output is streamed, and the
+    action dies before the save of its result commits. Recovery could rebuild
+    that result from the stored tool call (Codex: high, unfixed here).
