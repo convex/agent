@@ -157,6 +157,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           };
           failPendingSteps?: boolean;
           finishStreamId?: string;
+          final?: boolean;
           hideFromUserIdSearch?: boolean;
           messages: Array<{
             error?: string;

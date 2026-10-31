@@ -225,8 +225,13 @@ export async function startGeneration<
    * Saves the held step as the last one, failed with `error` if the AI SDK
    * finished with one, and waits for any failure. Rejects with what stopped
    * the generation, which the AI SDK swallows, also when called again.
+   * `unfinished` ends a generation that didn't finish, e.g. a stopped stream.
    */
-  end: (options?: { error?: string; streamId?: string }) => Promise<void>;
+  end: (options?: {
+    error?: string;
+    streamId?: string;
+    unfinished?: boolean;
+  }) => Promise<void>;
   getSavedMessages: () => MessageDoc[];
 }> {
   const userId =
@@ -337,6 +342,7 @@ export async function startGeneration<
     createPendingMessage: boolean;
     streamId?: string;
     error?: string;
+    final?: boolean;
   }) => {
     const toSave = held;
     held = undefined;
@@ -441,7 +447,13 @@ export async function startGeneration<
       finishStreamId,
       streamId,
       error,
-    }: { finishStreamId?: string; streamId?: string; error?: string },
+      final,
+    }: {
+      finishStreamId?: string;
+      streamId?: string;
+      error?: string;
+      final?: boolean;
+    },
   ) => {
     if (threadId && saveMessages !== "none") {
       let serialized;
@@ -499,6 +511,7 @@ export async function startGeneration<
         failPendingSteps: false,
         finishStreamId,
         streamId,
+        final,
       });
       const lastMessage = saved.messages.at(-1)!;
       if (createPendingMessage) {
@@ -580,12 +593,16 @@ export async function startGeneration<
         throw error;
       }
     },
-    end: async (options = {}) => {
+    end: async ({ unfinished, ...options } = {}) => {
       if (held) {
         ended = (async () => {
           await saving;
           try {
-            await saveHeld({ createPendingMessage: false, ...options });
+            await saveHeld({
+              createPendingMessage: false,
+              final: !unfinished && options.error === undefined,
+              ...options,
+            });
           } catch (error) {
             await fail(errorToString(error));
             throw error;
@@ -605,6 +622,10 @@ export async function startGeneration<
        * This prevents UI flickering from separate mutations (issue #181).
        */
       finishStreamId?: string,
-    ) => persist(toSave, createPendingMessage, { finishStreamId }),
+    ) =>
+      persist(toSave, createPendingMessage, {
+        finishStreamId,
+        final: !createPendingMessage,
+      }),
   };
 }

@@ -181,7 +181,7 @@ export async function streamText<
       flush: async () => {
         if (finished) return;
         if (error !== undefined) await call.fail(error);
-        await call.end({ streamId: streamer?.streamId });
+        await call.end({ streamId: streamer?.streamId, unfinished: true });
       },
     } as Transformer<TextStreamPart<Tools>, TextStreamPart<Tools>>);
   };

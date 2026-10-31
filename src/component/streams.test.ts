@@ -641,7 +641,7 @@ describe("a stream that times out", () => {
 });
 
 describe("claiming a pending message", () => {
-  test("a lapsed claim's recovered text doesn't hide the claim that replaced it", async () => {
+  test("a takeover recovers the lapsed attempt's streamed steps before the new attempt", async () => {
     vi.useFakeTimers();
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, {});
@@ -692,17 +692,27 @@ describe("claiming a pending message", () => {
       ],
     });
     vi.setSystemTime(Date.now() + 11 * 60 * 1000);
-    expect(await claim()).toMatchObject({ status: "claimed" });
+    const takeover = await claim();
+    expect(takeover).toMatchObject({ status: "claimed" });
 
-    // The first attempt's text is recovered after the second claim.
-    for (let i = 0; i < 3; i++) {
-      vi.advanceTimersByTime(1);
-      await t.finishInProgressScheduledFunctions();
-    }
+    const { page } = await t.query(api.messages.listMessagesByThreadId, {
+      threadId,
+      order: "asc",
+      statuses: ["pending", "success", "failed"],
+    });
     expect(
-      (await t.run((ctx) => ctx.db.query("messages").collect())).at(-1)?.text,
-    ).toBe("first attempt");
-
+      page.map((m) => [m.message?.role, m.status, m.text ?? m.error]),
+    ).toEqual([
+      ["user", "success", "hello"],
+      ["assistant", "success", undefined],
+      ["tool", "success", undefined],
+      ["assistant", "failed", "first attempt"],
+      ["assistant", "pending", undefined],
+    ]);
+    expect(page[1]._id).toBe(messageId);
+    expect(page.at(-1)?._id).toBe(
+      takeover.status === "claimed" && takeover.message._id,
+    );
     expect(await claim()).toMatchObject({ status: "running" });
   });
 

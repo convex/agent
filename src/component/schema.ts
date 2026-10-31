@@ -37,11 +37,6 @@ export const schema = defineSchema({
     fileIds: v.optional(v.array(v.id("files"))),
     error: v.optional(v.string()),
     status: vMessageStatus,
-    /**
-     * Set on the messages of a generation that claimed a pending message:
-     * `key` is that message, and `at` is when the claim was made.
-     */
-    claim: v.optional(v.object({ key: v.id("messages"), at: v.number() })),
 
     // Context on how it was generated
     agentName: v.optional(v.string()),
@@ -87,6 +82,24 @@ export const schema = defineSchema({
     })
     // Allows finding messages by vector embedding id
     .index("embeddingId_threadId", ["embeddingId", "threadId"]),
+
+  /**
+   * Generations' claim on a pending message an app saved, `messageId`. The
+   * messages saved under it can change role and status; only the claim says
+   * whether it was answered.
+   */
+  claims: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    /** When the current attempt claimed it. */
+    claimedAt: v.number(),
+    /** The current attempt's pending message, or the last one it saved. */
+    latestMessageId: v.id("messages"),
+    /** Set only by the save that ends a generation that finished. */
+    answered: v.boolean(),
+  })
+    .index("threadId_messageId", ["threadId", "messageId"])
+    .index("latestMessageId", ["latestMessageId"]),
 
   // Status: if it's done, it's deleted, then deltas are vacuumed
   streamingMessages: defineTable({

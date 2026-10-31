@@ -478,11 +478,9 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
     expect(r.modelCalls).toBe(1);
     // The SDK calls onStepEnd before the step is saved, as on main.
     expect(r.stepEnds).toBe(1);
-    // A streamed step's parts are recovered into the failed message.
+    // A streamed step whose tool returned is recovered as context.
     expect(r.saved).toEqual(
-      streamed
-        ? [USER, ...LOOKUP.map((row) => ({ ...row, status: "failed" }))]
-        : [USER, FAILED],
+      streamed ? [USER, ...LOOKUP, FAILED] : [USER, FAILED],
     );
     if (awaited) expect(r.error).toBe("first save failed");
   });

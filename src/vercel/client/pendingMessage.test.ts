@@ -179,12 +179,15 @@ const queueApproved = app.action({
       { prompt: "Remove it" },
     );
     const approvalId = savedMessages!
-      .flatMap((m) =>
+      .flatMap((m): unknown[] =>
         Array.isArray(m.message?.content) ? m.message.content : [],
       )
-      .flatMap((part) =>
-        part.type === "tool-approval-request" ? [part.approvalId] : [],
-      )[0]!;
+      .flatMap((part) => {
+        const request = part as { type: string; approvalId?: string };
+        return request.type === "tool-approval-request"
+          ? [request.approvalId!]
+          : [];
+      })[0]!;
     const { messageId: promptMessageId } = await ctx.runMutation(
       components.agent.messages.respondToToolCallApprovals,
       {
@@ -515,6 +518,7 @@ describe("the claim, not the messages, says whether it was answered", () => {
       ["user", "success"],
       ["assistant", "success"],
       ["tool", "success"],
+      ["assistant", "failed"],
       ["assistant", "success"],
     ]);
     expect(

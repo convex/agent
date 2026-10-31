@@ -55,7 +55,7 @@ import {
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
   return withDerivedReasoning(
-    omit(message, ["parentMessageId", "stepId", "files", "claim"]),
+    omit(message, ["parentMessageId", "stepId", "files"]),
   );
 }
 
@@ -64,6 +64,13 @@ export async function deleteMessage(
   messageDoc: Doc<"messages">,
 ) {
   await ctx.db.delete("messages", messageDoc._id);
+  const claim = await ctx.db
+    .query("claims")
+    .withIndex("threadId_messageId", (q) =>
+      q.eq("threadId", messageDoc.threadId).eq("messageId", messageDoc._id),
+    )
+    .unique();
+  if (claim) await ctx.db.delete("claims", claim._id);
   if (messageDoc.embeddingId) {
     const { tableName } = getVectorIdInfo(ctx, messageDoc.embeddingId);
     await ctx.db.delete(tableName, messageDoc.embeddingId);
@@ -212,6 +219,9 @@ const addMessagesArgs = {
   // If provided, finish this stream atomically with the message save.
   // This prevents UI flickering from separate mutations (issue #181).
   finishStreamId: v.optional(v.id("streamingMessages")),
+  // The last save of a generation that finished: a claim on its pending
+  // message is answered.
+  final: v.optional(v.boolean()),
 };
 export const addMessages = mutation({
   args: addMessagesArgs,
@@ -250,12 +260,11 @@ async function addMessagesHandler(
     order: requestedOrder,
     pendingMessageId,
     hideFromUserIdSearch,
+    final,
     ...rest
   } = args;
   const promptMessage =
     promptMessageId && (await ctx.db.get("messages", promptMessageId));
-  const pendingMessage =
-    pendingMessageId && (await ctx.db.get("messages", pendingMessageId));
   assert(
     requestedOrder === undefined ||
       requestedOrder === "next" ||
@@ -369,7 +378,6 @@ async function addMessagesHandler(
       text: hideFromUserIdSearch ? undefined : extractText(message.message),
       status: fail ? "failed" : (message.status ?? "success"),
       error: fail ? error : message.error,
-      claim: pendingMessage ? pendingMessage.claim : undefined,
     } satisfies Omit<
       WithoutSystemFields<Doc<"messages">>,
       "order" | "stepOrder"
@@ -377,6 +385,7 @@ async function addMessagesHandler(
     // If there is a pending message, we replace that one with the first message
     // and subsequent ones will follow the regular order/subOrder advancement.
     if (i === 0 && pendingMessageId) {
+      const pendingMessage = await ctx.db.get("messages", pendingMessageId);
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
       if (pendingMessage.status === "failed") {
         fail = true;
@@ -439,6 +448,21 @@ async function addMessagesHandler(
     }
     // TODO: delete the associated stream data for the order/stepOrder
     toReturn.push((await ctx.db.get("messages", messageId))!);
+  }
+  const claim =
+    pendingMessageId &&
+    (await ctx.db
+      .query("claims")
+      .withIndex("latestMessageId", (q) =>
+        q.eq("latestMessageId", pendingMessageId),
+      )
+      .unique());
+  const latest = toReturn.at(-1);
+  if (claim && latest) {
+    await ctx.db.patch("claims", claim._id, {
+      latestMessageId: latest._id,
+      answered: !!final && latest.status === "success",
+    });
   }
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
@@ -536,6 +560,23 @@ export const finalizeMessage = mutation({
         return;
       }
       if (messages.length > 0) {
+        if (result.status === "failed") {
+          // Steps whose tools returned are kept as context, so a retry
+          // doesn't run those tools again.
+          const completed =
+            messages.map((m) => m.message.role).lastIndexOf("tool") + 1;
+          for (const recovered of messages.slice(0, completed)) {
+            recovered.status = "success";
+            recovered.error = undefined;
+          }
+          if (completed === messages.length) {
+            messages.push({
+              message: { role: "assistant", content: [] },
+              status: "failed",
+              error: result.error,
+            });
+          }
+        }
         // Nested so an oversized recovered message rolls back on its own and
         // the pending message is marked failed instead of stuck.
         try {
@@ -574,12 +615,11 @@ export const finalizeMessage = mutation({
 export const CLAIM_LEASE_MS = 10 * 60 * 1000;
 
 /**
- * Claims a pending message for one generation to save into. The message and
- * the messages its generations save after it at its order are one answer:
- * a second claim while one is running or once it succeeded gets that status
- * back. Once a claim fails or lapses, the next claim continues the answer in
- * a new pending message, so the earlier generation, if it is still running,
- * finds its own message failed and stops.
+ * Claims a pending message for one generation to save into. A second claim
+ * while one is running, or once a generation finished, gets that status back.
+ * Once a claim fails or lapses, the next claim continues in a new pending
+ * message at the same order, after the steps already saved. A lapsed
+ * attempt's streamed steps are recovered first, in this transaction.
  */
 export const claimPendingMessage = mutation({
   args: { threadId: v.id("threads"), messageId: v.id("messages") },
@@ -597,51 +637,60 @@ export const claimPendingMessage = mutation({
   handler: async (ctx, { threadId, messageId }) => {
     const key = await ctx.db.get("messages", messageId);
     assert(
-      key?.threadId === threadId && key.message?.role === "assistant",
-      `Message ${messageId} is not an assistant message in thread ${threadId}`,
+      key?.threadId === threadId,
+      `Message ${messageId} is not in thread ${threadId}`,
     );
-    const answer = await orderedMessagesStream(ctx, {
-      threadId,
-      sortOrder: "desc",
-      startOrder: key.order,
-      startOrderBound: "eq",
-    })
-      .filterWith(
-        async (m) => m._id === messageId || m.claim?.key === messageId,
+    const claim = await ctx.db
+      .query("claims")
+      .withIndex("threadId_messageId", (q) =>
+        q.eq("threadId", threadId).eq("messageId", messageId),
       )
-      .collect();
-    // The latest claim is the current attempt. A lapsed attempt's text can be
-    // recovered after it, so its messages can come later in the order.
-    const lastClaim = Math.max(...answer.map((m) => m.claim?.at ?? -Infinity));
-    const latest = answer.find(
-      (m) => (m.claim?.at ?? -Infinity) === lastClaim,
-    )!;
-    const now = Math.max(Date.now(), lastClaim + 1);
+      .unique();
+    if (claim?.answered) {
+      return { status: "answered" as const, messageId: claim.latestMessageId };
+    }
+    assert(
+      claim ||
+        (key.message?.role === "assistant" && key.status !== "success"),
+      `Message ${messageId} is not a pending assistant message`,
+    );
+    const latest = claim
+      ? await ctx.db.get("messages", claim.latestMessageId)
+      : key;
+    const claimedAt = Date.now();
     const claimed = async (message: Doc<"messages">) => {
-      await ctx.db.patch("messages", message._id, {
-        claim: { key: messageId, at: now },
-      });
+      if (claim) {
+        await ctx.db.patch("claims", claim._id, {
+          claimedAt,
+          latestMessageId: message._id,
+        });
+      } else {
+        await ctx.db.insert("claims", {
+          threadId,
+          messageId,
+          claimedAt,
+          latestMessageId: message._id,
+          answered: false,
+        });
+      }
       return {
         status: "claimed" as const,
         message: publicMessage(message),
         promptMessageId: key.parentMessageId,
       };
     };
-    if (latest.status === "success") {
-      return { status: "answered" as const, messageId: latest._id };
-    }
-    if (latest.status === "pending") {
-      if (!latest.claim) return claimed(latest);
-      if (latest.claim.at + CLAIM_LEASE_MS > now) {
+    if (latest?.status === "pending") {
+      if (!claim) return claimed(latest);
+      if (claim.claimedAt + CLAIM_LEASE_MS > claimedAt) {
         return { status: "running" as const, messageId: latest._id };
       }
-      await ctx.scheduler.runAfter(0, api.messages.finalizeMessage, {
+      await ctx.runMutation(api.messages.finalizeMessage, {
         messageId: latest._id,
         result: { status: "failed", error: "Generation stopped" },
       });
     }
     const { messages } = await addMessagesHandler(ctx, {
-      threadId: key.threadId,
+      threadId,
       userId: key.userId,
       agentName: key.agentName,
       order: key.order,
@@ -656,7 +705,7 @@ export const claimPendingMessage = mutation({
     await ctx.db.patch("messages", next._id, {
       parentMessageId: key.parentMessageId,
     });
-    return claimed(next);
+    return claimed({ ...next, parentMessageId: key.parentMessageId });
   },
 });
 
@@ -841,7 +890,6 @@ export const cloneMessageBatch = internalMutation({
               "order",
               "embeddingId",
               "parentMessageId",
-              "claim",
             ]),
             embeddingId,
             threadId: args.targetThreadId,
