@@ -112,6 +112,11 @@ rerun) and ends the recovered steps with a failed message, so the failure stays
 visible. This applies to every failed finalize, including stream timeouts and
 v3's "a failed step save" path.
 
+Approved tools run before the first model request (the AI SDK hands their
+results to `prepareStep(0)`). `beforeStep` saves those results, with a new
+pending message, before that request, so an approval continuation that fails on
+its first request doesn't run the approved tool again.
+
 `startGeneration` claims before it fetches context or calls the model, and skips
 `saveInputMessages` (no new pending message, no `failPendingSteps`
 "Restarting"). The prompt is the key's `promptMessageId`. If building the
@@ -191,9 +196,11 @@ code), plus about 1,570 lines of tests (library and the batch example).
   claiming is picked back up after the lease. The batch's items and pending
   answers are saved before the batch is submitted, so an action that dies
   between submitting and saving the provider's reference leaves a batch the next
-  poll finds (by listing the provider's batches and matching result ids to
-  prompt messages) instead of paid work nobody asks for. The `batchItems` table,
-  its two indexes, `claimItem` and `finishBatch` are gone.
+  poll finds (by listing the provider's batches and matching result ids) instead
+  of paid work nobody asks for. Request ids are the pending answers' ids, not
+  the prompts', so a resubmitted prompt's batch is never mistaken for the lost
+  one. The `batchItems` table, its two indexes, `claimItem` and `finishBatch`
+  are gone.
 - **Stream timeouts** (#168): a timed-out stream fails its own pending message
   and keeps the streamed text, with concurrent generations, restarts and
   transaction limits covered by `src/component/streams.test.ts`.
