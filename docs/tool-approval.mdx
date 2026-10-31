@@ -218,6 +218,57 @@ The `ToolUIPart` states relevant to approval are:
 | `output-denied`      | Tool was denied                                      |
 | `output-error`       | Tool execution failed                                |
 
+## Client-side tools
+
+A tool without `execute` runs in the browser. Generation stops at its call, and
+the tool part waits in the `input-available` state until the client answers it
+with `addToolOutput`. Like an approval, the output is saved next to its call,
+and a second answer is rejected.
+
+```ts
+const getLocation = createTool({
+  description: "Get the user's location from their browser",
+  inputSchema: z.object({ precise: z.boolean() }),
+});
+
+export const submitToolOutput = mutation({
+  args: { threadId: v.string(), toolCallId: v.string(), output: v.any() },
+  handler: async (ctx, { threadId, toolCallId, output }) => {
+    // Check the user can access the thread.
+    const { messageId } = await agent.addToolOutput(ctx, {
+      threadId,
+      toolCallId,
+      output,
+    });
+    await ctx.scheduler.runAfter(0, internal.chat.generateResponse, {
+      threadId,
+      promptMessageId: messageId,
+    });
+  },
+});
+```
+
+Pass `state: "output-error"` and `errorText` instead of `output` to report a
+failure to the model. On the client, answer each pending call from
+`useUIMessages` once:
+
+```tsx
+const submitToolOutput = useMutation(api.chat.submitToolOutput);
+const answered = useRef(new Set<string>());
+useEffect(() => {
+  for (const part of messages.flatMap((m) => m.parts)) {
+    if (part.type !== "tool-getLocation" || part.state !== "input-available") {
+      continue;
+    }
+    if (answered.current.has(part.toolCallId)) continue;
+    answered.current.add(part.toolCallId);
+    void readLocation(part.input).then((output) =>
+      submitToolOutput({ threadId, toolCallId: part.toolCallId, output }),
+    );
+  }
+}, [messages, threadId, submitToolOutput]);
+```
+
 ## Example files
 
 For a complete working example, see:

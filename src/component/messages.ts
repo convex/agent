@@ -19,6 +19,7 @@ import {
   vMessageStatus,
   vMessageWithMetadataInternal,
   vPaginationResult,
+  vToolResultOutput,
   type MessageDoc,
 } from "../validators.js";
 import { api, internal } from "./_generated/api.js";
@@ -50,7 +51,7 @@ import {
 import { partial } from "convex-helpers/validators";
 import {
   APPROVAL_LOOKUP_MESSAGES,
-  planToolCallApprovals,
+  planToolCallResponses,
 } from "../approvals.js";
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
@@ -612,6 +613,9 @@ export const respondToToolCallApprovals = mutation({
         reason: v.optional(v.string()),
       }),
     ),
+    outputs: v.optional(
+      v.array(v.object({ toolCallId: v.string(), output: vToolResultOutput })),
+    ),
   },
   returns: v.object({ messageId: v.id("messages") }),
   handler: async (ctx, args) => {
@@ -620,9 +624,9 @@ export const respondToToolCallApprovals = mutation({
       order: "desc",
       paginationOpts: { cursor: null, numItems: APPROVAL_LOOKUP_MESSAGES },
     });
-    const plan = planToolCallApprovals(
+    const plan = planToolCallResponses(
       page.page,
-      args.decisions,
+      { decisions: args.decisions, outputs: args.outputs ?? [] },
       args.threadId,
     );
     const saved = await addMessagesHandler(ctx, {

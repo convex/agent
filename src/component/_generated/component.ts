@@ -2954,6 +2954,115 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             approved: boolean;
             reason?: string;
           }>;
+          outputs?: Array<{
+            output:
+              | {
+                  providerOptions?: Record<string, Record<string, any>>;
+                  type: "text";
+                  value: string;
+                }
+              | {
+                  providerOptions?: Record<string, Record<string, any>>;
+                  type: "json";
+                  value: any;
+                }
+              | {
+                  providerOptions?: Record<string, Record<string, any>>;
+                  type: "error-text";
+                  value: string;
+                }
+              | {
+                  providerOptions?: Record<string, Record<string, any>>;
+                  type: "error-json";
+                  value: any;
+                }
+              | {
+                  providerOptions?: Record<string, Record<string, any>>;
+                  reason?: string;
+                  type: "execution-denied";
+                }
+              | {
+                  type: "content";
+                  value: Array<
+                    | {
+                        providerOptions?: Record<string, Record<string, any>>;
+                        text: string;
+                        type: "text";
+                      }
+                    | {
+                        data:
+                          | { type: "url"; url: string }
+                          | {
+                              reference: Record<string, string>;
+                              type: "reference";
+                            }
+                          | {
+                              data: string | ArrayBuffer;
+                              type: "data";
+                            }
+                          | { text: string; type: "text" };
+                        filename?: string;
+                        mediaType: string;
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "file";
+                      }
+                    | {
+                        data: string;
+                        mediaType: string;
+                        type: "media";
+                      }
+                    | {
+                        data: string;
+                        filename?: string;
+                        mediaType: string;
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "file-data";
+                      }
+                    | {
+                        mediaType?: string;
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "file-url";
+                        url: string;
+                      }
+                    | {
+                        fileId: string | Record<string, string>;
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "file-id";
+                      }
+                    | {
+                        providerOptions?: Record<string, Record<string, any>>;
+                        providerReference: Record<string, string>;
+                        type: "file-reference";
+                      }
+                    | {
+                        data: string;
+                        mediaType: string;
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "image-data";
+                      }
+                    | {
+                        providerOptions?: Record<string, Record<string, any>>;
+                        providerReference: Record<string, string>;
+                        type: "image-file-reference";
+                      }
+                    | {
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "image-url";
+                        url: string;
+                      }
+                    | {
+                        fileId: string | Record<string, string>;
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "image-file-id";
+                      }
+                    | {
+                        providerOptions?: Record<string, Record<string, any>>;
+                        type: "custom";
+                      }
+                  >;
+                };
+            toolCallId: string;
+          }>;
           threadId: string;
         },
         { messageId: string },
