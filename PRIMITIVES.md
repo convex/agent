@@ -98,6 +98,10 @@ Where the row is written:
   same mutation as the messages.
 - `deleteMessage` deletes the row of the key it deletes.
 
+Recovery skips the messages a stream already saved by a count kept on the stream
+(`savedMessages`, bumped by each save that passes the stream), not by
+`stepOrder`, which other answers at the same order interleave.
+
 The client passes `final` from `end()` when the AI SDK finished
 (`generateText`'s end, `streamText`'s `finish` part without an error) and from
 `save()` without a pending message (`generateObject`, `streamObject`). It never
@@ -169,7 +173,8 @@ save that passes the stream moves the link to the new pending message.
   `claimedAt`, `latestMessageId`, `answered`. Indexes `threadId_messageId`
   (claim lookup, scoped to the thread) and `latestMessageId` (the step save that
   moves it).
-- `streamingMessages.pendingMessageId?: Id<"messages">`.
+- `streamingMessages.pendingMessageId?: Id<"messages">` and
+  `streamingMessages.savedMessages?: number`.
 
 Nothing on `messages`. Old rows have no claim and no link and behave as before.
 
@@ -262,11 +267,11 @@ code), plus about 1,570 lines of tests (library and the batch example).
    a separate `answerClaim` mutation, but then the answer and its save are two
    transactions, and a crash between them leaves a finished answer that a
    takeover would regenerate.
-9. **Batch replay** defers to the real model once the prompt no longer ends at
-   the user message, so a retried batch item doesn't replay its tool call. It is
-   a recipe-level rule; should the replay model live in the library? Finding a
-   lost batch also relies on `doListBatches` (OpenAI and Anthropic have it);
-   without it, the items are failed after the action time limit.
+9. **Batch replay** replays the result only into an answer with nothing saved
+   yet, on the first model call, so a retried batch item doesn't replay its tool
+   call. It is a recipe-level rule; should the replay model live in the library?
+   Finding a lost batch also relies on `doListBatches` (OpenAI and Anthropic
+   have it); without it, the items are failed after the action time limit.
 10. **Stream creation timing**: the link is set from the pending message when
     the stream row is created. Codex flagged that a row created after the first
     step save would link the replaced message. I couldn't reproduce it (writing
