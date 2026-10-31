@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 
+import { assert } from "convex-helpers";
 import { convexTest } from "convex-test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { getConvexSize } from "convex/values";
@@ -714,6 +715,41 @@ describe("claiming a pending message", () => {
       takeover.status === "claimed" && takeover.message._id,
     );
     expect(await claim()).toMatchObject({ status: "running" });
+  });
+
+  test("refuses a pending message another claim saves into", async () => {
+    vi.useFakeTimers();
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hello" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const messageId = messages[1]!._id as Id<"messages">;
+    await t.mutation(api.messages.claimPendingMessage, { threadId, messageId });
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+    const takeover = await t.mutation(api.messages.claimPendingMessage, {
+      threadId,
+      messageId,
+    });
+    assert(takeover.status === "claimed");
+
+    await expect(
+      t.mutation(api.messages.claimPendingMessage, {
+        threadId,
+        messageId: takeover.message._id as Id<"messages">,
+      }),
+    ).rejects.toThrow("is claimed");
+    expect(
+      await t.mutation(api.messages.claimPendingMessage, {
+        threadId,
+        messageId,
+      }),
+    ).toMatchObject({ status: "running" });
   });
 
   test("refuses a message from another thread, and leaves it alone", async () => {
