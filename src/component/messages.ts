@@ -614,7 +614,13 @@ export const respondToToolCallApprovals = mutation({
       }),
     ),
     outputs: v.optional(
-      v.array(v.object({ toolCallId: v.string(), output: vToolResultOutput })),
+      v.array(
+        v.object({
+          toolCallId: v.string(),
+          toolName: v.string(),
+          output: vToolResultOutput,
+        }),
+      ),
     ),
   },
   returns: v.object({ messageId: v.id("messages") }),

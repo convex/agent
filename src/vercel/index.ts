@@ -1210,10 +1210,12 @@ export class Agent<
    * next to its call even if newer thread messages exist. Continue generation
    * with `promptMessageId` set to the returned `messageId`.
    *
-   * Rejects a call that is not found, awaits approval, or was already handled.
+   * Rejects a call to another tool, a call that is not found or awaits
+   * approval, and a call that already has a result or was denied.
    *
    * @param ctx A ctx object from a mutation.
    * @param args.threadId The thread containing the tool call.
+   * @param args.tool The name of the client tool that was called.
    * @param args.toolCallId The ID of the tool call to answer.
    * @param args.output The tool's output. Or pass `state: "output-error"` and
    * `errorText` to save an error result.
@@ -1223,13 +1225,17 @@ export class Agent<
     ctx: MutationCtx,
     {
       threadId,
+      tool,
       toolCallId,
       ...result
-    }: { threadId: string; toolCallId: string } & (
+    }: { threadId: string; tool: string; toolCallId: string } & (
       | { state?: "output-available"; output: unknown; errorText?: never }
       | { state: "output-error"; errorText: string; output?: never }
     ),
   ): Promise<{ messageId: string }> {
+    if (this.options.tools?.[tool]?.execute) {
+      throw new Error(`Tool ${tool} runs on the server, not the client`);
+    }
     return ctx.runMutation(this.component.messages.respondToToolCallApprovals, {
       threadId,
       agentName: this.options.name,
@@ -1237,6 +1243,7 @@ export class Agent<
       outputs: [
         {
           toolCallId,
+          toolName: tool,
           output:
             result.state === "output-error"
               ? { type: "error-text", value: result.errorText }

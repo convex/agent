@@ -3062,6 +3062,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   >;
                 };
             toolCallId: string;
+            toolName: string;
           }>;
           threadId: string;
         },
