@@ -335,9 +335,7 @@ describe("batch generation by composition", () => {
       ]);
       placeholders.push(thread[1]._id);
     }
-    expect(requests.map((r) => r.id)).toEqual(
-      [a, b, c, d].map((x) => x.promptMessageId),
-    );
+    expect(requests.map((r) => r.id)).toEqual(placeholders);
     const [pendingA] = placeholders;
 
     // The user keeps talking in thread A while the batch runs.
@@ -347,7 +345,7 @@ describe("batch generation by composition", () => {
     });
 
     completeBatch(providerBatchId, (request) => {
-      if (request.id === a.promptMessageId) {
+      if (request.id === placeholders[0]) {
         return {
           type: "text",
           id: request.id,
@@ -355,7 +353,7 @@ describe("batch generation by composition", () => {
           result: generated(ANSWER),
         };
       }
-      if (request.id === b.promptMessageId) {
+      if (request.id === placeholders[1]) {
         return {
           type: "text",
           id: request.id,
@@ -373,7 +371,7 @@ describe("batch generation by composition", () => {
           ),
         };
       }
-      if (request.id === c.promptMessageId) {
+      if (request.id === placeholders[2]) {
         return {
           type: "text",
           id: request.id,

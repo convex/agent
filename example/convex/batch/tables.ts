@@ -15,7 +15,7 @@ export default {
     status: v.union(v.literal("pending"), v.literal("done")),
     // Lets a provider webhook trigger a poll without being trusted otherwise.
     webhookToken: v.string(),
-    // Each request's id is its prompt message, answered in pendingMessageId.
+    // Each request's id is its pending answer, which answers its prompt.
     items: v.array(
       v.object({
         threadId: v.string(),

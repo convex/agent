@@ -19,12 +19,12 @@ so expect it to change. See the full example in
 ## The flow
 
 1. Save each prompt as usual, e.g. with `saveMessage` in a mutation.
-2. For each thread, call `agent.start` to build the exact messages a generation
+2. Save a pending answer for each prompt, so the thread shows it as queued,
+   along with the batch's items, before submitting anything.
+3. For each thread, call `agent.start` to build the exact messages a generation
    would send: instructions, recent and searched messages, your
    `contextHandler`, and tools.
-3. Save a pending answer for each prompt, so the thread shows it as queued,
-   along with the batch's items, before submitting anything.
-4. Submit one batch request per prompt, using the prompt's message id as the
+4. Submit one batch request per pending answer, using its message id as the
    request id, and save the provider's batch reference.
 5. When the batch is done, save each result with `agent.generateText`, passing
    the `pendingMessageId` and a model that replays the result.
@@ -35,24 +35,8 @@ so expect it to change. See the full example in
 import { experimental_startBatch as startBatch } from "ai";
 import { openai } from "@ai-sdk/openai";
 
-const requests = await Promise.all(
-  items.map(async ({ threadId, promptMessageId }) => {
-    const { args } = await agent.start(
-      ctx,
-      { promptMessageId },
-      // Build the context without saving anything yet.
-      { threadId, storageOptions: { saveMessages: "none" } },
-    );
-    const { model, runtimeContext, abortSignal, ...callArgs } = args;
-    return {
-      ...callArgs,
-      id: promptMessageId,
-      type: "text",
-      model: "gpt-4o-mini",
-    } as const;
-  }),
-);
 // In a mutation, before submitting:
+const queued = [];
 for (const { threadId, promptMessageId } of items) {
   const { messageId: pendingMessageId } = await saveMessage(
     ctx,
@@ -64,9 +48,29 @@ for (const { threadId, promptMessageId } of items) {
       metadata: { status: "pending" },
     },
   );
-  // Store the item's pendingMessageId in your own table.
+  queued.push({ threadId, promptMessageId, pendingMessageId });
 }
+// Store `queued` in your own table, and return it to the action.
+
 // Back in the action:
+const requests = await Promise.all(
+  queued.map(async ({ threadId, promptMessageId, pendingMessageId }) => {
+    const { args } = await agent.start(
+      ctx,
+      { promptMessageId },
+      // Build the context without saving anything.
+      { threadId, storageOptions: { saveMessages: "none" } },
+    );
+    const { model, runtimeContext, abortSignal, ...callArgs } = args;
+    return {
+      ...callArgs,
+      // Unique to this submission, unlike the prompt.
+      id: pendingMessageId,
+      type: "text",
+      model: "gpt-4o-mini",
+    } as const;
+  }),
+);
 const batch = await startBatch({
   provider: openai.experimental_batch(),
   requests,
@@ -101,7 +105,7 @@ function replayModel(
 const batchApi = openai.experimental_batch();
 const results = await batchApi.doGetBatchResults({ batchId: batch.id });
 for await (const item of results) {
-  // Look up the item's threadId and pendingMessageId by its prompt (item.id).
+  // item.id is the pendingMessageId; look up the item's threadId by it.
   if (item.status === "succeeded") {
     // Throws AlreadyClaimedError if another poll saved or is saving it.
     await agent.generateText(
@@ -158,7 +162,7 @@ can't trigger polls.
   the items were saved first, with the first poll scheduled in the same
   mutation, a later poll can find it: the example lists the provider's batches
   created since, once the submitting action must have ended, and adopts the one
-  whose results answer its prompt messages.
+  whose results answer its pending answers.
 - **Keep polling through errors.** Schedule the next poll before doing the work,
   and cancel it once the batch is done, so a failed poll doesn't strand the
   batch. A very large batch may need its results split across several actions to

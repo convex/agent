@@ -47,9 +47,9 @@ function languageModelOf(agent: Agent): LanguageModelV4 {
 }
 
 /**
- * Builds each thread's context exactly as a normal generation would, saves a
- * pending answer for each prompt message, so the thread shows it as queued,
- * and submits one batch request per prompt message. The prompts must already
+ * Saves a pending answer for each prompt message, so the thread shows it as
+ * queued, builds each thread's context exactly as a normal generation would,
+ * and submits one batch request per pending answer. The prompts must already
  * be saved, e.g. with `saveMessage` in the mutation that queues the work.
  */
 export async function startThreadBatch(
@@ -64,8 +64,15 @@ export async function startThreadBatch(
   } = {},
 ) {
   const model = languageModelOf(agent);
+  // Saved, with the first poll, before submitting, so a crash before the
+  // provider's reference is saved leaves a batch for the poll to find instead
+  // of paid work nobody asks for.
+  const { batchId, webhookToken, queued } = await ctx.runMutation(
+    internal.batch.batch.createBatch,
+    { items, pollAfterMs: options.pollAfterMs },
+  );
   const requests = await Promise.all(
-    items.map(async ({ threadId, promptMessageId }) => {
+    queued.map(async ({ threadId, promptMessageId, pendingMessageId }) => {
       const { args } = await agent.start(
         ctx,
         { promptMessageId },
@@ -79,18 +86,13 @@ export async function startThreadBatch(
       } = args;
       return {
         ...callArgs,
-        id: promptMessageId,
+        // Unique to this submission, unlike the prompt, so results and a
+        // lost batch can't be confused with another batch for the prompt.
+        id: pendingMessageId,
         type: "text",
         model: model.modelId,
       } as TextBatchRequest;
     }),
-  );
-  // Saved, with the first poll, before submitting, so a crash before the
-  // provider's reference is saved leaves a batch for the poll to find instead
-  // of paid work nobody asks for.
-  const { batchId, webhookToken } = await ctx.runMutation(
-    internal.batch.batch.createBatch,
-    { items, pollAfterMs: options.pollAfterMs },
   );
   const batch = await startBatch({
     provider: batchApi,
@@ -116,10 +118,10 @@ const CLOCK_SKEW_MS = 60 * 1000;
  */
 async function findSubmittedBatch(
   batchApi: BatchApi,
-  doc: { createdAt: number; items: { promptMessageId: string }[] },
+  doc: { createdAt: number; items: { pendingMessageId: string }[] },
 ): Promise<BatchReference | "pending" | undefined> {
   if (Date.now() < doc.createdAt + ACTION_TIME_LIMIT_MS) return "pending";
-  const ours = new Set(doc.items.map((i) => i.promptMessageId));
+  const ours = new Set(doc.items.map((i) => i.pendingMessageId));
   let waiting = false;
   let cursor: string | undefined;
   do {
@@ -210,7 +212,7 @@ export async function saveBatchResults(
   if (status === "pending") return "pending";
 
   const model = languageModelOf(agent);
-  const missing = new Map(doc.items.map((i) => [i.promptMessageId, i]));
+  const missing = new Map(doc.items.map((i) => [i.pendingMessageId, i]));
   let unfinished = false;
   const results = await batchApi.doGetBatchResults({ batchId: batch.id });
   for await (const item of results) {
@@ -321,7 +323,11 @@ export const createBatch = internalMutation({
     ),
     pollAfterMs: v.optional(v.number()),
   },
-  returns: v.object({ batchId: v.id("batches"), webhookToken: v.string() }),
+  returns: v.object({
+    batchId: v.id("batches"),
+    webhookToken: v.string(),
+    queued: v.array(vItem),
+  }),
   handler: async (ctx, { items, pollAfterMs }) => {
     const queued = [];
     for (const item of items) {
@@ -347,7 +353,7 @@ export const createBatch = internalMutation({
         },
       );
     }
-    return { batchId, webhookToken };
+    return { batchId, webhookToken, queued };
   },
 });
 
