@@ -11,7 +11,7 @@ import {
 } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { anthropic } from "@ai-sdk/anthropic";
-import { v } from "convex/values";
+import { type Infer, v } from "convex/values";
 import { Agent, AlreadyClaimedError, saveMessage } from "@convex-dev/agent";
 import { components, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
@@ -47,10 +47,10 @@ function languageModelOf(agent: Agent): LanguageModelV4 {
 }
 
 /**
- * Builds each thread's context exactly as a normal generation would, submits
- * one batch request per prompt message, and saves a pending answer for each,
- * so the thread shows it as queued. The prompts must already be saved, e.g.
- * with `saveMessage` in the mutation that queues the work.
+ * Builds each thread's context exactly as a normal generation would, saves a
+ * pending answer for each prompt message, so the thread shows it as queued,
+ * and submits one batch request per prompt message. The prompts must already
+ * be saved, e.g. with `saveMessage` in the mutation that queues the work.
  */
 export async function startThreadBatch(
   ctx: ActionCtx,
@@ -81,21 +81,69 @@ export async function startThreadBatch(
       } as TextBatchRequest;
     }),
   );
+  // Saved before submitting, so a crash before the provider's reference is
+  // saved leaves a batch for the poll to find instead of paid work nobody
+  // asks for.
   const { batchId, webhookToken } = await ctx.runMutation(
     internal.batch.batch.createBatch,
-    {},
+    { items },
   );
   const batch = await startBatch({
     provider: batchApi,
     requests,
     webhookUrl: webhookUrl?.(batchId, webhookToken),
   });
-  await ctx.runMutation(internal.batch.batch.queueBatch, {
+  await ctx.runMutation(internal.batch.batch.recordBatch, {
     batchId,
     batch: { version: batch.version, id: batch.id, provider: batch.provider },
-    items,
   });
   return batchId;
+}
+
+// No action runs longer than this, so one that submitted a batch earlier and
+// didn't save its reference never will.
+const ACTION_TIME_LIMIT_MS = 10 * 60 * 1000;
+const CLOCK_SKEW_MS = 60 * 1000;
+
+/**
+ * Finds a batch whose submitting action died before saving its reference:
+ * the provider's newer batches whose results answer these prompt messages.
+ * Returns "pending" while it may still be saved or completed.
+ */
+async function findSubmittedBatch(
+  batchApi: BatchApi,
+  doc: { createdAt: number; items: { promptMessageId: string }[] },
+): Promise<BatchReference | "pending" | undefined> {
+  if (Date.now() < doc.createdAt + ACTION_TIME_LIMIT_MS) return "pending";
+  const ours = new Set(doc.items.map((i) => i.promptMessageId));
+  let waiting = false;
+  let cursor: string | undefined;
+  do {
+    const page = await batchApi.doListBatches?.({ cursor });
+    for (const listed of page?.batches ?? []) {
+      if (
+        listed.createdAt &&
+        Date.parse(listed.createdAt) < doc.createdAt - CLOCK_SKEW_MS
+      ) {
+        return waiting ? "pending" : undefined;
+      }
+      if (listed.status === "pending") {
+        waiting = true;
+        continue;
+      }
+      const results = await Promise.resolve(
+        batchApi.doGetBatchResults({ batchId: listed.batchId }),
+      ).catch(() => undefined);
+      const reader = results?.getReader();
+      const first = await reader?.read();
+      await reader?.cancel();
+      if (first?.value && ours.has(first.value.id)) {
+        return { version: 2, id: listed.batchId, provider: batchApi.provider };
+      }
+    }
+    cursor = page?.nextCursor;
+  } while (cursor);
+  return waiting ? "pending" : undefined;
 }
 
 /**
@@ -135,23 +183,32 @@ export async function saveBatchResults(
   batchId: Id<"batches">,
 ): Promise<"pending" | "done"> {
   const doc = await ctx.runQuery(internal.batch.batch.getBatch, { batchId });
-  if (!doc?.batch) return "pending";
+  if (!doc) return "pending";
   if (doc.status === "done") return "done";
-  const { status } = await getBatchStatus({
-    provider: batchApi,
-    batch: doc.batch,
-  });
-  if (status === "pending") return "pending";
-
-  const model = languageModelOf(agent);
   const fail = (messageId: string, error: string) =>
     agent.finalizeMessage(ctx, {
       messageId,
       result: { status: "failed", error },
     });
+  const batch = doc.batch ?? (await findSubmittedBatch(batchApi, doc));
+  if (batch === "pending") return "pending";
+  if (!batch) {
+    for (const { pendingMessageId } of doc.items) {
+      await fail(pendingMessageId, "The batch was not submitted");
+    }
+    await ctx.runMutation(internal.batch.batch.closeBatch, { batchId });
+    return "done";
+  }
+  if (!doc.batch) {
+    await ctx.runMutation(internal.batch.batch.recordBatch, { batchId, batch });
+  }
+  const { status } = await getBatchStatus({ provider: batchApi, batch });
+  if (status === "pending") return "pending";
+
+  const model = languageModelOf(agent);
   const missing = new Map(doc.items.map((i) => [i.promptMessageId, i]));
   let unfinished = false;
-  const results = await batchApi.doGetBatchResults({ batchId: doc.batch.id });
+  const results = await batchApi.doGetBatchResults({ batchId: batch.id });
   for await (const item of results) {
     const queued = missing.get(item.id);
     if (item.type !== "text" || !queued) continue;
@@ -256,14 +313,27 @@ const vItem = v.object({
 });
 
 export const createBatch = internalMutation({
-  args: {},
+  args: {
+    items: v.array(
+      v.object({ threadId: v.string(), promptMessageId: v.string() }),
+    ),
+  },
   returns: v.object({ batchId: v.id("batches"), webhookToken: v.string() }),
-  handler: async (ctx) => {
+  handler: async (ctx, { items }) => {
+    const queued = [];
+    for (const item of items) {
+      const { messageId } = await saveMessage(ctx, components.agent, {
+        ...item,
+        message: { role: "assistant", content: [] },
+        metadata: { status: "pending" },
+      });
+      queued.push({ ...item, pendingMessageId: messageId });
+    }
     const webhookToken = crypto.randomUUID();
     const batchId = await ctx.db.insert("batches", {
       status: "pending",
       webhookToken,
-      items: [],
+      items: queued,
     });
     return { batchId, webhookToken };
   },
@@ -274,27 +344,13 @@ const vBatchReference = v.object({
   id: v.string(),
   provider: v.string(),
 });
+type BatchReference = Infer<typeof vBatchReference>;
 
-export const queueBatch = internalMutation({
-  args: {
-    batchId: v.id("batches"),
-    batch: vBatchReference,
-    items: v.array(
-      v.object({ threadId: v.string(), promptMessageId: v.string() }),
-    ),
-  },
+export const recordBatch = internalMutation({
+  args: { batchId: v.id("batches"), batch: vBatchReference },
   returns: v.null(),
-  handler: async (ctx, { batchId, batch, items }) => {
-    const queued = [];
-    for (const item of items) {
-      const { messageId } = await saveMessage(ctx, components.agent, {
-        ...item,
-        message: { role: "assistant", content: [] },
-        metadata: { status: "pending" },
-      });
-      queued.push({ ...item, pendingMessageId: messageId });
-    }
-    await ctx.db.patch("batches", batchId, { batch, items: queued });
+  handler: async (ctx, { batchId, batch }) => {
+    await ctx.db.patch("batches", batchId, { batch });
     return null;
   },
 });
@@ -307,11 +363,19 @@ export const getBatch = internalQuery({
       batch: v.optional(vBatchReference),
       status: v.union(v.literal("pending"), v.literal("done")),
       items: v.array(vItem),
+      createdAt: v.number(),
     }),
   ),
   handler: async (ctx, { batchId }) => {
     const doc = await ctx.db.get("batches", batchId);
-    return doc && { batch: doc.batch, status: doc.status, items: doc.items };
+    return (
+      doc && {
+        batch: doc.batch,
+        status: doc.status,
+        items: doc.items,
+        createdAt: doc._creationTime,
+      }
+    );
   },
 });
 

@@ -21,10 +21,12 @@ so expect it to change. See the full example in
 1. Save each prompt as usual, e.g. with `saveMessage` in a mutation.
 2. For each thread, call `agent.start` to build the exact messages a generation
    would send: instructions, recent and searched messages, your
-   `contextHandler`, and tools. Submit one batch request per prompt, using the
-   prompt's message id as the request id.
-3. Save a pending answer for each prompt, so the thread shows it as queued.
-4. When the batch is done, save each result with `agent.generateText`, passing
+   `contextHandler`, and tools.
+3. Save a pending answer for each prompt, so the thread shows it as queued,
+   along with the batch's items, before submitting anything.
+4. Submit one batch request per prompt, using the prompt's message id as the
+   request id, and save the provider's batch reference.
+5. When the batch is done, save each result with `agent.generateText`, passing
    the `pendingMessageId` and a model that replays the result.
 
 ## Starting a batch
@@ -50,11 +52,7 @@ const requests = await Promise.all(
     } as const;
   }),
 );
-const batch = await startBatch({
-  provider: openai.experimental_batch(),
-  requests,
-});
-// In a mutation, with `batch` ({ version, id, provider }) and the items:
+// In a mutation, before submitting:
 for (const { threadId, promptMessageId } of items) {
   const { messageId: pendingMessageId } = await saveMessage(
     ctx,
@@ -68,6 +66,12 @@ for (const { threadId, promptMessageId } of items) {
   );
   // Store the item's pendingMessageId in your own table.
 }
+// Back in the action:
+const batch = await startBatch({
+  provider: openai.experimental_batch(),
+  requests,
+});
+// In a mutation, store `batch` ({ version, id, provider }) with the items.
 ```
 
 ## Saving the results
@@ -149,6 +153,11 @@ can't trigger polls.
   second answer or running its tools again. If the action dies after claiming, a
   poll after the action time limit picks the result back up, so keep polling
   while any claim is `"running"`.
+- **Save before submitting.** If the action dies after the provider accepts the
+  batch but before its reference is saved, the batch is still paid for. Because
+  the items were saved first, a later poll can find it: the example lists the
+  provider's batches created since, once the submitting action must have ended,
+  and adopts the one whose results answer its prompt messages.
 - **Keep polling through errors.** Schedule the next poll before doing the work,
   and cancel it once the batch is done, so a failed poll doesn't strand the
   batch. A very large batch may need its results split across several actions to
