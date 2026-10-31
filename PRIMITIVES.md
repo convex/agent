@@ -9,9 +9,13 @@ starts and moves one pending message forward through the generation.
 The two asks, "generate into a pending message I already saved" and "answer this
 prompt at most once", are the same operation: an atomic claim of a pending
 message the app owns. The pending message is the idempotency key, so there is no
-separate key, table or option. The stream link that #168 needs is the same
-ownership seen from the stream's side: a stream belongs to the pending message
-its generation saves into.
+separate key or option for apps to manage. The claim's state lives in a small
+component table keyed by that message, not on the messages: the messages saved
+under the key change role and status as the generation runs (a tool step, an
+approval result, a recovered stream), and none of that changes what the claim
+says. The stream link that #168 needs is the same ownership seen from the
+stream's side: a stream belongs to the pending message its generation saves
+into.
 
 ### API
 
@@ -53,56 +57,84 @@ try {
 
 Component additions:
 
-- `messages.claimPendingMessage({ threadId, messageId })` (an assistant message
-  in that thread) returns `{ status: "claimed", message, promptMessageId? }` or
-  `{ status: "running" | "answered", messageId }`.
+- `messages.claimPendingMessage({ threadId, messageId })` returns
+  `{ status: "claimed", message, promptMessageId? }` or
+  `{ status: "running" | "answered", messageId }`. The first claim needs a
+  pending (or failed) assistant message in that thread that no other claim is
+  saving into; later claims don't look at the key's role or status.
+- `messages.addMessages` takes an optional `final`: this is the last save of a
+  generation that finished.
 - `streams.create` takes an optional `pendingMessageId`.
 
 ### Semantics
 
-The answer to a claim key `K` is `K` plus every message a claimed generation
-saves after it at `K`'s order (they carry `claim.key = K`, and `claim.at`, which
-identifies the attempt). The claim looks at the latest message of the latest
-attempt, not the latest message in the order: a lapsed attempt's text can be
-recovered after its replacement started.
+A claim row records the key, when the current attempt claimed it, the current
+attempt's latest message (its pending message, or the last one it saved), and
+whether it was answered.
 
-| latest message                | claim result                                                                |
-| ----------------------------- | --------------------------------------------------------------------------- |
-| pending, never claimed        | claimed in place (the queued placeholder)                                   |
-| pending, claimed < lease ago  | `running`                                                                   |
-| success                       | `answered`                                                                  |
-| failed                        | continue in a new pending message                                           |
-| pending, claimed >= lease ago | fail it (scheduled, keeps streamed text), continue in a new pending message |
+| claim row                                    | claim result                                                                      |
+| -------------------------------------------- | --------------------------------------------------------------------------------- |
+| none (key is the queued placeholder)         | claimed in place                                                                  |
+| answered                                     | `answered`                                                                        |
+| latest pending, claimed < lease ago          | `running`                                                                         |
+| latest pending, claimed >= lease ago         | recover the lapsed attempt in this transaction, continue in a new pending message |
+| latest not pending (failed, or a saved step) | continue in a new pending message                                                 |
 
-"Continue" means a new pending message at the same order with the same key; the
-context includes the steps already saved there, so saved tool calls and results
-are not rerun. The lease is 10 minutes, the Convex action time limit: the action
-that made an older claim can no longer be running.
+"Continue" means a new pending message at the key's order; the context includes
+the steps already saved there, so saved tool calls and results are not rerun.
+The lease is 10 minutes, the Convex action time limit: the action that made an
+older claim can no longer be running, so nothing it streamed can still be saved.
+
+Where the row is written:
+
+- `claimPendingMessage` inserts it, or moves `latestMessageId` and `claimedAt`
+  to the attempt it starts.
+- `addMessages` with a `pendingMessageId` that is a claim's latest message moves
+  `latestMessageId` to the last message it saved, and sets `answered` only when
+  the client passed `final` and that message is a success. That covers step
+  saves, the final save, the held step `fail` saves, and stream recovery, in the
+  same mutation as the messages.
+- `deleteMessage` deletes the row of the key it deletes.
+
+The client passes `final` from `end()` when the AI SDK finished
+(`generateText`'s end, `streamText`'s `finish` part without an error) and from
+`save()` without a pending message (`generateObject`, `streamObject`). It never
+passes it from `fail()` or from a stream that ended without `finish` (e.g.
+`stopStream`). So a failed generation's saved tool step is context for the next
+attempt, never the answer.
+
+Takeover runs `finalizeMessage(failed)` on the lapsed pending message as a
+nested mutation before it creates the new one. Recovery now keeps the steps
+whose tools returned as `success` (so they load as context and the tool isn't
+rerun) and ends the recovered steps with a failed message, so the failure stays
+visible. This applies to every failed finalize, including stream timeouts and
+v3's "a failed step save" path.
 
 `startGeneration` claims before it fetches context or calls the model, and skips
 `saveInputMessages` (no new pending message, no `failPendingSteps`
-"Restarting"). The prompt is the pending message's `promptMessageId`. If
-building the context fails after the claim, the claimed message is failed so the
-next attempt can continue it.
-
-Each claimed generation's step saves carry the claim forward (`addMessages`
-copies `claim` from the pending message it replaces). Each stream records the
-pending message it saves into; a step save that passes the stream moves the link
-to the new pending message.
+"Restarting"). The prompt is the key's `promptMessageId`. If building the
+context fails after the claim, the claimed message is failed so the next attempt
+can continue it. Each stream records the pending message it saves into; a step
+save that passes the stream moves the link to the new pending message.
 
 ### Invariants
 
 1. At most one live generation owns a key at a time. Claims are a single
-   mutation (OCC-serialized), and a claim is only taken over once its action
-   must have ended.
-2. At most one successful answer per key. A second claim sees `answered` and
-   never calls the model or a tool.
-3. A generation that lost its message (failed by a timeout, abort or restart)
-   cannot save a success: the continuing attempt writes to a new message, and
-   the old generation's next save finds its own message failed and stops (the
-   existing v3 rule).
-4. Steps and tool results that were saved are never redone by a retry.
-5. A stream timeout fails only the message its stream is linked to, recovers
+   mutation (OCC-serialized on the claim row), and a claim is only taken over
+   once its action must have ended.
+2. At most one successful answer per key. `answered` is set only by a finished
+   generation's final save, atomically with it; a later claim sees `answered`
+   and never calls the model or a tool.
+3. A generation that lost its message (failed by a takeover, timeout, abort or
+   restart) cannot save a success or move the claim: the continuing attempt
+   writes to a new message the row points at, and the old generation's next save
+   finds its own message failed and stops (the existing v3 rule).
+4. Steps and tool results that were saved, or that a lapsed attempt streamed in
+   full, are never redone by a retry: takeover recovers them in the same
+   transaction, before the new attempt can load its context.
+5. A message's role or status never decides a claim, except that a first claim
+   needs a pending or failed assistant message.
+6. A stream timeout fails only the message its stream is linked to, recovers
    only streams linked to that message (or legacy unlinked ones), and runs the
    recovery in its own transaction, so a large delta log can't roll back the
    timeout.
@@ -114,22 +146,24 @@ to the new pending message.
   `startGeneration`. `saveMessages: "none"` with `pendingMessageId` is an error.
 - `saveMessage`: unchanged; it already saves a pending placeholder with
   `metadata: { status: "pending" }`.
-- Component: `claimPendingMessage`, `claim` copied by `addMessages`, the stream
-  link moved by `addMessages`, `timeoutStream` fails the linked message, and
-  `finalizeMessage` recovers only linked streams.
+- Component: `claimPendingMessage`, `addMessages`'s `final` and claim update,
+  the stream link moved by `addMessages`, `timeoutStream` fails the linked
+  message, and `finalizeMessage` recovers only linked streams and keeps
+  completed tool steps.
 
-### Schema (optional fields only)
+### Schema
 
-- `messages.claim?: { key: Id<"messages">, at: number }`, internal: omitted from
-  `MessageDoc` and from cloned threads.
+- New table `claims`: `threadId`, `messageId` (the key), `claimedAt`,
+  `latestMessageId`, `answered`. Indexes `threadId_messageId` (claim lookup,
+  scoped to the thread) and `latestMessageId` (the step save that moves it).
 - `streamingMessages.pendingMessageId?: Id<"messages">`.
 
-No index changes. Old rows have neither field and behave as before.
+Nothing on `messages`. Old rows have no claim and no link and behave as before.
 
 ### Prototype size
 
-About 220 lines of library code (`git diff --stat` without tests and generated
-code), plus about 850 lines of tests.
+About 310 lines of library code (`git diff --stat` without tests and generated
+code), plus about 1,570 lines of tests (library and the batch example).
 
 ## What it replaces or simplifies in v3
 
@@ -140,18 +174,21 @@ code), plus about 850 lines of tests.
   explicit link written by the code that already knows it.
 - `finalizeMessage` recovery stops pulling a replaced generation's unsaved
   deltas into the current message.
-- Apps no longer need a claim table or a "done" flag to make a generation
-  at-most-once, and no longer lose a paid result when the action dies between
-  their claim and the save.
+- Apps no longer need their own claim table or a "done" flag to make a
+  generation at-most-once, and no longer lose a paid result when the action dies
+  between their claim and the save.
 
 ## What it unlocks
 
 - **Batch** (#150): `example/convex/batch` rewritten on the primitive. Each
   thread shows a pending answer while queued; the result is saved into it;
   overlapping polls and duplicate webhooks save once; a poll that dies after
-  claiming is picked back up after the lease. The `batchItems` table, its two
-  indexes, `claimItem` and `finishBatch` are gone (399 to 352 lines, with the
-  pending placeholder and crash recovery added).
+  claiming is picked back up after the lease. The batch's items and pending
+  answers are saved before the batch is submitted, so an action that dies
+  between submitting and saving the provider's reference leaves a batch the next
+  poll finds (by listing the provider's batches and matching result ids to
+  prompt messages) instead of paid work nobody asks for. The `batchItems` table,
+  its two indexes, `claimItem` and `finishBatch` are gone.
 - **Stream timeouts** (#168): a timed-out stream fails its own pending message
   and keeps the streamed text, with concurrent generations, restarts and
   transaction limits covered by `src/component/streams.test.ts`.
@@ -179,10 +216,10 @@ code), plus about 850 lines of tests.
 1. **Throw or return?** `AlreadyClaimedError` keeps `generateText`'s return type
    honest, but every idempotent caller writes the same `catch`. A `{ skipped }`
    result or a separate `agent.answer()` would avoid it.
-2. **Failed is retryable.** A failed answer (provider error, timeout, user
-   abort) can be continued by the next claim. Good for workflow retries, but a
-   duplicate webhook after a user's stop would regenerate. Should a user abort
-   be terminal?
+2. **Failed is retryable.** A failed answer (provider error, timeout, a stopped
+   stream, a throwing `stopWhen`) can be continued by the next claim. Good for
+   workflow retries, but a duplicate webhook after a user's stop would
+   regenerate. Should a user abort be terminal (a third claim state)?
 3. **Lease.** 10 minutes assumes every claim is made inside an action. Is that
    true for HTTP actions that stream? A workflow retry within the lease gets
    `running`; should the claim instead record the action's scheduled-function
@@ -190,15 +227,31 @@ code), plus about 850 lines of tests.
 4. **Lapsed claims continue in a new message**, so a crashed attempt leaves a
    failed bubble before the answer. Reusing the message in place is nicer for
    batch, but needs fencing for its streams. Worth it?
-5. **Scope**: should normal `promptMessageId` generations also adopt a pending
+5. **Recovered tool steps are now `success` for every failed finalize**, not
+   only takeovers (a timed-out stream's finished tool step becomes context, and
+   a failed message follows it). One rule, but it changes what a timeout leaves
+   in a thread. Parallel tool calls with only some results streamed keep the
+   step failed only if no tool message follows; is the AI SDK fine with a
+   recovered call whose result is missing?
+6. **Recovery inside the takeover** reads the lapsed stream's deltas in the
+   claim mutation. `finalizeMessage` bounds that read and falls back to failing
+   without recovery, in which case a streamed-but-unsaved tool would run again.
+   Acceptable, or should takeover refuse until recovery fits?
+7. **Scope**: should normal `promptMessageId` generations also adopt a pending
    placeholder at that order instead of failing it as "Restarting"? That would
    make the option implicit, at the cost of changing today's restart behaviour.
-6. **Stream creation timing**: the link is set from the pending message when the
-   stream row is created. Codex flagged that a row created after the first step
-   save would link the replaced message. I couldn't reproduce it (writing deltas
-   waits on creating the row, and the SDK stream waits on the deltas, even with
-   a slow `streams.create`), so there is a regression test and no fix. Creating
-   the row before the first step would close it for sure.
-7. **Batch replay** defers to the real model once the prompt no longer ends at
+8. **`final` on `addMessages`** is a new component argument. It could instead be
+   a separate `answerClaim` mutation, but then the answer and its save are two
+   transactions, and a crash between them leaves a finished answer that a
+   takeover would regenerate.
+9. **Batch replay** defers to the real model once the prompt no longer ends at
    the user message, so a retried batch item doesn't replay its tool call. It is
-   a recipe-level rule; should the replay model live in the library?
+   a recipe-level rule; should the replay model live in the library? Finding a
+   lost batch also relies on `doListBatches` (OpenAI and Anthropic have it);
+   without it, the items are failed after the action time limit.
+10. **Stream creation timing**: the link is set from the pending message when
+    the stream row is created. Codex flagged that a row created after the first
+    step save would link the replaced message. I couldn't reproduce it (writing
+    deltas waits on creating the row, and the SDK stream waits on the deltas,
+    even with a slow `streams.create`), so there is a regression test and no
+    fix. Creating the row before the first step would close it for sure.
