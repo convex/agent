@@ -275,10 +275,12 @@ code), plus about 1,570 lines of tests (library and the batch example).
    takeover would regenerate.
 9. **Batch replay** replays the result until its tool calls are in the context
    the claimed generation loaded, so neither a retry nor an overlapping poll
-   replays a tool call that was saved. It is a recipe-level rule; should the
-   replay model live in the library? Finding a lost batch also relies on
-   `doListBatches` (OpenAI and Anthropic have it); without it, the items are
-   failed after the action time limit.
+   replays a tool call that was saved. It is a recipe-level rule, and a
+   `contextHandler` that drops tool history defeats it (Codex: high); a durable
+   answer needs the library to tell a generation whether its key already has
+   saved steps. Should the replay model, or that fact, live in the library?
+   Finding a lost batch also relies on `doListBatches` (OpenAI and Anthropic
+   have it); without it, the items are failed after the action time limit.
 10. **Stream creation timing**: the link is set from the pending message when
     the stream row is created. Codex flagged that a row created after the first
     step save would link the replaced message. I couldn't reproduce it (writing
