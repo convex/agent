@@ -25,19 +25,15 @@ jobs:
       - name: Node setup
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          cache-dependency-path: package.json
           node-version: "24.x"
           cache: "npm"
 
       - name: Install and build
         run: |
-          npm i
-          npm run build
-      - name: Build playground
-        working-directory: playground
-        run: |
           npm ci
           npm run build
+      - name: Build playground
+        run: npm run build -w playground
       - name: Publish package for testing branch
         run: npx pkg-pr-new publish || echo "pkg-pr-new failed"
       - name: Test

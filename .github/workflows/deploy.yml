@@ -25,14 +25,11 @@ jobs:
           node-version: 24
           cache: "npm"
 
-      - name: Install root dependencies & build
+      - name: Install dependencies & build
         run: npm ci && npm run build
 
-      - name: Install playground dependencies
-        run: cd playground && npm i
-
       - name: Build Vite project
-        run: cd playground && VITE_BASE=/agent/ npm run build
+        run: VITE_BASE=/agent/ npm run build -w playground
 
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
