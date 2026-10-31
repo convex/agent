@@ -85,19 +85,170 @@ const queue = app.action({
 
 // What a workflow step, a webhook handler or a poll would run.
 const answer = app.action({
-  args: { threadId: v.string(), pendingMessageId: v.string() },
-  handler: async (ctx, { threadId, pendingMessageId }) => {
+  args: {
+    threadId: v.string(),
+    pendingMessageId: v.string(),
+    approvals: v.optional(v.boolean()),
+    stopConditionThrows: v.optional(v.boolean()),
+  },
+  handler: async (
+    ctx,
+    { threadId, pendingMessageId, approvals, stopConditionThrows },
+  ) => {
     try {
-      const result = await agent.generateText(
+      const result = await (approvals ? approvalAgent : agent).generateText(
         ctx,
         { threadId },
-        { pendingMessageId },
+        {
+          pendingMessageId,
+          ...(stopConditionThrows && {
+            stopWhen: () => {
+              throw new Error("stop condition failed");
+            },
+          }),
+        },
       );
       return result.text;
     } catch (error) {
       if (error instanceof AlreadyClaimedError) return error.status;
       throw error;
     }
+  },
+});
+
+const sawResult = (
+  prompt: { role: string; content: unknown }[],
+  toolName: string,
+) =>
+  prompt.some(
+    (m) =>
+      m.role === "tool" &&
+      (m.content as { type: string; toolName?: string }[]).some(
+        (part) => part.type === "tool-result" && part.toolName === toolName,
+      ),
+  );
+const toolCall = (toolName: string): LanguageModelV4GenerateResult => ({
+  ...TOOL_CALL,
+  content: [
+    {
+      type: "tool-call",
+      toolCallId: `tc-${toolName}`,
+      toolName,
+      input: "{}",
+    },
+  ],
+});
+// Asks to remove (which needs approval), then looks up, then answers.
+const approvalAgent = new Agent(components.agent, {
+  name: "claims-approval",
+  languageModel: mockModel({
+    doGenerate: async ({ prompt }) => {
+      modelCalls++;
+      if (!sawResult(prompt, "remove")) return toolCall("remove");
+      if (!sawResult(prompt, "lookup")) return toolCall("lookup");
+      if (failNextAnswer) {
+        failNextAnswer = false;
+        throw new Error("provider failed");
+      }
+      return ANSWER;
+    },
+  }),
+  tools: {
+    lookup,
+    remove: createTool({
+      description: "Remove it",
+      inputSchema: z.object({}),
+      needsApproval: () => true,
+      execute: async () => {
+        toolRuns++;
+        return "removed";
+      },
+    }),
+  },
+  stopWhen: stepCountIs(3),
+});
+
+// Asks for approval, approves, and queues the continuation's answer.
+const queueApproved = app.action({
+  args: {},
+  handler: async (ctx) => {
+    const { threadId } = await approvalAgent.createThread(ctx, {});
+    const { savedMessages } = await approvalAgent.generateText(
+      ctx,
+      { threadId },
+      { prompt: "Remove it" },
+    );
+    const approvalId = savedMessages!
+      .flatMap((m) =>
+        Array.isArray(m.message?.content) ? m.message.content : [],
+      )
+      .flatMap((part) =>
+        part.type === "tool-approval-request" ? [part.approvalId] : [],
+      )[0]!;
+    const { messageId: promptMessageId } = await ctx.runMutation(
+      components.agent.messages.respondToToolCallApprovals,
+      {
+        threadId,
+        agentName: "claims-approval",
+        decisions: [{ approvalId, approved: true }],
+      },
+    );
+    const { messageId: pendingMessageId } = await approvalAgent.saveMessage(
+      ctx,
+      {
+        threadId,
+        promptMessageId,
+        message: { role: "assistant", content: [] },
+        metadata: { status: "pending" },
+      },
+    );
+    return { threadId, pendingMessageId };
+  },
+});
+
+// Claims a queued answer and streams a whole tool step, then stops as if the
+// action died before saving the step.
+const lapse = app.action({
+  args: {},
+  handler: async (
+    ctx,
+  ): Promise<{ threadId: string; pendingMessageId: string }> => {
+    const queued: { threadId: string; pendingMessageId: string } =
+      await ctx.runAction(api.claims.test.queue, {});
+    const { threadId, pendingMessageId } = queued;
+    const claim = await ctx.runMutation(
+      components.agent.messages.claimPendingMessage,
+      { threadId, messageId: pendingMessageId },
+    );
+    if (claim.status !== "claimed") throw new Error(claim.status);
+    const streamId = await ctx.runMutation(components.agent.streams.create, {
+      threadId,
+      order: claim.message.order,
+      stepOrder: claim.message.stepOrder,
+      format: "UIMessageChunk",
+      pendingMessageId,
+    });
+    await ctx.runMutation(components.agent.streams.addDelta, {
+      streamId,
+      start: 0,
+      end: 4,
+      parts: [
+        { type: "start-step" },
+        {
+          type: "tool-input-available",
+          toolCallId: "tc-lookup",
+          toolName: "lookup",
+          input: {},
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "tc-lookup",
+          output: "found",
+        },
+        { type: "finish-step" },
+      ],
+    });
+    return queued;
   },
 });
 
@@ -175,7 +326,14 @@ const streamWithSlowStreamCreation = app.action({
 });
 
 const { api, createTest } = app.defineModules({
-  "claims/test": { queue, answer, read, streamWithSlowStreamCreation },
+  "claims/test": {
+    queue,
+    answer,
+    read,
+    streamWithSlowStreamCreation,
+    queueApproved,
+    lapse,
+  },
 });
 
 function reset() {
@@ -305,6 +463,94 @@ describe("answering once (workflow retries, duplicate webhooks)", () => {
     expect(
       await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
     ).toBe("answered");
+  });
+});
+
+describe("the claim, not the messages, says whether it was answered", () => {
+  test("a saved tool step doesn't answer a generation that then failed", async () => {
+    reset();
+    const t = createTest();
+    const { threadId, pendingMessageId } = await t.action(
+      api.claims.test.queue,
+      {},
+    );
+    await expect(
+      t.action(api.claims.test.answer, {
+        threadId,
+        pendingMessageId,
+        stopConditionThrows: true,
+      }),
+    ).rejects.toThrow("stop condition failed");
+
+    expect(
+      await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
+    ).toBe("Looked it up");
+    expect(toolRuns).toBe(1);
+    expect(
+      await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
+    ).toBe("answered");
+  });
+
+  test("a takeover continues from a lapsed attempt's streamed tool step without rerunning it", async () => {
+    reset();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = createTest();
+    const { threadId, pendingMessageId } = await t.action(
+      api.claims.test.lapse,
+      {},
+    );
+    expect(
+      await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
+    ).toBe("running");
+
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+    expect(
+      await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
+    ).toBe("Looked it up");
+
+    expect(toolRuns).toBe(0);
+    expect(modelCalls).toBe(1);
+    const thread = await t.action(api.claims.test.read, { threadId });
+    expect(thread.map(({ role, status }) => [role, status])).toEqual([
+      ["user", "success"],
+      ["assistant", "success"],
+      ["tool", "success"],
+      ["assistant", "success"],
+    ]);
+    expect(
+      await t.action(api.claims.test.answer, { threadId, pendingMessageId }),
+    ).toBe("answered");
+  });
+
+  test("a failed approval continuation can be retried after its answer became a tool message", async () => {
+    reset();
+    const t = createTest();
+    const { threadId, pendingMessageId } = await t.action(
+      api.claims.test.queueApproved,
+      {},
+    );
+    failNextAnswer = true;
+    await expect(
+      t.action(api.claims.test.answer, {
+        threadId,
+        pendingMessageId,
+        approvals: true,
+      }),
+    ).rejects.toThrow("provider failed");
+    expect(
+      (await t.action(api.claims.test.read, { threadId })).find(
+        (m) => m._id === pendingMessageId,
+      )?.role,
+    ).toBe("tool");
+
+    expect(
+      await t.action(api.claims.test.answer, {
+        threadId,
+        pendingMessageId,
+        approvals: true,
+      }),
+    ).toBe("Looked it up");
+    expect(toolRuns).toBe(2);
   });
 });
 
