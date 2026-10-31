@@ -77,7 +77,10 @@ export function planToolCallResponses(
         part.type === "tool-approval-request" &&
         pendingApprovals.has(part.approvalId)
       ) {
-        if (answeredApprovals.has(part.approvalId)) {
+        if (
+          answeredApprovals.has(part.approvalId) ||
+          answeredCalls.has(part.toolCallId)
+        ) {
           throw new Error(`Approval ${part.approvalId} was already handled`);
         }
         claim(doc);

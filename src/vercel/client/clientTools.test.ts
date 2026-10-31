@@ -181,6 +181,25 @@ const saveProviderCall = app.mutation({
     }),
 });
 
+const saveDeleteResult = app.mutation({
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) =>
+    saveMessage(ctx, components.agent, {
+      threadId,
+      message: {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "tc-delete",
+            toolName: "deleteFile",
+            output: { type: "text", value: "Deleted a.txt" },
+          },
+        ],
+      },
+    }),
+});
+
 const saveUserMessage = app.mutation({
   args: { threadId: v.string(), prompt: v.string() },
   handler: async (ctx, { threadId, prompt }) =>
@@ -214,6 +233,7 @@ const { api, createTest } = app.defineModules({
     addOutput,
     decide,
     saveProviderCall,
+    saveDeleteResult,
     saveUserMessage,
     messages,
   },
@@ -369,6 +389,21 @@ describe("addToolOutput", () => {
           output: "done",
         }),
       ).rejects.toThrow(/Tool call tc-delete was already handled/);
+    });
+  }
+
+  for (const approved of [true, false]) {
+    test(`${approved ? "an approval" : "a denial"} after a result is rejected`, async () => {
+      const t = createTest();
+      const threadId = await t.action(api.clientTools.start, {
+        name: `result-then-${approved}`,
+        stream: false,
+        toolNames: ["deleteFile"],
+      });
+      await t.mutation(api.clientTools.saveDeleteResult, { threadId });
+      await expect(
+        t.mutation(api.clientTools.decide, { threadId, approved }),
+      ).rejects.toThrow(/already handled/);
     });
   }
 
