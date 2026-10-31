@@ -99,6 +99,7 @@ type MockBatch = {
   createdAt: string;
 };
 const batches = new Map<string, MockBatch>();
+let failNextResults = false;
 
 const batchApi: BatchApi = {
   specificationVersion: "v4",
@@ -118,6 +119,10 @@ const batchApi: BatchApi = {
     return { status: batches.get(batchId)!.status };
   },
   async doGetBatchResults({ batchId }) {
+    if (failNextResults) {
+      failNextResults = false;
+      throw new Error("rate limited");
+    }
     const results = batches.get(batchId)!.results;
     return new ReadableStream<BatchItemResult>({
       start(controller) {
@@ -529,6 +534,35 @@ describe("batch generation by composition", () => {
       ["assistant", "success", "Answer for A"],
     ]);
     expect(thread[1]._id).toBe(pending[1]._id);
+  });
+
+  test("a lost batch survives a failed lookup of its results", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = createTest();
+    const [a] = await t.action(api.batch.test.setup, {});
+    await expect(
+      t.action(api.batch.test.startAndDie, { items: [a] }),
+    ).rejects.toThrow("action died");
+    const batchId = await t.query(api.batch.test.latestBatch, {});
+    const [providerBatchId] = [...batches.keys()].slice(-1);
+    completeBatch(providerBatchId, (request) => ({
+      type: "text",
+      id: request.id,
+      status: "succeeded",
+      result: generated(ANSWER),
+    }));
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+    failNextResults = true;
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("pending");
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
+    const thread = await t.query(api.batch.test.list, {
+      threadId: a.threadId,
+    });
+    expect(thread.map((m) => [m.status, m.text])).toEqual([
+      ["success", "Question A"],
+      ["success", "Answer for A"],
+    ]);
   });
 
   test("a lost batch is told apart from a newer one for the same prompt", async () => {
