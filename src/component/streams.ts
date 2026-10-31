@@ -774,7 +774,9 @@ export async function getStreamingMessagesWithMetadata(
       }
       const { parts } = getPersistedUIMessageChunkParts(deltas.page);
       // We don't save messages that have already been saved
-      const numToSkip = stepOrder - streamingMessage.stepOrder;
+      const numToSkip =
+        streamingMessage.savedMessages ??
+        stepOrder - streamingMessage.stepOrder;
       messages.push(
         ...projectPersistedUIMessageChunks(
           publicStreamMessage(streamingMessage),

@@ -447,13 +447,18 @@ async function addMessagesHandler(
     if (message.fileIds) {
       await changeRefcount(ctx, [], message.fileIds);
     }
-    if (stream && messageDoc.status === "pending") {
-      await ctx.db.patch("streamingMessages", stream._id, {
-        pendingMessageId: messageId,
-      });
-    }
     // TODO: delete the associated stream data for the order/stepOrder
     toReturn.push((await ctx.db.get("messages", messageId))!);
+  }
+  if (stream) {
+    const next = toReturn.at(-1);
+    await ctx.db.patch("streamingMessages", stream._id, {
+      pendingMessageId:
+        next?.status === "pending" ? next._id : stream.pendingMessageId,
+      savedMessages:
+        (stream.savedMessages ?? 0) +
+        toReturn.filter((m) => m.status !== "pending").length,
+    });
   }
   const claim =
     pendingMessageId &&

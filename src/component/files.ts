@@ -233,7 +233,9 @@ export const deleteFiles = mutation({
           !args.force &&
           file.lastTouchedAt > Date.now() - FILE_CLEANUP_GRACE_MS
         ) {
-          console.error(`File ${fileId} is still within the cleanup grace period, skipping...`);
+          console.error(
+            `File ${fileId} is still within the cleanup grace period, skipping...`,
+          );
           return null;
         }
         await ctx.db.delete("files", fileId);

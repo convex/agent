@@ -132,6 +132,11 @@ export const schema = defineSchema({
     /** The pending message this stream's generation saves into next. */
     pendingMessageId: v.optional(v.id("messages")),
     /**
+     * How many of the stream's messages were saved. Recovery starts after
+     * them; other answers at the same order make stepOrder unreliable.
+     */
+    savedMessages: v.optional(v.number()),
+    /**
      * The step order of the first message in the stream.
      * If the stream ends up with both a tool call and a tool result,
      * the stepOrder of the result will be +1 of the tool call.
