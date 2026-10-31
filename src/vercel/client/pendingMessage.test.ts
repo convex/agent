@@ -214,6 +214,51 @@ const queueApproved = app.action({
   },
 });
 
+// Streams an approval continuation, and hangs as if the action died while
+// saving the step after the approved tool, once that step's tool returned.
+let hung: () => void = () => {};
+const streamApprovedThenHang = app.action({
+  args: { threadId: v.string(), pendingMessageId: v.string() },
+  handler: async (ctx, { threadId, pendingMessageId }) => {
+    const hanging = {
+      ...ctx,
+      runMutation: (async (reference, args) => {
+        if (
+          "messages" in (args as object) &&
+          JSON.stringify(args).includes("tc-lookup")
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          hung();
+          return new Promise(() => {});
+        }
+        return ctx.runMutation(reference, args);
+      }) as ActionCtx["runMutation"],
+    };
+    const result = await approvalAgent.streamText(
+      hanging,
+      { threadId },
+      {
+        pendingMessageId,
+        model: mockModel({
+          contentSteps: [
+            [
+              {
+                type: "tool-call",
+                toolCallId: "tc-lookup",
+                toolName: "lookup",
+                input: "{}",
+              },
+            ],
+            [{ type: "text", text: "Looked it up" }],
+          ],
+        }),
+      },
+      { saveStreamDeltas: { throttleMs: 0 } },
+    );
+    await result.consumeStream();
+  },
+});
+
 // Claims a queued answer and streams a whole tool step, then stops as if the
 // action died before saving the step.
 const lapse = app.action({
@@ -341,6 +386,7 @@ const { api, createTest } = app.defineModules({
     streamWithSlowStreamCreation,
     queueApproved,
     lapse,
+    streamApprovedThenHang,
   },
 });
 
@@ -581,6 +627,35 @@ describe("approved tools", () => {
       }),
     ).rejects.toThrow("provider failed");
 
+    expect(
+      await t.action(api.claims.test.answer, {
+        threadId,
+        pendingMessageId,
+        approvals: true,
+      }),
+    ).toBe("Looked it up");
+    expect(toolRuns).toBe(2);
+  });
+});
+
+describe("approved tools, streamed", () => {
+  test("a takeover keeps a later tool step the lapsed attempt streamed", async () => {
+    reset();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = createTest();
+    const { threadId, pendingMessageId } = await t.action(
+      api.claims.test.queueApproved,
+      {},
+    );
+    const hanging = new Promise<void>((resolve) => (hung = resolve));
+    void t.action(api.claims.test.streamApprovedThenHang, {
+      threadId,
+      pendingMessageId,
+    });
+    await hanging;
+    expect(toolRuns).toBe(2);
+
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
     expect(
       await t.action(api.claims.test.answer, {
         threadId,
