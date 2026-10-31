@@ -68,9 +68,11 @@ Component additions:
 
 ### Semantics
 
-A claim row records the key, when the current attempt claimed it, the current
-attempt's latest message (its pending message, or the last one it saved), and
-whether it was answered.
+A claim row records the key, its prompt, when the current attempt claimed it,
+the current attempt's latest message (its pending message, or the last one it
+saved), and whether it was answered. The prompt is copied from the key on the
+first claim, because saving into the key (e.g. stream recovery) can overwrite
+the key's `parentMessageId`.
 
 | claim row                                    | claim result                                                                      |
 | -------------------------------------------- | --------------------------------------------------------------------------------- |
@@ -128,7 +130,9 @@ save that passes the stream moves the link to the new pending message.
 3. A generation that lost its message (failed by a takeover, timeout, abort or
    restart) cannot save a success or move the claim: the continuing attempt
    writes to a new message the row points at, and the old generation's next save
-   finds its own message failed and stops (the existing v3 rule).
+   finds its own message failed and stops (the existing v3 rule). Since recovery
+   can now turn that message into a successful tool step, `addMessages` also
+   refuses to save into a pending message that was already saved.
 4. Steps and tool results that were saved, or that a lapsed attempt streamed in
    full, are never redone by a retry: takeover recovers them in the same
    transaction, before the new attempt can load its context.
@@ -153,9 +157,10 @@ save that passes the stream moves the link to the new pending message.
 
 ### Schema
 
-- New table `claims`: `threadId`, `messageId` (the key), `claimedAt`,
-  `latestMessageId`, `answered`. Indexes `threadId_messageId` (claim lookup,
-  scoped to the thread) and `latestMessageId` (the step save that moves it).
+- New table `claims`: `threadId`, `messageId` (the key), `promptMessageId`,
+  `claimedAt`, `latestMessageId`, `answered`. Indexes `threadId_messageId`
+  (claim lookup, scoped to the thread) and `latestMessageId` (the step save that
+  moves it).
 - `streamingMessages.pendingMessageId?: Id<"messages">`.
 
 Nothing on `messages`. Old rows have no claim and no link and behave as before.
@@ -236,7 +241,10 @@ code), plus about 1,570 lines of tests (library and the batch example).
 6. **Recovery inside the takeover** reads the lapsed stream's deltas in the
    claim mutation. `finalizeMessage` bounds that read and falls back to failing
    without recovery, in which case a streamed-but-unsaved tool would run again.
-   Acceptable, or should takeover refuse until recovery fits?
+   I chose liveness: refusing the takeover would leave the key `running`
+   forever, since the delta log never shrinks. Codex flags this as high; the
+   alternatives are recovering in pages across transactions before the takeover,
+   or a terminal "unrecoverable" claim state for the app to resolve.
 7. **Scope**: should normal `promptMessageId` generations also adopt a pending
    placeholder at that order instead of failing it as "Restarting"? That would
    make the option implicit, at the cost of changing today's restart behaviour.
