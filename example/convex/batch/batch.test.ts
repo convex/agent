@@ -96,6 +96,7 @@ type MockBatch = {
   requests: TextBatchV4Request[];
   status: "pending" | "completed";
   results: BatchItemResult[];
+  createdAt: string;
 };
 const batches = new Map<string, MockBatch>();
 
@@ -109,6 +110,7 @@ const batchApi: BatchApi = {
       requests: requests as TextBatchV4Request[],
       status: "pending",
       results: [],
+      createdAt: new Date().toISOString(),
     });
     return { batchId, status: "pending", warnings: [] };
   },
@@ -123,6 +125,25 @@ const batchApi: BatchApi = {
         controller.close();
       },
     });
+  },
+  async doListBatches() {
+    return {
+      batches: [...batches]
+        .reverse()
+        .map(([batchId, { status, createdAt }]) => ({
+          batchId,
+          status,
+          createdAt,
+        })),
+    };
+  },
+};
+// The provider accepts the batch, and the action dies before it hears back.
+const diesAfterSubmitting: BatchApi = {
+  ...batchApi,
+  async doStartBatch(options) {
+    await batchApi.doStartBatch(options);
+    throw new Error("action died");
   },
 };
 
@@ -161,6 +182,22 @@ const start = app.action({
   },
   handler: async (ctx, { items }) =>
     startThreadBatch(ctx, agent, batchApi, items),
+});
+
+const startAndDie = app.action({
+  args: {
+    items: v.array(
+      v.object({ threadId: v.string(), promptMessageId: v.string() }),
+    ),
+  },
+  handler: async (ctx, { items }) =>
+    startThreadBatch(ctx, agent, diesAfterSubmitting, items),
+});
+
+const latestBatch = app.query({
+  args: {},
+  handler: async (ctx) =>
+    (await ctx.db.query("batches").order("desc").first())!._id,
 });
 
 const save = app.action({
@@ -235,6 +272,8 @@ const { api, createTest } = app.defineModules({
   "batch/test": {
     setup,
     start,
+    startAndDie,
+    latestBatch,
     save,
     sendMessage,
     generateNormally,
@@ -444,6 +483,44 @@ describe("batch generation by composition", () => {
       [a.threadId, MODEL_ID, PROVIDER],
       [normalThreadId, MODEL_ID, PROVIDER],
     ]);
+  });
+
+  test("a batch whose submitting action died is found and saved", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = createTest();
+    const [a] = await t.action(api.batch.test.setup, {});
+    await expect(
+      t.action(api.batch.test.startAndDie, { items: [a] }),
+    ).rejects.toThrow("action died");
+    const batchId = await t.query(api.batch.test.latestBatch, {});
+    const pending = await t.query(api.batch.test.list, {
+      threadId: a.threadId,
+    });
+    expect(pending.map((m) => [m.message?.role, m.status])).toEqual([
+      ["user", "success"],
+      ["assistant", "pending"],
+    ]);
+
+    // The action that submitted it may still be about to save its reference.
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("pending");
+    const [providerBatchId] = [...batches.keys()].slice(-1);
+    completeBatch(providerBatchId, (request) => ({
+      type: "text",
+      id: request.id,
+      status: "succeeded",
+      result: generated(ANSWER),
+    }));
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
+    const thread = await t.query(api.batch.test.list, {
+      threadId: a.threadId,
+    });
+    expect(thread.map((m) => [m.message?.role, m.status, m.text])).toEqual([
+      ["user", "success", "Question A"],
+      ["assistant", "success", "Answer for A"],
+    ]);
+    expect(thread[1]._id).toBe(pending[1]._id);
   });
 
   test("a failed save keeps the batch open, and the retry doesn't rerun the batched tool", async () => {
