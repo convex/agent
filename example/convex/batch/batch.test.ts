@@ -206,6 +206,21 @@ const startAndDie = app.action({
     }),
 });
 
+// A poll that claimed the answer and died before saving anything.
+const abandonClaim = app.action({
+  args: { threadId: v.string(), pendingMessageId: v.string() },
+  handler: async (ctx, { threadId, pendingMessageId }) => {
+    await ctx.runMutation(app.components.agent.messages.claimPendingMessage, {
+      threadId,
+      messageId: pendingMessageId,
+    });
+    await agent.finalizeMessage(ctx, {
+      messageId: pendingMessageId,
+      result: { status: "failed", error: "action died" },
+    });
+  },
+});
+
 const latestBatch = app.query({
   args: {},
   handler: async (ctx) =>
@@ -285,6 +300,7 @@ const { api, createTest } = app.defineModules({
     setup,
     start,
     startAndDie,
+    abandonClaim,
     latestBatch,
     save,
     sendMessage,
@@ -539,6 +555,47 @@ describe("batch generation by composition", () => {
       ["assistant", "success", "Answer for A"],
     ]);
     expect(thread[1]._id).toBe(pending[1]._id);
+  });
+
+  test("a batched tool call runs once after an attempt that saved nothing", async () => {
+    const t = createTest();
+    const [, b] = await t.action(api.batch.test.setup, {});
+    const batchId = await t.action(api.batch.test.start, { items: [b] });
+    const [providerBatchId] = [...batches.keys()].slice(-1);
+    completeBatch(providerBatchId, (request) => ({
+      type: "text",
+      id: request.id,
+      status: "succeeded",
+      result: generated(
+        [
+          {
+            type: "tool-call",
+            toolCallId: "call-1",
+            toolName: "weather",
+            input: JSON.stringify({ city: "Paris" }),
+          },
+        ],
+        "tool-calls",
+      ),
+    }));
+    const [, placeholder] = await t.query(api.batch.test.list, {
+      threadId: b.threadId,
+    });
+    await t.action(api.batch.test.abandonClaim, {
+      threadId: b.threadId,
+      pendingMessageId: placeholder._id,
+    });
+    weatherRuns = 0;
+    failContinuation = true;
+
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("pending");
+    expect(await t.action(api.batch.test.save, { batchId })).toBe("done");
+
+    expect(weatherRuns).toBe(1);
+    const thread = await t.query(api.batch.test.list, {
+      threadId: b.threadId,
+    });
+    expect(thread.at(-1)?.text).toBe("It is sunny in Paris.");
   });
 
   test("a lost batch survives a failed lookup of its results", async () => {
