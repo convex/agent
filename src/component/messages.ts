@@ -387,6 +387,12 @@ async function addMessagesHandler(
     if (i === 0 && pendingMessageId) {
       const pendingMessage = await ctx.db.get("messages", pendingMessageId);
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
+      // E.g. recovered from its stream after it was failed: the generation
+      // that is still saving into it was stopped.
+      assert(
+        pendingMessage.status !== "success",
+        `Pending msg ${pendingMessageId} was already saved`,
+      );
       if (pendingMessage.status === "failed") {
         fail = true;
         error =
@@ -663,6 +669,7 @@ export const claimPendingMessage = mutation({
     const latest = claim
       ? await ctx.db.get("messages", claim.latestMessageId)
       : key;
+    const promptMessageId = claim ? claim.promptMessageId : key.parentMessageId;
     const claimedAt = Date.now();
     const claimed = async (message: Doc<"messages">) => {
       if (claim) {
@@ -676,13 +683,14 @@ export const claimPendingMessage = mutation({
           messageId,
           claimedAt,
           latestMessageId: message._id,
+          promptMessageId,
           answered: false,
         });
       }
       return {
         status: "claimed" as const,
         message: publicMessage(message),
-        promptMessageId: key.parentMessageId,
+        promptMessageId,
       };
     };
     if (latest?.status === "pending") {
@@ -709,9 +717,9 @@ export const claimPendingMessage = mutation({
       messages[0]._id as Id<"messages">,
     ))!;
     await ctx.db.patch("messages", next._id, {
-      parentMessageId: key.parentMessageId,
+      parentMessageId: promptMessageId,
     });
-    return claimed({ ...next, parentMessageId: key.parentMessageId });
+    return claimed({ ...next, parentMessageId: promptMessageId });
   },
 });
 

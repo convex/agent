@@ -95,6 +95,8 @@ export const schema = defineSchema({
     claimedAt: v.number(),
     /** The current attempt's pending message, or the last one it saved. */
     latestMessageId: v.id("messages"),
+    /** The key's prompt, which saving into the key can overwrite. */
+    promptMessageId: v.optional(v.id("messages")),
     /** Set only by the save that ends a generation that finished. */
     answered: v.boolean(),
   })
