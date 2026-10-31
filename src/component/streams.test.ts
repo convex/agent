@@ -794,6 +794,31 @@ describe("claiming a pending message", () => {
     );
   });
 
+  test("a takeover keeps recovered steps at the prompt's order after a newer prompt", async () => {
+    vi.useFakeTimers();
+    const t = initConvexTest();
+    const { threadId, messageId } = await claimedWithStreamedToolStep(t);
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "newer" } }],
+    });
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+    await t.mutation(api.messages.claimPendingMessage, { threadId, messageId });
+
+    const all = await t.run((ctx) => ctx.db.query("messages").collect());
+    expect(
+      all.map((m) => [m.order, m.message?.role, m.status, m.text]),
+    ).toEqual([
+      [0, "user", "success", "hello"],
+      [0, "assistant", "success", undefined],
+      [1, "user", "success", "newer"],
+      [0, "tool", "success", undefined],
+      [0, "assistant", "failed", undefined],
+      [0, "assistant", "pending", undefined],
+    ]);
+  });
+
   test("a recovered key still answers its own prompt", async () => {
     const t = initConvexTest();
     const { threadId, promptMessageId, messageId } =
