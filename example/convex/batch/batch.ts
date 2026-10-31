@@ -164,26 +164,38 @@ async function findSubmittedBatch(
 }
 
 /**
- * A model that answers its first call with the batch's result, and defers to
- * the real model after that, e.g. for the steps after a batched tool call.
- * Passing it to `agent.generateText` saves the result through the normal path:
- * the stored message shape, usage reporting, embeddings, and tool execution
- * plus any follow-up steps.
+ * A model that answers with the batch's result, and defers to the real model
+ * once the result's tool calls are in the context: for the steps after them,
+ * and for a retry after an earlier attempt saved them. It decides from the
+ * context the claimed generation loaded, so overlapping polls agree. Passing
+ * it to `agent.generateText` saves the result through the normal path: the
+ * stored message shape, usage reporting, embeddings, and tool execution plus
+ * any follow-up steps.
  */
 function replayModel(
   result: LanguageModelV4GenerateResult,
   model: LanguageModelV4,
 ): LanguageModelV4 {
-  let replayed = false;
+  const toolCallIds = new Set(
+    result.content.flatMap((part) =>
+      part.type === "tool-call" ? [part.toolCallId] : [],
+    ),
+  );
   return {
     specificationVersion: "v4",
     provider: model.provider,
     modelId: model.modelId,
     supportedUrls: model.supportedUrls,
     doGenerate: async (options) => {
-      if (replayed) return model.doGenerate(options);
-      replayed = true;
-      return result;
+      const applied = options.prompt.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.some(
+            (part) =>
+              part.type === "tool-call" && toolCallIds.has(part.toolCallId),
+          ),
+      );
+      return applied ? model.doGenerate(options) : result;
     },
     doStream: (options) => model.doStream(options),
   };
@@ -236,20 +248,13 @@ export async function saveBatchResults(
       await fail(queued.pendingMessageId, item.error?.message ?? item.status);
       continue;
     }
-    // Once the result's step was saved into the answer, a retry continues
-    // after it with the real model.
-    const [answer] = await ctx.runQuery(
-      components.agent.messages.getMessagesByIds,
-      { messageIds: [queued.pendingMessageId] },
-    );
-    const replay = !answer?.message?.content.length;
     try {
       await agent.generateText(
         ctx,
         { threadId: queued.threadId },
         {
           pendingMessageId: queued.pendingMessageId,
-          model: replay ? replayModel(item.result, model) : model,
+          model: replayModel(item.result, model),
         },
       );
     } catch (error) {

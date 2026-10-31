@@ -81,24 +81,36 @@ const batch = await startBatch({
 ## Saving the results
 
 A batch result is exactly what the model would have returned from a normal call.
-Hand it to `agent.generateText` through a model that replays it on its first
-call and defers to the real model after that:
+Hand it to `agent.generateText` through a model that replays it, and defers to
+the real model once the result's tool calls are in the context (the steps after
+them, or a retry after an earlier attempt saved them). It decides from the
+context the claimed generation loaded, so overlapping polls agree:
 
 ```ts
 function replayModel(
   result: LanguageModelV4GenerateResult,
   model: LanguageModelV4,
 ): LanguageModelV4 {
-  let replayed = false;
+  const toolCallIds = new Set(
+    result.content.flatMap((part) =>
+      part.type === "tool-call" ? [part.toolCallId] : [],
+    ),
+  );
   return {
     specificationVersion: "v4",
     provider: model.provider,
     modelId: model.modelId,
     supportedUrls: model.supportedUrls,
     doGenerate: async (options) => {
-      if (replayed) return model.doGenerate(options);
-      replayed = true;
-      return result;
+      const applied = options.prompt.some(
+        (message) =>
+          message.role === "assistant" &&
+          message.content.some(
+            (part) =>
+              part.type === "tool-call" && toolCallIds.has(part.toolCallId),
+          ),
+      );
+      return applied ? model.doGenerate(options) : result;
     },
     doStream: (options) => model.doStream(options),
   };
@@ -109,21 +121,11 @@ const results = await batchApi.doGetBatchResults({ batchId: batch.id });
 for await (const item of results) {
   // item.id is the pendingMessageId; look up the item's threadId by it.
   if (item.status === "succeeded") {
-    // Once the result's step was saved into the answer (e.g. a retry after
-    // its tool call ran), continue with the real model instead.
-    const [answer] = await ctx.runQuery(
-      components.agent.messages.getMessagesByIds,
-      { messageIds: [pendingMessageId] },
-    );
-    const replay = !answer?.message?.content.length;
     // Throws AlreadyClaimedError if another poll saved or is saving it.
     await agent.generateText(
       ctx,
       { threadId },
-      {
-        pendingMessageId,
-        model: replay ? replayModel(item.result, model) : model,
-      },
+      { pendingMessageId, model: replayModel(item.result, model) },
     );
   } else {
     await agent.finalizeMessage(ctx, {
