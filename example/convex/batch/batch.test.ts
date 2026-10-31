@@ -533,6 +533,42 @@ describe("batch generation by composition", () => {
     expect(thread[1]._id).toBe(pending[1]._id);
   });
 
+  test("a lost batch is told apart from a newer one for the same prompt", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = createTest();
+    const [a] = await t.action(api.batch.test.setup, {});
+    await expect(
+      t.action(api.batch.test.startAndDie, { items: [a] }),
+    ).rejects.toThrow("action died");
+    const lost = await t.query(api.batch.test.latestBatch, {});
+    const [lostProviderBatchId] = [...batches.keys()].slice(-1);
+    // The app resubmits the same prompt in a new batch.
+    await t.action(api.batch.test.start, { items: [a] });
+    const [newerProviderBatchId] = [...batches.keys()].slice(-1);
+    for (const [providerBatchId, text] of [
+      [lostProviderBatchId, "From the lost batch"],
+      [newerProviderBatchId, "From the newer batch"],
+    ]) {
+      completeBatch(providerBatchId, (request) => ({
+        type: "text",
+        id: request.id,
+        status: "succeeded",
+        result: generated([{ type: "text", text }]),
+      }));
+    }
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+
+    expect(await t.action(api.batch.test.save, { batchId: lost })).toBe("done");
+    const thread = await t.query(api.batch.test.list, {
+      threadId: a.threadId,
+    });
+    expect(thread.map((m) => [m.status, m.text])).toEqual([
+      ["success", "Question A"],
+      ["success", "From the lost batch"],
+      ["pending", undefined],
+    ]);
+  });
+
   test("a failed save keeps the batch open, and the retry doesn't rerun the batched tool", async () => {
     const t = createTest();
     const [, b] = await t.action(api.batch.test.setup, {});

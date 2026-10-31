@@ -39,6 +39,7 @@ const ANSWER: LanguageModelV4GenerateResult = {
 let modelCalls = 0;
 let toolRuns = 0;
 let failNextAnswer = false;
+let failNextCall = false;
 const lookup = createTool({
   description: "Look it up",
   inputSchema: z.object({}),
@@ -144,6 +145,10 @@ const approvalAgent = new Agent(components.agent, {
   languageModel: mockModel({
     doGenerate: async ({ prompt }) => {
       modelCalls++;
+      if (failNextCall) {
+        failNextCall = false;
+        throw new Error("provider failed");
+      }
       if (!sawResult(prompt, "remove")) return toolCall("remove");
       if (!sawResult(prompt, "lookup")) return toolCall("lookup");
       if (failNextAnswer) {
@@ -343,6 +348,7 @@ function reset() {
   modelCalls = 0;
   toolRuns = 0;
   failNextAnswer = false;
+  failNextCall = false;
 }
 
 describe("generating into an existing pending message", () => {
@@ -546,6 +552,34 @@ describe("the claim, not the messages, says whether it was answered", () => {
         (m) => m._id === pendingMessageId,
       )?.role,
     ).toBe("tool");
+
+    expect(
+      await t.action(api.claims.test.answer, {
+        threadId,
+        pendingMessageId,
+        approvals: true,
+      }),
+    ).toBe("Looked it up");
+    expect(toolRuns).toBe(2);
+  });
+});
+
+describe("approved tools", () => {
+  test("run once, even if the request after them fails", async () => {
+    reset();
+    const t = createTest();
+    const { threadId, pendingMessageId } = await t.action(
+      api.claims.test.queueApproved,
+      {},
+    );
+    failNextCall = true;
+    await expect(
+      t.action(api.claims.test.answer, {
+        threadId,
+        pendingMessageId,
+        approvals: true,
+      }),
+    ).rejects.toThrow("provider failed");
 
     expect(
       await t.action(api.claims.test.answer, {
