@@ -240,31 +240,36 @@ export const submitToolOutput = mutation({
       toolCallId,
       output,
     });
-    await ctx.scheduler.runAfter(0, internal.chat.generateResponse, {
-      threadId,
-      promptMessageId: messageId,
-    });
+    // If no call in this step is still unanswered, schedule
+    // generateResponse with promptMessageId: messageId, as submitApproval
+    // does in the example files below.
   },
 });
 ```
 
-Pass `state: "output-error"` and `errorText` instead of `output` to report a
-failure to the model. On the client, answer each pending call from
-`useUIMessages` once:
+The output is sent to the model as text (a string) or JSON; a tool's
+`toModelOutput` is not applied. Pass `state: "output-error"` and `errorText`
+instead of `output` to report a failure to the model.
+
+On the client, answer each call once its message is saved. A call seen only in
+stream deltas is not saved yet, and `addToolOutput` rejects it:
 
 ```tsx
 const submitToolOutput = useMutation(api.chat.submitToolOutput);
 const answered = useRef(new Set<string>());
 useEffect(() => {
-  for (const part of messages.flatMap((m) => m.parts)) {
-    if (part.type !== "tool-getLocation" || part.state !== "input-available") {
-      continue;
+  for (const message of messages) {
+    if (message.status !== "success") continue;
+    for (const part of message.parts) {
+      if (part.type !== "tool-getLocation") continue;
+      if (part.state !== "input-available") continue;
+      const { toolCallId } = part;
+      if (answered.current.has(toolCallId)) continue;
+      answered.current.add(toolCallId);
+      readLocation(part.input)
+        .then((output) => submitToolOutput({ threadId, toolCallId, output }))
+        .catch(() => answered.current.delete(toolCallId));
     }
-    if (answered.current.has(part.toolCallId)) continue;
-    answered.current.add(part.toolCallId);
-    void readLocation(part.input).then((output) =>
-      submitToolOutput({ threadId, toolCallId: part.toolCallId, output }),
-    );
   }
 }, [messages, threadId, submitToolOutput]);
 ```

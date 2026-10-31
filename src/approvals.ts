@@ -99,6 +99,9 @@ export function planToolCallResponses(
         if (approvalId) {
           throw new Error(`Tool call ${part.toolCallId} is awaiting approval`);
         }
+        if (part.providerExecuted) {
+          throw new Error(`Tool call ${part.toolCallId} is provider-executed`);
+        }
         claim(doc);
         toolNames.set(part.toolCallId, part.toolName);
         pendingCalls.delete(part.toolCallId);

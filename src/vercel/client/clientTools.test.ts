@@ -151,6 +151,26 @@ const decide = app.mutation({
   },
 });
 
+const saveProviderCall = app.mutation({
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) =>
+    saveMessage(ctx, components.agent, {
+      threadId,
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "tc-provider",
+            toolName: "web_search",
+            input: {},
+            providerExecuted: true,
+          },
+        ],
+      },
+    }),
+});
+
 const saveUserMessage = app.mutation({
   args: { threadId: v.string(), prompt: v.string() },
   handler: async (ctx, { threadId, prompt }) =>
@@ -183,6 +203,7 @@ const { api, createTest } = app.defineModules({
     cont,
     addOutput,
     decide,
+    saveProviderCall,
     saveUserMessage,
     messages,
   },
@@ -345,6 +366,22 @@ describe("addToolOutput", () => {
         output: "done",
       }),
     ).rejects.toThrow(/Tool call tc-client is awaiting approval/);
+  });
+
+  test("an output for a provider-executed call is rejected", async () => {
+    const t = createTest();
+    const threadId = await t.action(api.clientTools.start, {
+      name: "provider",
+      stream: false,
+    });
+    await t.mutation(api.clientTools.saveProviderCall, { threadId });
+    await expect(
+      t.mutation(api.clientTools.addOutput, {
+        threadId,
+        toolCallId: "tc-provider",
+        output: {},
+      }),
+    ).rejects.toThrow(/Tool call tc-provider is provider-executed/);
   });
 
   test("an unknown toolCallId is rejected", async () => {
