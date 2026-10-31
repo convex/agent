@@ -11,6 +11,8 @@
   `output-error` (#162, #441)
 - Store a step's reasoning once, in content, so long reasoning fits the document
   size limit (#418, #423)
+- `agent.addToolOutput` saves a client-side tool's result next to its call, and
+  `createTool` accepts a tool without `execute` (#231)
 
 ## 0.7.9
 

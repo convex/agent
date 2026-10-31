@@ -755,31 +755,36 @@ function approvalContinuation(
   searchMessages: MessageDoc[],
   recentMessages: MessageDoc[],
 ): { approvalIds: Set<string>; storedContext: ModelMessage[] } | undefined {
-  if (
-    promptMessage?.message?.role !== "tool" ||
-    !promptMessage.message.content.some(
-      (part) => part.type === "tool-approval-response",
-    )
-  ) {
-    return undefined;
-  }
+  if (promptMessage?.message?.role !== "tool") return undefined;
   const responseIds = new Set(
     promptMessage.message.content.flatMap((part) =>
       part.type === "tool-approval-response" ? [part.approvalId] : [],
     ),
   );
+  const resultCallIds = new Set(
+    promptMessage.message.content.flatMap((part) =>
+      part.type === "tool-result" ? [part.toolCallId] : [],
+    ),
+  );
+  // A client tool's result continues its step like a decision does when that
+  // step also requested approvals.
   const requestContents = recentMessages.flatMap((doc) =>
     doc.order === promptMessage.order &&
     doc.message?.role === "assistant" &&
     Array.isArray(doc.message.content) &&
+    doc.message.content.some((part) => part.type === "tool-approval-request") &&
     doc.message.content.some(
       (part) =>
-        part.type === "tool-approval-request" &&
-        responseIds.has(part.approvalId),
+        (part.type === "tool-approval-request" &&
+          responseIds.has(part.approvalId)) ||
+        (part.type === "tool-call" && resultCallIds.has(part.toolCallId)),
     )
       ? [doc.message.content]
       : [],
   );
+  if (responseIds.size === 0 && requestContents.length === 0) {
+    return undefined;
+  }
   if (requestContents.length !== 1) {
     throw new Error(
       "Approval continuation requires one complete request message",

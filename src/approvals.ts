@@ -1,4 +1,5 @@
-import type { Message, MessageDoc } from "./validators.js";
+import type { Infer } from "convex/values";
+import type { Message, MessageDoc, vToolResultOutput } from "./validators.js";
 
 export type ToolCallApprovalDecision = {
   approvalId: string;
@@ -6,61 +7,127 @@ export type ToolCallApprovalDecision = {
   reason?: string;
 };
 
-// The window a batch is resolved against. Approvals are near the end of a
-// thread, so one bounded page finds them.
+export type ToolCallOutput = {
+  toolCallId: string;
+  toolName: string;
+  output: Infer<typeof vToolResultOutput>;
+};
+
+// The window a batch is resolved against. Approvals and client tool calls are
+// near the end of a thread, so one bounded page finds them.
 export const APPROVAL_LOOKUP_MESSAGES = 100;
 
-export function planToolCallApprovals(
+export function planToolCallResponses(
   messages: MessageDoc[],
-  decisions: ToolCallApprovalDecision[],
+  {
+    decisions,
+    outputs,
+  }: { decisions: ToolCallApprovalDecision[]; outputs: ToolCallOutput[] },
   threadId: string,
 ): { requestMessageId: string; message: Extract<Message, { role: "tool" }> } {
-  if (decisions.length === 0) {
+  if (decisions.length + outputs.length === 0) {
     throw new Error("An approval batch must contain at least one decision");
   }
-  const pending = new Set(decisions.map(({ approvalId }) => approvalId));
-  if (pending.size !== decisions.length) {
+  const pendingApprovals = new Set(
+    decisions.map(({ approvalId }) => approvalId),
+  );
+  if (pendingApprovals.size !== decisions.length) {
     throw new Error("Duplicate approval ids in batch");
   }
+  const pendingCalls = new Set(outputs.map(({ toolCallId }) => toolCallId));
+  if (pendingCalls.size !== outputs.length) {
+    throw new Error("Duplicate tool call ids in batch");
+  }
   let requestMessageId: string | undefined;
+  const claim = (doc: MessageDoc) => {
+    if (requestMessageId && requestMessageId !== doc._id) {
+      throw new Error(
+        "Approval decisions in one batch must belong to the same request message",
+      );
+    }
+    requestMessageId = doc._id;
+  };
   const providerExecuted = new Set<string>();
+  const answeredApprovals = new Set<string>();
+  const answeredCalls = new Set<string>();
 
+  // Newest first, so a call's answers are seen before the call itself.
   for (const doc of messages) {
     if (!Array.isArray(doc.message?.content)) continue;
-    const providerCalls = new Set(
-      doc.message.content.flatMap((part) =>
-        part.type === "tool-call" && part.providerExecuted
-          ? [part.toolCallId]
-          : [],
-      ),
-    );
-    for (const part of doc.message.content) {
-      if (!("approvalId" in part) || !pending.has(part.approvalId)) continue;
+    const content = doc.message.content;
+    for (const part of content) {
       if (part.type === "tool-approval-response") {
-        throw new Error(`Approval ${part.approvalId} was already handled`);
+        answeredApprovals.add(part.approvalId);
+      } else if (part.type === "tool-result") {
+        answeredCalls.add(part.toolCallId);
       }
+    }
+    if (doc.message.role !== "assistant") continue;
+    const providerCalls = new Set<string>();
+    const approvalRequests = new Map<string, string>();
+    for (const part of content) {
+      if (part.type === "tool-call" && part.providerExecuted) {
+        providerCalls.add(part.toolCallId);
+      } else if (part.type === "tool-approval-request") {
+        approvalRequests.set(part.toolCallId, part.approvalId);
+      }
+    }
+    for (const part of content) {
       if (
         part.type === "tool-approval-request" &&
-        doc.message.role === "assistant"
+        pendingApprovals.has(part.approvalId)
       ) {
-        if (requestMessageId && requestMessageId !== doc._id) {
-          throw new Error(
-            "Approval decisions in one batch must belong to the same request message",
-          );
+        if (
+          answeredApprovals.has(part.approvalId) ||
+          answeredCalls.has(part.toolCallId)
+        ) {
+          throw new Error(`Approval ${part.approvalId} was already handled`);
         }
-        requestMessageId = doc._id;
+        claim(doc);
         if (providerCalls.has(part.toolCallId)) {
           providerExecuted.add(part.approvalId);
         }
-        pending.delete(part.approvalId);
+        pendingApprovals.delete(part.approvalId);
+      } else if (
+        part.type === "tool-call" &&
+        pendingCalls.has(part.toolCallId)
+      ) {
+        const approvalId = approvalRequests.get(part.toolCallId);
+        if (
+          answeredCalls.has(part.toolCallId) ||
+          (approvalId && answeredApprovals.has(approvalId))
+        ) {
+          throw new Error(`Tool call ${part.toolCallId} was already handled`);
+        }
+        if (approvalId) {
+          throw new Error(`Tool call ${part.toolCallId} is awaiting approval`);
+        }
+        if (part.providerExecuted) {
+          throw new Error(`Tool call ${part.toolCallId} is provider-executed`);
+        }
+        const { toolName } = outputs.find(
+          ({ toolCallId }) => toolCallId === part.toolCallId,
+        )!;
+        if (part.toolName !== toolName) {
+          throw new Error(
+            `Tool call ${part.toolCallId} is a call to ${part.toolName}, not ${toolName}`,
+          );
+        }
+        claim(doc);
+        pendingCalls.delete(part.toolCallId);
       }
     }
-    if (pending.size === 0) break;
+    if (pendingApprovals.size === 0 && pendingCalls.size === 0) break;
   }
 
-  if (pending.size > 0) {
+  if (pendingApprovals.size > 0) {
     throw new Error(
-      `Approval request ${pending.values().next().value} was not found in the last ${APPROVAL_LOOKUP_MESSAGES} messages of thread ${threadId}`,
+      `Approval request ${pendingApprovals.values().next().value} was not found in the last ${APPROVAL_LOOKUP_MESSAGES} messages of thread ${threadId}`,
+    );
+  }
+  if (pendingCalls.size > 0) {
+    throw new Error(
+      `Tool call ${pendingCalls.values().next().value} was not found in the last ${APPROVAL_LOOKUP_MESSAGES} messages of thread ${threadId}`,
     );
   }
 
@@ -68,13 +135,23 @@ export function planToolCallApprovals(
     requestMessageId: requestMessageId!,
     message: {
       role: "tool",
-      content: decisions.map(({ approvalId, approved, reason }) => ({
-        type: "tool-approval-response",
-        approvalId,
-        approved,
-        reason,
-        ...(providerExecuted.has(approvalId) ? { providerExecuted: true } : {}),
-      })),
+      content: [
+        ...decisions.map(({ approvalId, approved, reason }) => ({
+          type: "tool-approval-response" as const,
+          approvalId,
+          approved,
+          reason,
+          ...(providerExecuted.has(approvalId)
+            ? { providerExecuted: true }
+            : {}),
+        })),
+        ...outputs.map(({ toolCallId, toolName, output }) => ({
+          type: "tool-result" as const,
+          toolCallId,
+          toolName,
+          output,
+        })),
+      ],
     },
   };
 }

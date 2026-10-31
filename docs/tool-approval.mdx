@@ -218,6 +218,65 @@ The `ToolUIPart` states relevant to approval are:
 | `output-denied`      | Tool was denied                                      |
 | `output-error`       | Tool execution failed                                |
 
+## Client-side tools
+
+A tool without `execute` runs in the browser. Generation stops at its call, and
+the tool part waits in the `input-available` state until the client answers it
+with `addToolOutput`. Like an approval, the output is saved next to its call,
+and a second answer is rejected. Naming the tool keeps a client from answering a
+call to any other tool. A client tool cannot set `needsApproval`: ask the user
+in the client before answering.
+
+```ts
+const getLocation = createTool({
+  description: "Get the user's location from their browser",
+  inputSchema: z.object({ precise: z.boolean() }),
+});
+
+export const submitToolOutput = mutation({
+  args: { threadId: v.string(), toolCallId: v.string(), output: v.any() },
+  handler: async (ctx, { threadId, toolCallId, output }) => {
+    // Check the user can access the thread.
+    const { messageId } = await agent.addToolOutput(ctx, {
+      threadId,
+      tool: "getLocation",
+      toolCallId,
+      output,
+    });
+    // If no call in this step is still unanswered, schedule
+    // generateResponse with promptMessageId: messageId, as submitApproval
+    // does in the example files below.
+  },
+});
+```
+
+The output is sent to the model as text (a string) or JSON; a tool's
+`toModelOutput` is not applied. Pass `state: "output-error"` and `errorText`
+instead of `output` to report a failure to the model.
+
+On the client, answer each call once its message is saved. A call seen only in
+stream deltas is not saved yet, and `addToolOutput` rejects it:
+
+```tsx
+const submitToolOutput = useMutation(api.chat.submitToolOutput);
+const answered = useRef(new Set<string>());
+useEffect(() => {
+  for (const message of messages) {
+    if (message.status !== "success") continue;
+    for (const part of message.parts) {
+      if (part.type !== "tool-getLocation") continue;
+      if (part.state !== "input-available") continue;
+      const { toolCallId } = part;
+      if (answered.current.has(toolCallId)) continue;
+      answered.current.add(toolCallId);
+      readLocation(part.input)
+        .then((output) => submitToolOutput({ threadId, toolCallId, output }))
+        .catch(() => answered.current.delete(toolCallId));
+    }
+  }
+}, [messages, threadId, submitToolOutput]);
+```
+
 ## Example files
 
 For a complete working example, see:
