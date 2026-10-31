@@ -111,9 +111,20 @@ export async function startThreadBatch(
 const ACTION_TIME_LIMIT_MS = 10 * 60 * 1000;
 const CLOCK_SKEW_MS = 60 * 1000;
 
+async function firstResult(batchApi: BatchApi, batchId: string) {
+  try {
+    const reader = (await batchApi.doGetBatchResults({ batchId })).getReader();
+    const { value } = await reader.read();
+    await reader.cancel();
+    return value ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Finds a batch whose submitting action died before saving its reference:
- * the provider's newer batches whose results answer these prompt messages.
+ * the provider's newer batch whose results answer these pending answers.
  * Returns "pending" while it may still be saved or completed.
  */
 async function findSubmittedBatch(
@@ -133,17 +144,18 @@ async function findSubmittedBatch(
       ) {
         return waiting ? "pending" : undefined;
       }
-      if (listed.status === "pending") {
+      // A failed batch has no results to save, ours or not.
+      if (listed.status === "failed") continue;
+      // A pending batch, or one whose results can't be read yet, may be ours.
+      const first =
+        listed.status === "completed"
+          ? await firstResult(batchApi, listed.batchId)
+          : undefined;
+      if (first === undefined) {
         waiting = true;
         continue;
       }
-      const results = await Promise.resolve(
-        batchApi.doGetBatchResults({ batchId: listed.batchId }),
-      ).catch(() => undefined);
-      const reader = results?.getReader();
-      const first = await reader?.read();
-      await reader?.cancel();
-      if (first?.value && ours.has(first.value.id)) {
+      if (first && ours.has(first.id)) {
         return { version: 2, id: listed.batchId, provider: batchApi.provider };
       }
     }

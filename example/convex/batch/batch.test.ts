@@ -25,7 +25,11 @@ import { saveBatchResults, startThreadBatch } from "./batch.js";
 
 const app = defineTestApp({ schema, components: { agent: agentTest } });
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  // Each test's message ids start over, so its provider does too.
+  batches.clear();
+});
 
 const USAGE = {
   inputTokens: { total: 3, noCache: 3, cacheRead: 0, cacheWrite: 0 },
