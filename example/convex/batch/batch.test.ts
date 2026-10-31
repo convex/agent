@@ -191,7 +191,9 @@ const startAndDie = app.action({
     ),
   },
   handler: async (ctx, { items }) =>
-    startThreadBatch(ctx, agent, diesAfterSubmitting, items),
+    startThreadBatch(ctx, agent, diesAfterSubmitting, items, {
+      pollAfterMs: 60_000,
+    }),
 });
 
 const latestBatch = app.query({
@@ -493,6 +495,14 @@ describe("batch generation by composition", () => {
       t.action(api.batch.test.startAndDie, { items: [a] }),
     ).rejects.toThrow("action died");
     const batchId = await t.query(api.batch.test.latestBatch, {});
+    // The poll that finds it was scheduled before submitting.
+    expect(
+      await t.run(async (ctx) =>
+        (await ctx.db.system.query("_scheduled_functions").collect()).map(
+          (f) => [f.name, f.args[0]],
+        ),
+      ),
+    ).toContainEqual(["batch/batch:pollBatch", { batchId }]);
     const pending = await t.query(api.batch.test.list, {
       threadId: a.threadId,
     });
