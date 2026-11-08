@@ -484,6 +484,7 @@ export const vFinishReason = v.union(
   v.literal("error"),
   v.literal("other"),
   v.literal("unknown"),
+  v.literal("interrupted"),
 );
 
 export const vUsage = v.object({

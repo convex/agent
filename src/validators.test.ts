@@ -1,10 +1,16 @@
+import type { FinishReason } from "ai";
 import type { GenericId, Infer } from "convex/values";
 import { expectTypeOf, test } from "vitest";
 import type {
   ContextOptions,
   StorageOptions,
 } from "./vercel/client/types.js";
-import { vContextOptions, vMessageDoc, vStorageOptions } from "./validators.js";
+import {
+  vContextOptions,
+  vFinishReason,
+  vMessageDoc,
+  vStorageOptions,
+} from "./validators.js";
 import type { Doc } from "./component/_generated/dataModel.js";
 
 expectTypeOf<Infer<typeof vContextOptions>>().toExtend<ContextOptions>();
@@ -12,6 +18,8 @@ expectTypeOf<ContextOptions>().toExtend<Infer<typeof vContextOptions>>();
 
 expectTypeOf<Infer<typeof vStorageOptions>>().toExtend<StorageOptions>();
 expectTypeOf<StorageOptions>().toExtend<Infer<typeof vStorageOptions>>();
+
+expectTypeOf<FinishReason>().toExtend<Infer<typeof vFinishReason>>();
 
 type MessageBasedOnSchema = IdsToStrings<
   Omit<Doc<"messages">, "files" | "stepId" | "parentMessageId">

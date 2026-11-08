@@ -19,6 +19,7 @@ import fs from "fs";
 import path from "path";
 import type { SerializedContent } from "./mapping.js";
 import { validate } from "convex-helpers/validators";
+import { generateText } from "ai";
 import type {
   FilePart,
   ModelMessage,
@@ -28,7 +29,7 @@ import type {
   CallWarning,
 } from "ai";
 import type { Infer } from "convex/values";
-import { mockModel } from "./client/mockModel.js";
+import { MockLanguageModel, mockModel } from "./client/mockModel.js";
 
 const testAssetsDir = path.join(__dirname, "../../test-assets");
 const testFiles = [
@@ -803,6 +804,17 @@ describe("mapping", () => {
       expect(contentTypes(res.messages[1].message)).toEqual(["tool-result"]);
     });
 
+    test("keeps an interrupted finish reason", async () => {
+      const res = await serializeResponseMessages(
+        ctx,
+        component,
+        { ...makeStep(step1Messages), finishReason: "interrupted" },
+        undefined,
+        step1Messages,
+      );
+      expect(res.messages[0].finishReason).toBe("interrupted");
+    });
+
     test("serializes the text response from a later step", async () => {
       const res = await serializeResponseMessages(
         ctx,
@@ -954,13 +966,17 @@ describe("mapping", () => {
       // Synthetic denial should be inserted right after the assistant message (index 1)
       expect(result[2].role).toBe("tool");
       const denialContent = result[2].content as any[];
-      expect(denialContent).toHaveLength(1);
-      expect(denialContent[0].type).toBe("tool-approval-response");
-      expect(denialContent[0].approvalId).toBe("ap1");
-      expect(denialContent[0].approved).toBe(false);
-      expect(denialContent[0].reason).toBe(
-        "auto-denied: new generation started",
-      );
+      expect(denialContent).toEqual([
+        {
+          type: "tool-result",
+          toolCallId: "tc1",
+          toolName: "a",
+          output: {
+            type: "execution-denied",
+            reason: "auto-denied: new generation started",
+          },
+        },
+      ]);
       // The new user message should follow
       expect(result[3].role).toBe("user");
       expect(result[3].content).toBe("new message");
@@ -992,14 +1008,20 @@ describe("mapping", () => {
       expect(result[1].role).toBe("tool");
       const denialContent = result[1].content as any[];
       expect(denialContent).toHaveLength(2);
-      expect(denialContent[0].approvalId).toBe("ap1");
-      expect(denialContent[0].approved).toBe(false);
-      expect(denialContent[1].approvalId).toBe("ap2");
-      expect(denialContent[1].approved).toBe(false);
+      expect(denialContent[0]).toMatchObject({
+        type: "tool-result",
+        toolCallId: "tc1",
+        output: { type: "execution-denied" },
+      });
+      expect(denialContent[1]).toMatchObject({
+        type: "tool-result",
+        toolCallId: "tc2",
+        output: { type: "execution-denied" },
+      });
     });
 
-    test("only auto-denies unresolved approvals, leaves resolved ones alone", () => {
-      const messages = [
+    const approvedThenNewPrompt = () =>
+      [
         {
           role: "assistant" as const,
           content: [
@@ -1030,23 +1052,164 @@ describe("mapping", () => {
         { role: "user" as const, content: "next question" },
       ] as any;
 
+    test("settles an approved call that never ran once later context follows", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const result = autoDenyUnresolvedApprovals(approvedThenNewPrompt());
+      expect(result.map((m) => m.role)).toEqual([
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+      ]);
+      expect(result[1].content).toEqual([
+        expect.objectContaining({
+          type: "tool-result",
+          toolCallId: "tc1",
+          output: {
+            type: "execution-denied",
+            reason: "auto-denied: new generation started",
+          },
+        }),
+        expect.objectContaining({ type: "tool-result", toolCallId: "tc2" }),
+      ]);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
+      warnSpy.mockRestore();
+    });
+
+    test("the AI SDK accepts the settled history", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const model = new MockLanguageModel({
+        content: [{ type: "text", text: "ok" }],
+      });
+      await generateText({
+        model,
+        messages: autoDenyUnresolvedApprovals(approvedThenNewPrompt()),
+      });
+      const toolParts = model.doGenerateCalls[0].prompt.flatMap((m) =>
+        m.role === "tool" ? m.content : [],
+      );
+      expect(toolParts).toEqual([
+        expect.objectContaining({ type: "tool-result", toolCallId: "tc1" }),
+        expect.objectContaining({ type: "tool-result", toolCallId: "tc2" }),
+      ]);
+      vi.restoreAllMocks();
+    });
+
+    test("keeps the reason of a stored denial that never ran", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const messages = approvedThenNewPrompt();
+      messages[1].content = [
+        {
+          type: "tool-approval-response",
+          approvalId: "ap1",
+          approved: false,
+          reason: "Not permitted",
+        },
+      ];
       const result = autoDenyUnresolvedApprovals(messages);
-      // Should inject a denial for ap2 (unresolved) after the assistant message
-      expect(result).toHaveLength(4); // assistant + existing tool + synthetic denial + user
-      // The synthetic denial is inserted after the assistant (index 0)
-      expect(result[0].role).toBe("assistant");
-      expect(result[1].role).toBe("tool"); // synthetic denial for ap2
-      const denialContent = result[1].content as any[];
-      expect(denialContent).toHaveLength(1);
-      expect(denialContent[0].approvalId).toBe("ap2");
-      expect(denialContent[0].approved).toBe(false);
-      // Original tool message (ap1 response) follows
-      expect(result[2].role).toBe("tool");
-      const originalToolContent = result[2].content as any[];
-      expect(originalToolContent[0].approvalId).toBe("ap1");
-      expect(originalToolContent[0].approved).toBe(true);
-      // User message last
-      expect(result[3].role).toBe("user");
+      expect((result[1].content as any[])[0]).toMatchObject({
+        toolCallId: "tc1",
+        output: { type: "execution-denied", reason: "Not permitted" },
+      });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
+      warnSpy.mockRestore();
+    });
+
+    test("denies an unresolved provider-executed approval with a decision", () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const messages = [
+        {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc1",
+              toolName: "web",
+              input: {},
+              providerExecuted: true,
+            },
+            {
+              type: "tool-approval-request",
+              approvalId: "ap1",
+              toolCallId: "tc1",
+            },
+          ],
+        },
+        { role: "user" as const, content: "next question" },
+      ] as any;
+      const result = autoDenyUnresolvedApprovals(messages);
+      expect(result[1]).toEqual({
+        role: "tool",
+        content: [
+          {
+            type: "tool-approval-response",
+            approvalId: "ap1",
+            approved: false,
+            reason: "auto-denied: new generation started",
+            providerExecuted: true,
+          },
+        ],
+      });
+      vi.restoreAllMocks();
+    });
+
+    test("the provider receives the denial of a parallel provider-executed call", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const messages = [
+        {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "tool-call",
+              toolCallId: "tc1",
+              toolName: "web",
+              input: {},
+              providerExecuted: true,
+            },
+            { type: "tool-call", toolCallId: "tc2", toolName: "b", input: {} },
+            {
+              type: "tool-approval-request",
+              approvalId: "ap1",
+              toolCallId: "tc1",
+            },
+            {
+              type: "tool-approval-request",
+              approvalId: "ap2",
+              toolCallId: "tc2",
+            },
+          ],
+        },
+        { role: "user" as const, content: "next question" },
+      ] as any;
+      const model = new MockLanguageModel({
+        content: [{ type: "text", text: "ok" }],
+      });
+      await generateText({
+        model,
+        messages: autoDenyUnresolvedApprovals(messages),
+      });
+      const toolParts = model.doGenerateCalls[0].prompt.flatMap((m) =>
+        m.role === "tool" ? m.content : [],
+      );
+      expect(toolParts).toEqual([
+        {
+          type: "tool-approval-response",
+          approvalId: "ap1",
+          approved: false,
+          reason: "auto-denied: new generation started",
+        },
+        expect.objectContaining({
+          type: "tool-result",
+          toolCallId: "tc2",
+          output: {
+            type: "execution-denied",
+            reason: "auto-denied: new generation started",
+          },
+        }),
+      ]);
+      vi.restoreAllMocks();
     });
 
     test("emits console.warn for each auto-denied approval", () => {
