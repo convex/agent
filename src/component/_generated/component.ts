@@ -121,6 +121,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             refcount: number;
             storageId: string;
           }>;
+          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+          splitCursor?: string | null;
         },
         Name
       >;
@@ -168,7 +170,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "tool-calls"
               | "error"
               | "other"
-              | "unknown";
+              | "unknown"
+              | "interrupted";
             message:
               | {
                   content:
@@ -858,7 +861,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "tool-calls"
               | "error"
               | "other"
-              | "unknown";
+              | "unknown"
+              | "interrupted";
             id?: string;
             message?:
               | {
@@ -1602,7 +1606,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "tool-calls"
             | "error"
             | "other"
-            | "unknown";
+            | "unknown"
+            | "interrupted";
           id?: string;
           message?:
             | {
@@ -2263,7 +2268,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "tool-calls"
               | "error"
               | "other"
-              | "unknown";
+              | "unknown"
+              | "interrupted";
             id?: string;
             message?:
               | {
@@ -2989,7 +2995,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "tool-calls"
             | "error"
             | "other"
-            | "unknown";
+            | "unknown"
+            | "interrupted";
           id?: string;
           message?:
             | {
@@ -3632,7 +3639,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "tool-calls"
             | "error"
             | "other"
-            | "unknown";
+            | "unknown"
+            | "interrupted";
           id?: string;
           message?:
             | {
@@ -4266,7 +4274,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "tool-calls"
               | "error"
               | "other"
-              | "unknown";
+              | "unknown"
+              | "interrupted";
             message?:
               | {
                   content:
@@ -4893,7 +4902,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "tool-calls"
             | "error"
             | "other"
-            | "unknown";
+            | "unknown"
+            | "interrupted";
           id?: string;
           message?:
             | {

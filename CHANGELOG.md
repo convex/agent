@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Store a step whose finish reason is `interrupted` (ai 7.0.149+)
+- A new prompt after an approval that never ran gives its call an
+  `execution-denied` result, which ai 7.0.138+ requires
 - `streamObject` fails its pending message when the object fails its schema,
   instead of leaving it pending (#438)
 - Keep the whole order being continued in context, past the recent window (#433,
