@@ -138,7 +138,7 @@ export const addDelta = mutation({
       });
     }
     await ctx.db.insert("streamDeltas", delta);
-    await heartbeatStream(ctx, { streamId: args.streamId });
+    await heartbeatStream(ctx, stream);
     return true;
   },
 });
@@ -386,7 +386,14 @@ export async function finishHandler(
 export const heartbeat = mutation({
   args: { streamId: v.id("streamingMessages") },
   returns: v.null(),
-  handler: heartbeatStream,
+  handler: async (ctx, args) => {
+    const stream = await ctx.db.get("streamingMessages", args.streamId);
+    if (!stream) {
+      console.warn("Stream not found", args.streamId);
+      return;
+    }
+    await heartbeatStream(ctx, stream);
+  },
 });
 
 async function releaseStreamFileOwnership(
@@ -414,13 +421,8 @@ async function scheduleStreamDeletion(
 
 async function heartbeatStream(
   ctx: MutationCtx,
-  args: { streamId: Id<"streamingMessages"> },
+  stream: Doc<"streamingMessages">,
 ): Promise<void> {
-  const stream = await ctx.db.get("streamingMessages", args.streamId);
-  if (!stream) {
-    console.warn("Stream not found", args.streamId);
-    return;
-  }
   if (stream.state.kind !== "streaming") {
     return;
   }
@@ -445,9 +447,9 @@ async function heartbeatStream(
   const timeoutFnId = await ctx.scheduler.runAfter(
     TIMEOUT_INTERVAL,
     internal.streams.timeoutStream,
-    { streamId: args.streamId },
+    { streamId: stream._id },
   );
-  await ctx.db.patch("streamingMessages", args.streamId, {
+  await ctx.db.patch("streamingMessages", stream._id, {
     state: { kind: "streaming", lastHeartbeat: Date.now(), timeoutFnId },
   });
 }
