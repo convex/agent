@@ -10,6 +10,9 @@
   "prConcurrentLimit": 5,
   "postUpdateOptions": ["npmDedupe"],
   "osvVulnerabilityAlerts": true,
+  "constraints": {
+    "npm": "^11"
+  },
   "packageRules": [
     {
       "description": "Overrides security:minimumReleaseAgeNpm's 3 days. Keep it at or above minimumReleaseAge in .npmrc, which Renovate doesn't read.",
@@ -43,6 +46,12 @@
       "description": "typescript-eslint's peer range; raise when it supports newer TypeScript.",
       "matchPackageNames": ["typescript"],
       "allowedVersions": "<6.1.0"
+    },
+    {
+      "description": "Lock file maintenance regenerates package-lock.json, which npm 12 can't do here (https://github.com/npm/cli/issues/9800); raise when that ships.",
+      "matchDepTypes": ["tool-constraint"],
+      "matchPackageNames": ["npm"],
+      "allowedVersions": "<12"
     }
   ]
 }
