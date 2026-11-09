@@ -9,6 +9,21 @@ import type { Infer } from "convex/values";
 
 const FILE_CLEANUP_GRACE_MS = 24 * 60 * 60 * 1000;
 
+// Files touched at the cutoff are kept, so one reused in the same millisecond
+// the caller took its cutoff survives.
+function cleanupCutoff(lastTouchedBefore: number | undefined) {
+  if (lastTouchedBefore === undefined) {
+    return Date.now() - FILE_CLEANUP_GRACE_MS;
+  }
+  // A future cutoff would let deleteFiles delete a file reused after listing.
+  if (!(lastTouchedBefore <= Date.now())) {
+    throw new Error(
+      `lastTouchedBefore must be a timestamp no later than now, got ${lastTouchedBefore}`,
+    );
+  }
+  return lastTouchedBefore;
+}
+
 const addFileArgs = v.object({
   storageId: v.string(),
   hash: v.string(),
@@ -188,10 +203,14 @@ export async function copyFileHandler(
  * Files remain protected for 24 hours after registration or their last
  * ownership change, so a file cannot be removed between registration and the
  * transaction that saves its message or stream reference.
+ * `lastTouchedBefore` (ms since epoch, not in the future) moves that cutoff. A later one also
+ * lists uploads and generated files not yet in a saved message, so stop those
+ * first, e.g. in a dev reset.
  */
 export const getFilesToDelete = query({
   args: {
     paginationOpts: paginationOptsValidator,
+    lastTouchedBefore: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const files = await ctx.db
@@ -199,7 +218,7 @@ export const getFilesToDelete = query({
       .withIndex("refcount_lastTouchedAt", (q) =>
         q
           .eq("refcount", 0)
-          .lte("lastTouchedAt", Date.now() - FILE_CLEANUP_GRACE_MS),
+          .lt("lastTouchedAt", cleanupCutoff(args.lastTouchedBefore)),
       )
       .paginate(args.paginationOpts);
     return files;
@@ -211,9 +230,12 @@ export const deleteFiles = mutation({
   args: {
     fileIds: v.array(v.id("files")),
     force: v.optional(v.boolean()),
+    /** Pass the same cutoff as `getFilesToDelete` to keep files used since. */
+    lastTouchedBefore: v.optional(v.number()),
   },
   returns: v.array(v.id("files")),
   handler: async (ctx, args) => {
+    const cutoff = cleanupCutoff(args.lastTouchedBefore);
     const deletedFileIds = await Promise.all(
       args.fileIds.map(async (fileId) => {
         const file = await ctx.db.get("files", fileId);
@@ -229,11 +251,10 @@ export const deleteFiles = mutation({
             return null;
           }
         }
-        if (
-          !args.force &&
-          file.lastTouchedAt > Date.now() - FILE_CLEANUP_GRACE_MS
-        ) {
-          console.error(`File ${fileId} is still within the cleanup grace period, skipping...`);
+        if (!args.force && file.lastTouchedAt >= cutoff) {
+          console.error(
+            `File ${fileId} was touched after the cleanup cutoff, skipping...`,
+          );
           return null;
         }
         await ctx.db.delete("files", fileId);
