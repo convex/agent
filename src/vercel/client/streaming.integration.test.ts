@@ -1094,6 +1094,40 @@ describe("Compression", () => {
     expect((compressed[0] as { delta: string }).delta).toBe("Thinking");
   });
 
+  test("compressUIMessageChunks merges consecutive tool-input-delta parts", () => {
+    const parts = [
+      {
+        type: "tool-input-delta" as const,
+        toolCallId: "c1",
+        inputTextDelta: '{"ci',
+      },
+      {
+        type: "tool-input-delta" as const,
+        toolCallId: "c1",
+        inputTextDelta: 'ty":',
+      },
+      {
+        type: "tool-input-delta" as const,
+        toolCallId: "c2",
+        inputTextDelta: "{",
+      },
+      {
+        type: "tool-input-delta" as const,
+        toolCallId: "c1",
+        inputTextDelta: '"NYC"}',
+      },
+    ];
+    expect(compressUIMessageChunks(parts)).toEqual([
+      {
+        type: "tool-input-delta",
+        toolCallId: "c1",
+        inputTextDelta: '{"city":',
+      },
+      { type: "tool-input-delta", toolCallId: "c2", inputTextDelta: "{" },
+      { type: "tool-input-delta", toolCallId: "c1", inputTextDelta: '"NYC"}' },
+    ]);
+  });
+
   test("compressUIMessageChunks preserves non-delta parts", () => {
     const parts = [
       { type: "start" as const },
