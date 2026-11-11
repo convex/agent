@@ -50,9 +50,9 @@ moving `latest` backward.
 
 ### Playground releases
 
-`@convex-dev/agent-playground` has its own version. Changesets and the
-automated version PR apply only to `@convex-dev/agent`. To release the
-playground, do not add a Changeset. Prepare a PR that updates
+`@convex-dev/agent-playground` has its own version and is ignored by the root
+Changesets flow. The automated version PR applies only to `@convex-dev/agent`.
+To release the playground, do not add a Changeset. Prepare a PR that updates
 `playground/package.json` and the root
 `package-lock.json`, then merge it after CI passes. For example, from the repo
 root:
