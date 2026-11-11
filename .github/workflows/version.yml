@@ -48,7 +48,6 @@ jobs:
             echo "Skipping release PR update: main has moved beyond this run's commit."
           fi
       - name: Create or update the release PR
-        id: version
         if:
           steps.mode.outputs.mode == 'version' &&
           steps.freshness.outputs.current == 'true'
@@ -58,35 +57,3 @@ jobs:
           pr-title: "Prepare next release"
           commit-message: "Version packages"
           pr-base-branch: main
-      - name: Describe staged publishing in the release PR
-        if: steps.version.outputs['pr-number'] != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ steps.version.outputs['pr-number'] }}
-        run: |
-          node --input-type=module <<'NODE'
-          import { execFileSync } from "node:child_process";
-
-          const route = `repos/${process.env.GITHUB_REPOSITORY}/pulls/${process.env.PR_NUMBER}`;
-          const pr = JSON.parse(
-            execFileSync("gh", ["api", route], { encoding: "utf8" }),
-          );
-          const marker = "# Releases\n";
-          const index = pr.body.indexOf(marker);
-          if (index < 0) throw new Error("Changesets release notes are missing");
-          const intro = [
-            "This PR was opened by the Changesets version workflow.",
-            "",
-            "Merging it stages the tested package on npm through trusted publishing.",
-            "Review and approve the staged package separately with 2FA.",
-            "Additional changesets merged into main will update this PR.",
-            "",
-            "",
-          ].join("\n");
-          const body = intro + pr.body.slice(index);
-          if (body !== pr.body) {
-            execFileSync("gh", ["api", "-X", "PATCH", route, "--input", "-"], {
-              input: JSON.stringify({ body }),
-            });
-          }
-          NODE
