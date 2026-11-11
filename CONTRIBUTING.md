@@ -48,6 +48,36 @@ npm stage approve <stage-id>
 Use the stage ID from the workflow log. Approve versions in order to avoid
 moving `latest` backward.
 
+### Playground releases
+
+`@convex-dev/agent-playground` has its own version. Changesets and the
+automated version PR apply only to `@convex-dev/agent`. To release the
+playground, do not add a Changeset. Prepare a PR that updates
+`playground/package.json` and the root
+`package-lock.json`, then merge it after CI passes. For example, from the repo
+root:
+
+```sh
+npm version patch --workspace playground --no-git-tag-version
+```
+
+Check the resulting version and lockfile, then run **Release Playground** on
+`main` with the 40-character SHA of the merge commit on `main`. The workflow
+builds and checks both packages, stages the playground tarball on npm, and tags
+the source as `playground/v<version>` after staging succeeds. Review and approve
+the staged playground package on npm with 2FA before it becomes public. The
+Agent version at that commit must already be published, with no Agent package
+changes since its source tag. Release Agent first if needed.
+
+Register the playground's own npm trusted publisher before its first release:
+
+```sh
+npm trust github @convex-dev/agent-playground --repo convex/agent --file release-playground.yml --allow-stage-publish
+```
+
+This npm package is separate from the hosted playground, which deploys through
+`deploy.yml`.
+
 ### Local preparation and prereleases
 
 To prepare a release locally instead of using the bot:

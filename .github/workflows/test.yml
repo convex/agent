@@ -52,7 +52,9 @@ jobs:
       - name: Test
         run: npm run check
       - name: Build playground
-        run: npm run build -w playground
+        run: |
+          npm run build -w playground
+          npm run lint -w playground
       - name: Run E2E smoke test and verify generated code
         env:
           CONVEX_AGENT_MODE: anonymous
