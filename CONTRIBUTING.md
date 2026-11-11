@@ -56,12 +56,12 @@ To prepare a release locally instead of using the bot:
 npm ci
 npm run build
 npm run check
-npm run version:ci
+npx changeset version
 ```
 
-Review and commit the version, lockfile, changelog, and consumed changesets,
-then merge through a checked PR. A push to main stages the latest version-bump
-commit in that push.
+Review and commit the version, changelog, and consumed changesets, then merge
+through a checked PR. A push to main stages the latest version-bump commit in
+that push.
 
 For a branch prerelease, prepare a prerelease version with Changesets and
 dispatch **Release** from the Actions page on that branch. The first prerelease

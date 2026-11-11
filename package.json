@@ -38,7 +38,6 @@
     "test": "vitest run --typecheck",
     "check": "npm run test && npm run typecheck && npm run lint",
     "test:e2e": "convex dev --once --typecheck-components",
-    "version:ci": "changeset version && npm install --package-lock-only --ignore-scripts --no-audit --no-fund",
     "test:watch": "vitest --typecheck --clearScreen false",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:coverage": "vitest run --coverage --coverage.reporter=text"
