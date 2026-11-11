@@ -1,22 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Store a step whose finish reason is `interrupted` (ai 7.0.149+)
-- A new prompt after an approval that never ran gives its call an
-  `execution-denied` result, which ai 7.0.138+ requires
-- `streamObject` fails its pending message when the object fails its schema,
-  instead of leaving it pending (#438)
-- Keep the whole order being continued in context, past the recent window (#433,
-  #436)
-- `useStreamingText` decodes UTF-8 characters split across chunks (#440)
-- Render a tool result with an `error-text` or `error-json` output as
-  `output-error` (#162, #441)
-- Store a step's reasoning once, in content, so long reasoning fits the document
-  size limit (#418, #423)
-- `getFilesToDelete` and `deleteFiles` take a `lastTouchedBefore` cutoff to
-  clean up recent unreferenced files (#361, #437)
-
 ## 0.7.9
 
 - Uses built-in pagination instead of the paginator for listing threads by
