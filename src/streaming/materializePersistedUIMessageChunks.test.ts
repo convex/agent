@@ -51,6 +51,36 @@ describe("projectPersistedUIMessageChunks", () => {
     expect(validate(vMessageWithMetadataInternal, actual[1])).toBe(true);
   });
 
+  it("preserves application JSON fields during recovery", () => {
+    const weather = {
+      type: "json",
+      value: "sunny",
+      toolJson: { value: '"partly cloudy"' },
+    };
+    const actual = projectPersistedUIMessageChunks(
+      stream,
+      [
+        {
+          type: "tool-input-available",
+          toolCallId: "call-1",
+          toolName: "weather",
+          input: {},
+        },
+        {
+          type: "tool-output-available",
+          toolCallId: "call-1",
+          output: weather,
+        },
+      ],
+      { status: "success" },
+    );
+
+    expect(actual[1].message).toMatchObject({
+      role: "tool",
+      content: [{ output: { type: "json", value: weather } }],
+    });
+  });
+
   it("attaches materialized canonical tool-result files during recovery", () => {
     const url = "https://files.example/tool-result";
     const actual = projectPersistedUIMessageChunks(

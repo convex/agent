@@ -38,6 +38,7 @@ import {
   type vToolResultPart,
   type SourcePart,
   vToolResultOutput,
+  isRawToolResultOutput,
   type MessageDoc,
   vToolApprovalRequest,
   vToolApprovalResponse,
@@ -921,7 +922,7 @@ export function normalizeToolOutput(
       value: result,
     };
   }
-  if (validate(vToolResultOutput, result)) {
+  if (isRawToolResultOutput(result)) {
     return result as unknown as ToolResultOutput;
   }
   return {

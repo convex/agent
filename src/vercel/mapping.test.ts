@@ -161,29 +161,41 @@ describe("mapping", () => {
     expect(serialized).toMatchObject(expected);
   });
 
-  test("legacy result JSON with a type field is not treated as SDK output", async () => {
-    const weather = { type: "weather", temperature: 72 };
-    const toolResult = {
-      type: "tool-result" as const,
-      toolCallId: "tool-call-id",
-      toolName: "weather",
-      result: weather,
-    } satisfies Infer<typeof vToolResultPart>;
-    const expected = { type: "json", value: weather };
+  test.each([
+    { type: "weather", temperature: 72 },
+    {
+      type: "json",
+      value: "sunny",
+      toolJson: { value: '"partly cloudy"' },
+    },
+  ])(
+    "preserves legacy result JSON with application fields: $type",
+    async (weather) => {
+      const toolResult = {
+        type: "tool-result" as const,
+        toolCallId: "tool-call-id",
+        toolName: "weather",
+        result: weather,
+      } satisfies Infer<typeof vToolResultPart>;
+      const expected = { type: "json", value: weather };
 
-    const [deserialized] = toModelMessageContent([
-      toolResult,
-    ]) as ToolResultPart[];
-    expect(deserialized.output).toEqual(expected);
-    const { content } = await serializeContent(
-      {} as ActionCtx,
-      {} as AgentComponent,
-      [toolResult],
-    );
-    expect((content[0] as Infer<typeof vToolResultPart>).output).toEqual(
-      expected,
-    );
-  });
+      const [deserialized] = toModelMessageContent([
+        toolResult,
+      ]) as ToolResultPart[];
+      expect(deserialized.output).toEqual(expected);
+      const { content } = await serializeContent(
+        {} as ActionCtx,
+        {} as AgentComponent,
+        [toolResult],
+      );
+      expect((content[0] as Infer<typeof vToolResultPart>).output).toEqual(
+        expected,
+      );
+      expect(toModelMessageContent(content)).toMatchObject([
+        { output: expected },
+      ]);
+    },
+  );
 
   test.each([
     [
