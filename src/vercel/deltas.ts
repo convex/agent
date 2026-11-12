@@ -11,6 +11,10 @@ import {
 import { type UIMessage } from "./UIMessages.js";
 import { joinText, sorted } from "../shared.js";
 import {
+  decodeToolJsonFields,
+  toolChunkJsonFields,
+} from "../streaming/toolJson.js";
+import {
   type MessageStatus,
   type StreamDelta,
   type StreamMessage,
@@ -122,7 +126,11 @@ export function applyUIMessageChunksIncremental<
     } as typeof message.metadata;
   };
 
-  for (const part of newParts) {
+  for (const rawPart of newParts) {
+    const fields = toolChunkJsonFields(rawPart.type);
+    const part = fields.length
+      ? decodeToolJsonFields(rawPart, ...fields)
+      : rawPart;
     switch (part.type) {
       case "text-start": {
         const newPart: TextUIPart = {

@@ -407,6 +407,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -425,6 +426,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -454,6 +456,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "json";
                                   value: any;
                                 }
@@ -470,6 +473,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "error-json";
                                   value: any;
                                 }
@@ -687,6 +691,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "json";
                               value: any;
                             }
@@ -703,6 +708,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "error-json";
                               value: any;
                             }
@@ -1173,6 +1179,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -1191,6 +1198,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -1220,6 +1228,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "json";
                                   value: any;
                                 }
@@ -1236,6 +1245,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "error-json";
                                   value: any;
                                 }
@@ -1453,6 +1463,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "json";
                               value: any;
                             }
@@ -1469,6 +1480,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "error-json";
                               value: any;
                             }
@@ -1962,6 +1974,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -1977,6 +1990,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -2002,6 +2016,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "json";
                                 value: any;
                               }
@@ -2018,6 +2033,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "error-json";
                                 value: any;
                               }
@@ -2217,6 +2233,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "json";
                             value: any;
                           }
@@ -2233,6 +2250,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "error-json";
                             value: any;
                           }
@@ -2728,6 +2746,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -2746,6 +2765,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -2775,6 +2795,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "json";
                                   value: any;
                                 }
@@ -2791,6 +2812,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "error-json";
                                   value: any;
                                 }
@@ -3008,6 +3030,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "json";
                               value: any;
                             }
@@ -3024,6 +3047,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "error-json";
                               value: any;
                             }
@@ -3507,6 +3531,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -3522,6 +3547,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -3547,6 +3573,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "json";
                                 value: any;
                               }
@@ -3563,6 +3590,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "error-json";
                                 value: any;
                               }
@@ -3762,6 +3790,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "json";
                             value: any;
                           }
@@ -3778,6 +3807,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "error-json";
                             value: any;
                           }
@@ -4225,6 +4255,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -4240,6 +4271,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -4265,6 +4297,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "json";
                                 value: any;
                               }
@@ -4281,6 +4314,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "error-json";
                                 value: any;
                               }
@@ -4480,6 +4514,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "json";
                             value: any;
                           }
@@ -4496,6 +4531,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "error-json";
                             value: any;
                           }
@@ -4963,6 +4999,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -4981,6 +5018,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                             >;
                             title?: string;
                             toolCallId: string;
+                            toolJson?: { input?: string };
                             toolMetadata?: Record<string, any>;
                             toolName: string;
                             type: "tool-call";
@@ -5010,6 +5048,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "json";
                                   value: any;
                                 }
@@ -5026,6 +5065,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                     string,
                                     Record<string, any>
                                   >;
+                                  toolJson?: { value?: string };
                                   type: "error-json";
                                   value: any;
                                 }
@@ -5243,6 +5283,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "json";
                               value: any;
                             }
@@ -5259,6 +5300,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                 string,
                                 Record<string, any>
                               >;
+                              toolJson?: { value?: string };
                               type: "error-json";
                               value: any;
                             }
@@ -5648,6 +5690,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -5663,6 +5706,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           providerOptions?: Record<string, Record<string, any>>;
                           title?: string;
                           toolCallId: string;
+                          toolJson?: { input?: string };
                           toolMetadata?: Record<string, any>;
                           toolName: string;
                           type: "tool-call";
@@ -5688,6 +5732,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "json";
                                 value: any;
                               }
@@ -5704,6 +5749,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                                   string,
                                   Record<string, any>
                                 >;
+                                toolJson?: { value?: string };
                                 type: "error-json";
                                 value: any;
                               }
@@ -5903,6 +5949,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "json";
                             value: any;
                           }
@@ -5919,6 +5966,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                               string,
                               Record<string, any>
                             >;
+                            toolJson?: { value?: string };
                             type: "error-json";
                             value: any;
                           }

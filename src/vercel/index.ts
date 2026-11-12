@@ -197,7 +197,12 @@ export {
   updateThreadMetadata,
 } from "../client/threads.js";
 export type { ContextHandler } from "./client/types.js";
-export { toUIMessages, fromUIMessages, type UIMessage } from "./UIMessages.js";
+export {
+  decodeUIMessageToolJson,
+  toUIMessages,
+  fromUIMessages,
+  type UIMessage,
+} from "./UIMessages.js";
 export { deriveUIMessagesFromDeltas } from "./deltas.js";
 export type {
   AgentComponent,

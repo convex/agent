@@ -7,7 +7,11 @@ import {
   type MessageWithMetadata,
 } from "../../validators.js";
 import { serializeMessage } from "../mapping.js";
-import { toUIMessages, type UIMessage } from "../UIMessages.js";
+import {
+  encodeUIMessageToolJson,
+  toUIMessages,
+  type UIMessage,
+} from "../UIMessages.js";
 import {
   listMessages,
   saveMessages as saveCanonicalMessages,
@@ -22,6 +26,10 @@ import type {
 
 export { listMessages } from "../../client/messages.js";
 
+/**
+ * List UI messages for a Convex query. useUIMessages decodes tool payloads;
+ * other clients can call decodeUIMessageToolJson on each returned message.
+ */
 export async function listUIMessages(
   ctx: QueryCtx | MutationCtx | ActionCtx,
   component: AgentComponent,
@@ -31,7 +39,10 @@ export async function listUIMessages(
   },
 ): Promise<PaginationResult<UIMessage>> {
   const result = await listMessages(ctx, component, args);
-  return { ...result, page: toUIMessages(result.page) };
+  return {
+    ...result,
+    page: toUIMessages(result.page).map(encodeUIMessageToolJson),
+  };
 }
 
 export type SaveMessagesArgs = {
