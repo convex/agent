@@ -1,5 +1,6 @@
 import type { AssistantModelMessage, ModelMessage, ToolModelMessage } from "ai";
 import { convexToJson, type Value } from "convex/values";
+import { encodeToolJsonFields } from "../../streaming/toolJson.js";
 
 type AssistantPart = Exclude<AssistantModelMessage["content"], string>[number];
 type Request = Extract<AssistantPart, { type: "tool-approval-request" }>;
@@ -311,13 +312,18 @@ function approvalPartSignature(part: ApprovalPart): string {
         signature: part.signature,
       });
     case "tool-call":
-      return signature({
-        type: part.type,
-        toolCallId: part.toolCallId,
-        toolName: part.toolName,
-        input: part.input,
-        providerExecuted: part.providerExecuted ?? false,
-      });
+      return signature(
+        encodeToolJsonFields(
+          {
+            type: part.type,
+            toolCallId: part.toolCallId,
+            toolName: part.toolName,
+            input: part.input,
+            providerExecuted: part.providerExecuted ?? false,
+          },
+          "input",
+        ),
+      );
     case "tool-approval-response":
       return signature({
         type: part.type,

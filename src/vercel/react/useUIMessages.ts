@@ -22,6 +22,7 @@ import {
   type UIMessage,
   type UIStatus,
   combineUIMessages,
+  decodeUIMessageToolJson,
 } from "../UIMessages.js";
 import { sorted } from "../../shared.js";
 import { useStreamingUIMessages } from "./useStreamingUIMessages.js";
@@ -167,7 +168,7 @@ export function mergeUIMessages<M extends UIMessageLike & { id: string }>(
   streamMessages: M[],
 ): M[] {
   const { rows, streams } = resolveStreams(
-    messages,
+    messages.map(decodeUIMessageToolJson),
     streamMessages.map((m) => ({
       id: m.id,
       order: m.order,

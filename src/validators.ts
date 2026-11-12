@@ -146,6 +146,7 @@ export const vToolCallPart = v.union(
     input: v.any(),
     /** @deprecated Use `input` instead. */
     args: v.optional(v.any()),
+    toolJson: v.optional(v.object({ input: v.optional(v.string()) })),
     providerExecuted: v.optional(v.boolean()),
     title: v.optional(v.string()),
     toolMetadata: v.optional(v.record(v.string(), v.any())),
@@ -160,6 +161,7 @@ export const vToolCallPart = v.union(
     /** @deprecated Use `input` instead. */
     args: v.any(),
     input: v.optional(v.any()),
+    toolJson: v.optional(v.object({ input: v.optional(v.string()) })),
     providerExecuted: v.optional(v.boolean()),
     title: v.optional(v.string()),
     toolMetadata: v.optional(v.record(v.string(), v.any())),
@@ -181,13 +183,23 @@ const vToolResultContent = v.array(
 
 export const vToolResultOutput = v.union(
   v.object({ type: v.literal("text"), value: v.string(), providerOptions }),
-  v.object({ type: v.literal("json"), value: v.any(), providerOptions }),
+  v.object({
+    type: v.literal("json"),
+    value: v.any(),
+    toolJson: v.optional(v.object({ value: v.optional(v.string()) })),
+    providerOptions,
+  }),
   v.object({
     type: v.literal("error-text"),
     value: v.string(),
     providerOptions,
   }),
-  v.object({ type: v.literal("error-json"), value: v.any(), providerOptions }),
+  v.object({
+    type: v.literal("error-json"),
+    value: v.any(),
+    toolJson: v.optional(v.object({ value: v.optional(v.string()) })),
+    providerOptions,
+  }),
   v.object({
     type: v.literal("execution-denied"),
     reason: v.optional(v.string()),

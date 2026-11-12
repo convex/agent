@@ -36,6 +36,10 @@ import type {
   vSource,
 } from "../validators.js";
 import { omit, pick } from "convex-helpers";
+import {
+  decodeToolJsonFields,
+  encodeToolJsonFields,
+} from "../streaming/toolJson.js";
 
 export type UIStatus = "streaming" | MessageStatus;
 
@@ -53,6 +57,35 @@ export type UIMessage<
   text: string;
   _creationTime: number;
 };
+
+type UIMessageWithParts = { parts: UIMessage["parts"] };
+
+export function encodeUIMessageToolJson<M extends UIMessageWithParts>(
+  message: M,
+): M {
+  return mapUIToolJson(message, encodeToolJsonFields);
+}
+
+/** Restore tool data after receiving a UI message from a Convex query. */
+export function decodeUIMessageToolJson<M extends UIMessageWithParts>(
+  message: M,
+): M {
+  return mapUIToolJson(message, decodeToolJsonFields);
+}
+
+function mapUIToolJson<M extends UIMessageWithParts>(
+  message: M,
+  transform: <T extends object>(part: T, ...keys: string[]) => T,
+): M {
+  const parts = message.parts.map((part) =>
+    part.type.startsWith("tool-") || part.type === "dynamic-tool"
+      ? transform(part, "input", "rawInput", "output")
+      : part,
+  );
+  return parts.some((part, i) => part !== message.parts[i])
+    ? { ...message, parts }
+    : message;
+}
 
 /**
  * Converts a list of UIMessages to MessageDocs, along with extra metadata that
@@ -92,7 +125,9 @@ export async function fromUIMessages<METADATA = unknown>(
         _id: uiMessage.id,
         tool: false,
       } satisfies MessageDoc & { streaming: boolean; metadata?: METADATA };
-      const modelMessages = await convertToModelMessages([uiMessage]);
+      const modelMessages = await convertToModelMessages([
+        decodeUIMessageToolJson(uiMessage),
+      ]);
       return modelMessages
         .map((modelMessage, i) => {
           if (modelMessage.content.length === 0) {

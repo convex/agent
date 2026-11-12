@@ -7,6 +7,7 @@ import {
   type StreamMessage,
 } from "../validators.js";
 import { validate } from "convex-helpers/validators";
+import { encodeToolJsonFields } from "./toolJson.js";
 import {
   collectContiguousStreamParts,
   createPersistedUIMessageChunkState,
@@ -177,12 +178,13 @@ export function projectPersistedUIMessageChunkParts(
           part.state === "output-error"
             ? (part.input ?? part.rawInput ?? {})
             : (part.input ?? {});
+        const stored = encodeToolJsonFields({ input }, "input");
         assistantContent.push({
           type: "tool-call",
           toolCallId: part.toolCallId,
           toolName: getToolName(part),
-          input,
-          args: input,
+          ...stored,
+          args: stored.input,
           providerExecuted: part.providerExecuted,
           ...(part.title ? { title: part.title } : {}),
           ...(part.toolMetadata ? { toolMetadata: part.toolMetadata } : {}),
@@ -381,7 +383,10 @@ function toolResult(
     type: "tool-result",
     toolCallId: part.toolCallId,
     toolName: getToolName(part),
-    output,
+    output:
+      output?.type === "json" || output?.type === "error-json"
+        ? encodeToolJsonFields(output, "value")
+        : output,
     ...(providerOptions ? { providerOptions } : {}),
   };
 }
