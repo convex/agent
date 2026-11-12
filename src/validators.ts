@@ -1,5 +1,6 @@
 import type { Infer, Validator, Value } from "convex/values";
 import { v } from "convex/values";
+import { validate } from "convex-helpers/validators";
 import { vVectorDimension } from "./component/vector/tables.js";
 
 // const deprecated = v.optional(v.any()) as unknown as VNull<unknown, "optional">;
@@ -319,6 +320,22 @@ export const vToolResultOutput = v.union(
     ),
   }),
 );
+
+/** Identify structured output before it crosses the storage boundary. */
+export function isRawToolResultOutput(
+  output: unknown,
+): output is Infer<typeof vToolResultOutput> {
+  // A field in application data cannot stand in for the storage sidecar.
+  if (
+    typeof output === "object" &&
+    output !== null &&
+    "toolJson" in output &&
+    output.toolJson !== undefined
+  ) {
+    return false;
+  }
+  return validate(vToolResultOutput, output);
+}
 
 /**
  * Tool approval request prompt part.

@@ -254,4 +254,5 @@ test("round trips error JSON without changing provider options or negative zero"
   const stored = await serializeOrThrow(message);
   expect(() => convexToJson(stored as Value)).not.toThrow();
   expect(toModelMessage(stored)).toMatchObject(message);
+  expect(await serializeOrThrow(stored)).toEqual(stored);
 });

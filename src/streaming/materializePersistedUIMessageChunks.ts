@@ -1,12 +1,11 @@
 import {
-  vToolResultOutput,
+  isRawToolResultOutput,
   type Message,
   type MessageContentParts,
   type MessageWithMetadataInternal,
   type StreamDelta,
   type StreamMessage,
 } from "../validators.js";
-import { validate } from "convex-helpers/validators";
 import { encodeToolJsonFields } from "./toolJson.js";
 import {
   collectContiguousStreamParts,
@@ -369,11 +368,8 @@ function toolResult(
         ? { type: "error-text" as const, value: String(raw) }
         : mode === "error-json"
           ? { type: "error-json" as const, value: raw ?? null }
-          : validate(vToolResultOutput, raw)
-            ? (raw as Extract<
-                MessageContentParts,
-                { type: "tool-result" }
-              >["output"])
+          : isRawToolResultOutput(raw)
+            ? raw
             : typeof raw === "string"
               ? { type: "text" as const, value: raw }
               : { type: "json" as const, value: raw ?? null };
