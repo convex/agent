@@ -74,12 +74,59 @@ type AgentModelOverride = AssertAISDKv7<
 
 export type WithoutModel<T> = T extends unknown ? Omit<T, "model"> : never;
 
+/**
+ * Instructions computed for each call, e.g. from the user's settings.
+ * Return a string or AI SDK system message(s). A system message can carry
+ * `providerOptions`, such as Anthropic cache control.
+ */
+export type InstructionsFunction = (
+  ctx: ActionCtx,
+  args: { threadId: string | undefined; userId: string | undefined },
+) => Instructions | Promise<Instructions>;
+
+/** Instructions, or a function that returns them for each call. */
+export type AgentInstructions = Instructions | InstructionsFunction;
+
+/**
+ * Message(s) sent to the model after the thread history and prompt, but not
+ * saved. A string becomes a user message. A function is called once per
+ * generation.
+ */
+export type ContextMessage =
+  | string
+  | ModelMessage
+  | ModelMessage[]
+  | ((
+      ctx: ActionCtx,
+      args: {
+        threadId: string | undefined;
+        userId: string | undefined;
+        promptMessageId: string | undefined;
+      },
+    ) =>
+      | string
+      | ModelMessage
+      | ModelMessage[]
+      | undefined
+      | Promise<string | ModelMessage | ModelMessage[] | undefined>);
+
 export type AgentPrompt = {
   /**
    * System message to include in the prompt. Overwrites Agent instructions.
    */
   system?: Instructions;
-  instructions?: Instructions;
+  /**
+   * Overrides the Agent instructions for this call. Can be a function of the
+   * call's ctx, threadId and userId.
+   */
+  instructions?: AgentInstructions;
+  /**
+   * Sent to the model after the history and prompt, and not saved. Use it for
+   * state that changes on every call, so the start of the prompt (instructions
+   * and history) stays the same between calls and can be cached by the
+   * provider. Overrides the Agent's `contextMessage`.
+   */
+  contextMessage?: ContextMessage;
   /**
    * A prompt. It can be either a text prompt or a list of messages.
    * If used with `promptMessageId`, it will be used in place of that
@@ -457,7 +504,7 @@ export type TextArgs<
       OUTPUT
     >
   >[0],
-  "model" | "prompt" | "messages" | "system" | "onStepFinish"
+  "model" | "prompt" | "messages" | "system" | "instructions" | "onStepFinish"
 > & {
   /**
    * The tools to use for the tool calls. This will override tools specified
@@ -491,7 +538,7 @@ export type StreamingTextArgs<
       OUTPUT
     >
   >[0],
-  "model" | "prompt" | "messages" | "system" | "onStepFinish"
+  "model" | "prompt" | "messages" | "system" | "instructions" | "onStepFinish"
 > & {
   /**
    * The tools to use for the tool calls. This will override tools specified
@@ -521,7 +568,7 @@ export type GenerateObjectArgs<
 > = AgentPrompt &
   Omit<
     Parameters<typeof generateObject<SCHEMA, OUTPUT, RESULT>>[0],
-    "model" | "prompt" | "messages" | "system"
+    "model" | "prompt" | "messages" | "system" | "instructions"
   > & {
     schema?: SCHEMA;
     enum?: Array<RESULT>;
@@ -538,7 +585,7 @@ export type StreamObjectArgs<
 > = AgentPrompt &
   Omit<
     Parameters<typeof streamObject<SCHEMA, OUTPUT, RESULT>>[0],
-    "model" | "prompt" | "messages" | "system"
+    "model" | "prompt" | "messages" | "system" | "instructions"
   > & {
     schema?: SCHEMA;
     enum?: Array<RESULT>;

@@ -95,6 +95,8 @@ import type {
   GenerateObjectArgs,
   GenerationOutputMetadata,
   MaybeCustomCtx,
+  AgentInstructions,
+  ContextMessage,
   LanguageModelMiddlewareOption,
   ModelCallInfo,
   ObjectMode,
@@ -205,6 +207,8 @@ export type {
   AgentComponent,
   Config,
   ContextOptions,
+  AgentInstructions,
+  ContextMessage,
   LanguageModelMiddlewareOption,
   ModelCallInfo,
   ProviderMetadata,
@@ -235,9 +239,20 @@ export interface AgentOptions<
   languageModel: NonNullable<Config["languageModel"]>;
   /**
    * The default system prompt to put in each request.
-   * Override per-prompt by passing the "system" parameter.
+   * Override per-prompt by passing the "instructions" parameter.
+   * Pass a function to compute them for each call from the ctx, threadId and
+   * userId. Keep them the same between calls where you can: providers cache
+   * the start of the prompt, and changing instructions invalidates it. Put
+   * state that changes every call in `contextMessage` instead.
    */
-  instructions?: Instructions;
+  instructions?: AgentInstructions;
+  /**
+   * Message(s) sent to the model after the thread history and prompt on every
+   * call, but never saved. Pass a function to compute it per call, e.g. the
+   * user's current settings or the time. Override per call with the
+   * `contextMessage` argument. See {@link ContextMessage}.
+   */
+  contextMessage?: ContextMessage;
   /**
    * Tools that the agent can call out to and get responses from.
    * They can be AI SDK tools (import {tool} from "ai")
@@ -502,6 +517,7 @@ export class Agent<
         tools: (args.tools ?? this.options.tools) as Tools,
         instructions:
           args.instructions ?? args.system ?? this.options.instructions,
+        contextMessage: args.contextMessage ?? this.options.contextMessage,
         stopWhen: (args.stopWhen ?? this.options.stopWhen) as any,
       },
       {
@@ -568,6 +584,8 @@ export class Agent<
           generateTextArgs.system ??
           this.options.instructions,
         stopWhen: (generateTextArgs.stopWhen ?? this.options.stopWhen) as any,
+        contextMessage:
+          generateTextArgs.contextMessage ?? this.options.contextMessage,
       },
       {
         ...this.options,
@@ -682,6 +700,8 @@ export class Agent<
           streamTextArgs.instructions ??
           streamTextArgs.system ??
           this.options.instructions,
+        contextMessage:
+          streamTextArgs.contextMessage ?? this.options.contextMessage,
         stopWhen: (streamTextArgs.stopWhen ?? this.options.stopWhen) as any,
       },
       {

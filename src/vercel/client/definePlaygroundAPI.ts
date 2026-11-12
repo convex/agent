@@ -78,7 +78,11 @@ function agentInfo(value: Agent | PlaygroundAgentInfo, index: number) {
   const { options } = value;
   return {
     name: agentName(value, index),
-    instructions: options.instructions,
+    // Instructions computed per call can't be shown without a call.
+    instructions:
+      typeof options.instructions === "function"
+        ? undefined
+        : options.instructions,
     contextOptions: options.contextOptions,
     storageOptions: options.storageOptions,
     maxRetries: options.callSettings?.maxRetries,

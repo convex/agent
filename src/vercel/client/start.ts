@@ -22,6 +22,8 @@ import type {
   ActionCtx,
   AgentCallSettings,
   AgentComponent,
+  AgentInstructions,
+  ContextMessage,
   AgentLanguageModel,
   AgentPrompt,
   WithoutModel,
@@ -41,6 +43,14 @@ import { saveInputMessages } from "./saveInputMessages.js";
 import { errorToString } from "./utils.js";
 import { ModelCallRefusedError } from "../../errors.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
+
+function toContextMessages(
+  value: string | ModelMessage | ModelMessage[] | undefined,
+): ModelMessage[] {
+  if (value === undefined || value === "") return [];
+  if (typeof value === "string") return [{ role: "user", content: value }];
+  return Array.isArray(value) ? value : [value];
+}
 
 export function resolveUsageModel(
   toSave: { step: { model?: ModelOrMetadata } } | { object: unknown },
@@ -131,9 +141,15 @@ export async function startGeneration<
      *   the promptMessageId message, if provided.
      */
     messages?: (ModelMessage | Message)[];
-    instructions?: Instructions;
+    /** A function is called with the ctx, threadId and userId. */
+    instructions?: AgentInstructions;
     /** @deprecated Use instructions. */
     system?: Instructions;
+    /**
+     * Sent after the history and prompt, and not saved. See
+     * {@link ContextMessage}.
+     */
+    contextMessage?: ContextMessage;
     allowSystemInMessages?: boolean;
     /**
      * The abort signal to be passed to the LLM call. If triggered, the pending
@@ -426,11 +442,30 @@ export async function startGeneration<
     messages: _messages,
     prompt: _prompt,
     instructions: _instructions,
+    contextMessage: _contextMessage,
     onStepFinish: _onStepFinish,
     ...aiCallArgs
   } = argsWithoutSystem as typeof argsWithoutSystem & {
     onStepFinish?: unknown;
   };
+  const instructionsOption = args.instructions ?? args.system;
+  const instructions =
+    typeof instructionsOption === "function"
+      ? await instructionsOption(ctx, { threadId, userId })
+      : instructionsOption;
+  const contextMessages = toContextMessages(
+    typeof args.contextMessage === "function"
+      ? await args.contextMessage(ctx, { threadId, userId, promptMessageId })
+      : args.contextMessage,
+  );
+  if (
+    !allowSystemInMessages &&
+    contextMessages.some((message) => message.role === "system")
+  ) {
+    throw new Error(
+      "A system contextMessage requires allowSystemInMessages: true. Pass a string or a user message instead.",
+    );
+  }
   const include = rawRequestResponseInclude(
     aiCallArgs as {
       experimental_include?: RawRequestResponseInclude;
@@ -444,8 +479,10 @@ export async function startGeneration<
     providerOptions: opts.providerOptions,
     ...aiCallArgs,
     model,
-    messages: context.messages,
-    instructions: args.instructions ?? args.system,
+    messages: contextMessages.length
+      ? [...context.messages, ...contextMessages]
+      : context.messages,
+    instructions,
     allowSystemInMessages,
     // A step that streamed an error is not continued past.
     stopWhen: [

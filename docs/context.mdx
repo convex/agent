@@ -245,6 +245,38 @@ to the LLM will be:
 This allows you to pass in messages that are not part of the thread history and
 will not be saved automatically, but that the LLM will receive as context.
 
+## Sending state that changes every call
+
+Say each request should tell the model the user's open cart. If you append the
+cart to `instructions`, the start of the prompt changes on every call, and the
+provider can't reuse its prompt cache: every call pays for the full prompt and
+waits for it to be read again. Put the changing state in `contextMessage`
+instead. The Agent sends it after the history and prompt, on every step of the
+generation, and never saves it:
+
+```ts
+const agent = new Agent(components.agent, {
+  name: "shop",
+  languageModel,
+  instructions: "You help customers of the shop.",
+  contextMessage: async (ctx, { userId }) => {
+    const cart = await ctx.runQuery(internal.carts.forUser, { userId });
+    return `Current cart: ${JSON.stringify(cart)}`;
+  },
+});
+```
+
+A string becomes a user message. You can also return `ModelMessage`s, or pass
+`contextMessage` per call to override the Agent's. The instructions, history and
+prompt stay the same from one call to the next, so the provider caches them. For
+providers that need explicit cache markers, such as Anthropic, return the
+instructions as a system message with `providerOptions` (for example
+`{ anthropic: { cacheControl: { type: "ephemeral" } } }`).
+
+`instructions` can also be a function of the call:
+`(ctx, { threadId, userId }) => string`, set on the Agent or per call. Keep its
+result stable for a given user so the cache still applies.
+
 ## Manage embeddings manually
 
 The `embeddingModel` argument to the Agent constructor allows you to specify a
