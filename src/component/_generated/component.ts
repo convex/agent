@@ -1596,7 +1596,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       getMessagesByIds: FunctionReference<
         "query",
         "internal",
-        { messageIds: Array<string> },
+        { messageIds: Array<string>; view?: "model" | "full" },
         Array<null | {
           _creationTime: number;
           _id: string;
@@ -2255,6 +2255,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           statuses?: Array<"pending" | "success" | "failed">;
           threadId: string;
           upToAndIncludingMessageId?: string;
+          view?: "text" | "model" | "full";
         },
         {
           continueCursor: string;

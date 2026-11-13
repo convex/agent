@@ -42,6 +42,17 @@ import {
 } from "./vector/tables.js";
 import { changeRefcount } from "./files.js";
 import {
+  ChargingPayloads,
+  deletePayload,
+  patchStatus,
+  modelMessage,
+  readMessage,
+  readMessages,
+  storedMessage,
+  storeMessage,
+  vMessageView,
+} from "./messagePayloads.js";
+import {
   getStreamingMessagesWithMetadata,
   finishHandler,
   releaseStreamFileOwnershipByIds,
@@ -64,6 +75,7 @@ export async function deleteMessage(
   messageDoc: Doc<"messages">,
 ) {
   await ctx.db.delete("messages", messageDoc._id);
+  await deletePayload(ctx, messageDoc);
   if (messageDoc.embeddingId) {
     const { tableName } = getVectorIdInfo(ctx, messageDoc.embeddingId);
     await ctx.db.delete(tableName, messageDoc.embeddingId);
@@ -131,7 +143,7 @@ async function markPendingMessageFailed(
     const { tableName } = getVectorIdInfo(ctx, message.embeddingId);
     await ctx.db.delete(tableName, message.embeddingId);
   }
-  await ctx.db.patch("messages", message._id, {
+  await patchStatus(ctx, message, {
     status: "failed",
     error,
     embeddingId: undefined,
@@ -284,7 +296,7 @@ async function addMessagesHandler(
             const { tableName } = getVectorIdInfo(ctx, m.embeddingId);
             await ctx.db.delete(tableName, m.embeddingId);
           }
-          await ctx.db.patch("messages", m._id, {
+          await patchStatus(ctx, m, {
             status: "failed",
             error: "Restarting",
             embeddingId: undefined,
@@ -352,7 +364,6 @@ async function addMessagesHandler(
       ...rest,
       ...message,
       embeddingId,
-      parentMessageId: promptMessageId,
       userId,
       tool: isTool(message.message),
       text: hideFromUserIdSearch ? undefined : extractText(message.message),
@@ -382,12 +393,22 @@ async function addMessagesHandler(
           message.fileIds,
         );
       }
-      await ctx.db.replace("messages", pendingMessage._id, {
-        ...messageDoc,
-        order: pendingMessage.order,
-        stepOrder: pendingMessage.stepOrder,
-      });
-      toReturn.push((await ctx.db.get("messages", pendingMessage._id))!);
+      const { row, payload } = await storeMessage(
+        ctx,
+        {
+          ...messageDoc,
+          order: pendingMessage.order,
+          stepOrder: pendingMessage.stepOrder,
+        },
+        pendingMessage,
+      );
+      await ctx.db.replace("messages", pendingMessage._id, row);
+      toReturn.push(
+        storedMessage(
+          (await ctx.db.get("messages", pendingMessage._id))!,
+          payload,
+        ),
+      );
       continue;
     }
     if ((startsAtNextOrder || explicitOrder !== undefined) && i === 0) {
@@ -413,16 +434,19 @@ async function addMessagesHandler(
       }
       stepOrder = incrementMessagePosition(stepOrder, "stepOrder");
     }
-    const messageId = await ctx.db.insert("messages", {
+    const { row, payload } = await storeMessage(ctx, {
       ...messageDoc,
       order,
       stepOrder,
     });
+    const messageId = await ctx.db.insert("messages", row);
     if (message.fileIds) {
       await changeRefcount(ctx, [], message.fileIds);
     }
     // TODO: delete the associated stream data for the order/stepOrder
-    toReturn.push((await ctx.db.get("messages", messageId))!);
+    toReturn.push(
+      storedMessage((await ctx.db.get("messages", messageId))!, payload),
+    );
   }
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
@@ -494,8 +518,9 @@ export const finalizeMessage = mutation({
   },
   returns: v.null(),
   handler: async (ctx, { messageId, result }) => {
-    const message = await ctx.db.get("messages", messageId);
-    assert(message, `Message ${messageId} not found`);
+    const stored = await ctx.db.get("messages", messageId);
+    assert(stored, `Message ${messageId} not found`);
+    const message = modelMessage(stored);
     if (message.status !== "pending") {
       console.debug(
         "Trying to finalize a message that's already",
@@ -514,7 +539,7 @@ export const finalizeMessage = mutation({
         );
         await markPendingMessageFailed(
           ctx,
-          message,
+          stored,
           result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
         );
         return;
@@ -536,7 +561,7 @@ export const finalizeMessage = mutation({
           console.error("Failed to persist recovered assistant streams", error);
           await markPendingMessageFailed(
             ctx,
-            message,
+            stored,
             result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
           );
           return;
@@ -546,9 +571,9 @@ export const finalizeMessage = mutation({
       }
     }
     if (result.status === "failed") {
-      await markPendingMessageFailed(ctx, message, result.error);
+      await markPendingMessageFailed(ctx, stored, result.error);
     } else {
-      await ctx.db.patch("messages", messageId, { status: "success" });
+      await patchStatus(ctx, stored, { status: "success" });
     }
   },
 });
@@ -573,8 +598,9 @@ export const updateMessage = mutation({
   },
   returns: vMessageDoc,
   handler: async (ctx, args) => {
-    const message = await ctx.db.get("messages", args.messageId);
-    assert(message, `Message ${args.messageId} not found`);
+    const stored = await ctx.db.get("messages", args.messageId);
+    assert(stored, `Message ${args.messageId} not found`);
+    const message = await readMessage(ctx, stored);
 
     if (args.patch.fileIds) {
       await changeRefcount(ctx, message.fileIds ?? [], args.patch.fileIds);
@@ -596,8 +622,15 @@ export const updateMessage = mutation({
       patch.embeddingId = undefined;
     }
 
-    await ctx.db.patch("messages", args.messageId, patch);
-    return publicMessage((await ctx.db.get("messages", args.messageId))!);
+    const { row, payload } = await storeMessage(
+      ctx,
+      { ...omit(message, ["_id", "_creationTime"]), ...patch },
+      stored,
+    );
+    await ctx.db.replace("messages", args.messageId, row);
+    return publicMessage(
+      storedMessage((await ctx.db.get("messages", args.messageId))!, payload),
+    );
   },
 });
 
@@ -621,7 +654,7 @@ export const respondToToolCallApprovals = mutation({
       paginationOpts: { cursor: null, numItems: APPROVAL_LOOKUP_MESSAGES },
     });
     const plan = planToolCallApprovals(
-      page.page,
+      page.page.map(modelMessage),
       args.decisions,
       args.threadId,
     );
@@ -695,8 +728,11 @@ export const cloneMessageBatch = internalMutation({
             ["order", "stepOrder"],
           ).collect();
 
+    const messages = await readMessages(ctx, result.page, "full", {
+      page: true,
+    });
     await Promise.all(
-      result.page
+      messages
         .filter(
           (m) =>
             !existing.some(
@@ -726,7 +762,7 @@ export const cloneMessageBatch = internalMutation({
           // parentMessageId would point into the source thread. Nothing
           // reads it yet, and remapping needs the parent copied first, which
           // descending batches do not guarantee, so the copy carries none.
-          await ctx.db.insert("messages", {
+          const { row: copy } = await storeMessage(ctx, {
             ...omit(m, [
               "_id",
               "_creationTime",
@@ -739,6 +775,7 @@ export const cloneMessageBatch = internalMutation({
             threadId: args.targetThreadId,
             order: orderOffset + m.order,
           });
+          await ctx.db.insert("messages", copy);
         }),
     );
     return {
@@ -795,6 +832,12 @@ export const listMessagesByThreadIdArgs = {
   paginationOpts: v.optional(paginationOptsValidator),
   statuses: v.optional(v.array(vMessageStatus)),
   upToAndIncludingMessageId: v.optional(v.id("messages")),
+  /**
+   * "text" returns each message as its role and text and skips tool
+   * messages, like excludeToolMessages. "model" leaves out what only a full
+   * read needs, like provider metadata and usage. "full" by default.
+   */
+  view: v.optional(vMessageView),
 };
 export const listMessagesByThreadId = query({
   args: listMessagesByThreadIdArgs,
@@ -802,7 +845,10 @@ export const listMessagesByThreadId = query({
     const messages = await listMessagesByThreadIdHandler(ctx, args, {
       keepContinuedOrderTools: true,
     });
-    return { ...messages, page: messages.page.map(publicMessage) };
+    const page = await readMessages(ctx, messages.page, args.view, {
+      page: true,
+    });
+    return { ...messages, page: page.map(publicMessage) };
   },
   returns: vPaginationResult(vMessageDoc),
 });
@@ -820,7 +866,9 @@ async function listMessagesByThreadIdHandler(
     !last || last.threadId === args.threadId,
     "upToAndIncludingMessageId must be a message in the thread",
   );
-  const toolOptions = args.excludeToolMessages ? [false] : [true, false];
+  const view = args.view ?? "full";
+  const toolOptions =
+    args.excludeToolMessages || view === "text" ? [false] : [true, false];
   const order = args.order ?? "desc";
   const streams = toolOptions.flatMap((tool) =>
     statuses.map((status) =>
@@ -841,8 +889,13 @@ async function listMessagesByThreadIdHandler(
   );
   // Excluding tool messages trims earlier orders. The order being continued
   // keeps them, or an approval loses its call and decision (#409). Cloning
-  // reuses this handler and wants strict exclusion.
-  if (args.excludeToolMessages && last && keepContinuedOrderTools) {
+  // reuses this handler and wants strict exclusion, as does a text view.
+  if (
+    args.excludeToolMessages &&
+    view !== "text" &&
+    last &&
+    keepContinuedOrderTools
+  ) {
     streams.push(
       ...statuses.map((status) =>
         stream(ctx.db, schema)
@@ -858,12 +911,15 @@ async function listMessagesByThreadIdHandler(
       ),
     );
   }
-  const messages = await mergedStream(streams, ["order", "stepOrder"]).paginate(
-    args.paginationOpts ?? {
-      numItems: DEFAULT_RECENT_MESSAGES,
-      cursor: null,
-    },
-  );
+  const full = view === "full";
+  const paginationOpts = args.paginationOpts ?? {
+    numItems: DEFAULT_RECENT_MESSAGES,
+    cursor: null,
+  };
+  const messages = await mergedStream(
+    full ? streams.map((s) => new ChargingPayloads(s)) : streams,
+    ["order", "stepOrder"],
+  ).paginate(paginationOpts);
   if (messages.page.length === 0) {
     messages.isDone = true;
   }
@@ -871,11 +927,21 @@ async function listMessagesByThreadIdHandler(
 }
 
 export const getMessagesByIds = query({
-  args: { messageIds: v.array(v.id("messages")) },
+  args: {
+    messageIds: v.array(v.id("messages")),
+    view: v.optional(v.union(v.literal("model"), v.literal("full"))),
+  },
   handler: async (ctx, args) => {
-    return (
-      await Promise.all(args.messageIds.map((id) => ctx.db.get("messages", id)))
-    ).map((m) => (m ? publicMessage(m) : null));
+    const rows = await Promise.all(
+      args.messageIds.map((id) => ctx.db.get("messages", id)),
+    );
+    const read = await readMessages(
+      ctx,
+      rows.filter((m) => m !== null),
+      args.view,
+    );
+    let next = 0;
+    return rows.map((m) => (m ? publicMessage(read[next++]) : null));
   },
   returns: v.array(v.union(v.null(), vMessageDoc)),
 });
@@ -1029,7 +1095,7 @@ export const _fetchSearchMessages = internalQuery({
             m.stepOrder < beforeMessage.stepOrder)
         );
       })
-      .map(publicMessage);
+      .map((m) => publicMessage(modelMessage(m)));
     messages.push(...(args.textSearchMessages ?? []));
     // TODO: prioritize more recent messages
     messages = sorted(messages);
@@ -1086,7 +1152,7 @@ export const _fetchSearchMessages = internalQuery({
     }
     for (const r of Object.values(ranges).flat()) {
       if (!messages.some((m) => m._id === r._id)) {
-        messages.push(publicMessage(r));
+        messages.push(publicMessage(modelMessage(r)));
       }
     }
     return sorted(messages);
@@ -1150,7 +1216,7 @@ export const textSearch = query({
             m.stepOrder < targetMessage.stepOrder)
         );
       })
-      .map(publicMessage);
+      .map((m) => publicMessage(modelMessage(m)));
   },
   returns: v.array(vMessageDoc),
 });

@@ -64,6 +64,14 @@ export const schema = defineSchema({
     parentMessageId: v.optional(v.id("messages")),
     stepId: v.optional(v.string()),
     files: v.optional(v.array(v.any())),
+
+    // Set when the message's text is left out, as `text` holds it: the length
+    // of each text part's text, or of a string content.
+    textLengths: v.optional(v.array(v.number())),
+    // Rows saved since messagePayloads keep their result metadata there. The
+    // size lets a byte budget count the payload before reading it.
+    payloadId: v.optional(v.id("messagePayloads")),
+    payloadSize: v.optional(v.number()),
   })
     // Allows finding successful visible messages in order
     // Also surface pending messages separately to e.g. stream
@@ -82,6 +90,30 @@ export const schema = defineSchema({
     })
     // Allows finding messages by vector embedding id
     .index("embeddingId_threadId", ["embeddingId", "threadId"]),
+
+  // Convex reads whole documents, so what only a full read returns stays off
+  // the rows that prompts, text lists, saves and search read. Keyed like
+  // their message, so a page reads its payloads in a few index ranges.
+  messagePayloads: defineTable({
+    threadId: v.id("threads"),
+    status: vMessageStatus,
+    tool: v.boolean(),
+    order: v.number(),
+    stepOrder: v.number(),
+    providerOptions: v.optional(vProviderOptions),
+    usage: v.optional(vUsage),
+    providerMetadata: v.optional(vProviderMetadata),
+    sources: v.optional(v.array(vSource)),
+    warnings: v.optional(v.array(vLanguageModelCallWarning)),
+    reasoning: v.optional(v.string()),
+    reasoningDetails: v.optional(vReasoningDetails),
+  }).index("threadId_status_tool_order_stepOrder", [
+    "threadId",
+    "status",
+    "tool",
+    "order",
+    "stepOrder",
+  ]),
 
   // Status: if it's done, it's deleted, then deltas are vacuumed
   streamingMessages: defineTable({
