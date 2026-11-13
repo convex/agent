@@ -113,11 +113,7 @@ import type {
   WithoutModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
-import {
-  errorToString,
-  hasSuccessfulToolCall,
-  willContinue,
-} from "./client/utils.js";
+import { errorToString, hasSuccessfulToolCall } from "./client/utils.js";
 
 export { isStepCount, stepCountIs } from "ai";
 export { hasSuccessfulToolCall };
@@ -538,48 +534,54 @@ export class Agent<
     > &
       GenerationOutputMetadata
   > {
-    const { args, promptMessageId, order, ...call } = await this.start(
+    type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
+    const { args, promptMessageId, order, ...call } = await startGeneration<
+      typeof generateTextArgs,
+      Tools,
+      CustomCtx,
+      RUNTIME_CONTEXT
+    >(
       ctx,
-      generateTextArgs,
-      { ...threadOpts, ...options },
+      this.component,
+      {
+        ...generateTextArgs,
+        tools: (generateTextArgs.tools ?? this.options.tools) as Tools,
+        instructions:
+          generateTextArgs.instructions ??
+          generateTextArgs.system ??
+          this.options.instructions,
+        stopWhen: (generateTextArgs.stopWhen ?? this.options.stopWhen) as any,
+      },
+      {
+        ...this.options,
+        ...threadOpts,
+        ...options,
+        agentName: this.options.name,
+        agentForToolCtx: this,
+      },
       "generateText",
     );
-
-    type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
-    const steps: StepResult<Tools, RUNTIME_CONTEXT>[] = [];
-    let initialResponseMessages: ModelMessage[] = [];
-    let initialResponseMessagesSaved = false;
     try {
       const result = (await generateText<Tools, RUNTIME_CONTEXT, OUTPUT>({
         ...args,
         prepareStep: async (options) => {
-          if (options.stepNumber === 0) {
-            initialResponseMessages = [...options.responseMessages];
-          }
+          await call.beforeStep(options);
           const result = await generateTextArgs.prepareStep?.(options);
           call.updateModel(result?.model ?? options.model);
           return result;
         },
         onStepEnd: async (step) => {
-          steps.push(step);
-          await call.save(
-            {
-              step,
-              responseMessages: [
-                ...(initialResponseMessagesSaved
-                  ? []
-                  : initialResponseMessages),
-                ...step.response.messages,
-              ],
-            },
-            await willContinue(steps, args.stopWhen),
-          );
-          initialResponseMessagesSaved = true;
+          await call.endStep(step);
           return (
             generateTextArgs.onStepEnd ?? generateTextArgs.onStepFinish
           )?.(step);
         },
+        onEnd: async (event) => {
+          await call.end();
+          return (generateTextArgs.onEnd ?? generateTextArgs.onFinish)?.(event);
+        },
       })) as GenerateTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
+      await call.end();
       const metadata: GenerationOutputMetadata = {
         promptMessageId,
         order,
@@ -776,6 +778,7 @@ export class Agent<
         return args.onError?.(error);
       },
       onFinish: async (result) => {
+        let failure: unknown = result.error;
         try {
           await save({
             object: {
@@ -790,10 +793,15 @@ export class Agent<
               reasoning: undefined,
             },
           });
+        } catch (error) {
+          failure ??= error;
+          throw error;
         } finally {
           // A schema failure arrives here, not in onError. Without storage
           // the save above still reports usage; with it, the save throws.
-          if (result.error) await fail(errorToString(result.error));
+          // The AI SDK drops what onFinish throws, so a failed save is only
+          // seen through the message it fails.
+          if (failure !== undefined) await fail(errorToString(failure));
         }
         return args.onFinish?.(result);
       },

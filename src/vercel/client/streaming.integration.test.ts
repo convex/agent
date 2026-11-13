@@ -835,7 +835,7 @@ describe("Fallback Behavior", () => {
 
   test("mergeTransforms adds smoothStream when streaming is enabled", () => {
     // No streaming options - returns existing transforms
-    expect(mergeTransforms(undefined, undefined)).toBeUndefined();
+    expect(mergeTransforms(undefined, undefined)).toEqual([]);
 
     // Boolean true - adds smoothStream
     const transforms = mergeTransforms(true, undefined);
