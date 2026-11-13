@@ -4890,6 +4890,18 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             model?: string;
             provider?: string;
             providerOptions?: Record<string, Record<string, any>>;
+            reasoning?: string;
+            reasoningDetails?: Array<
+              | {
+                  providerMetadata?: Record<string, Record<string, any>>;
+                  providerOptions?: Record<string, Record<string, any>>;
+                  signature?: string;
+                  text: string;
+                  type: "reasoning";
+                }
+              | { signature?: string; text: string; type: "text" }
+              | { data: string; type: "redacted" }
+            >;
             status?: "pending" | "success" | "failed";
           };
         },

@@ -567,6 +567,8 @@ export const updateMessage = mutation({
           "provider",
           "providerOptions",
           "finishReason",
+          "reasoning",
+          "reasoningDetails",
         ]),
       ),
     ),

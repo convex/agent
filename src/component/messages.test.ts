@@ -577,6 +577,38 @@ describe("agent", () => {
     });
   });
 
+  test("updateMessage clears stored reasoning", async () => {
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, {
+      userId: "test",
+    });
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId: thread._id as Id<"threads">,
+      messages: [
+        {
+          message: { role: "assistant", content: "hello" },
+          reasoning: "private chain of thought",
+          reasoningDetails: [
+            {
+              type: "reasoning",
+              text: "private chain of thought",
+              providerOptions: { openai: { reasoningEncryptedContent: "enc" } },
+            },
+          ],
+        },
+      ],
+    });
+    const messageId = messages[0]._id as Id<"messages">;
+
+    const updatedMessage = await t.mutation(api.messages.updateMessage, {
+      messageId,
+      patch: { reasoning: "", reasoningDetails: [] },
+    });
+
+    expect(updatedMessage.reasoning).toBe("");
+    expect(updatedMessage.reasoningDetails).toEqual([]);
+  });
+
   test("updateMessage updates message status", async () => {
     const t = convexTest(schema, modules);
     const thread = await t.mutation(api.threads.createThread, {
