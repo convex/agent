@@ -163,16 +163,31 @@ single-decision helpers so the request history is read only once.
 If a partial continuation requests another approval, that newer request also
 remains pending while you resume an earlier sibling.
 
-If an unrelated generation starts while approvals are still unresolved, they are
-**automatically denied** with the reason
-`"auto-denied: new generation started"`. This prevents broken message histories
-where tool calls lack results. These denials are synthetic and only added to the
-model's context for that request; they are not saved, so the approvals remain
-pending in storage.
+A stored tool result settles its approval. A provider-executed approval does not
+always get one, so a continuation records the provider-executed approvals it
+resumed on its first saved message. Each decision is sent once, including a
+provider-executed one resumed after a sibling. Resuming an approval whose tool
+call id appears in more than one message of the context throws, since a result
+could answer either call.
 
-This does not apply when resuming approvals: on that continuation, earlier
-approvals that were not part of the resume are omitted from that model request.
-No response is written for them, so they remain pending in storage.
+If another generation starts while approvals are still unresolved, including
+approved ones that were never resumed, their tool calls are left out of its
+context. They stay pending in storage, so you can still decide and resume them
+later. A denial that was never resumed is shown to the model with its reason, if
+it is in the fetched context.
+
+Approvals need a thread: decisions are read from storage. A decision passed in
+`messages` or `prompt` that is not stored throws, so save it with
+`approveToolCall`, `denyToolCall` or `respondToToolCallApprovals` and continue
+from the returned `messageId`.
+
+A [context handler](./context.mdx) sees the fetched context, approval requests
+and decisions included, and can return any history. The approval requests and
+decisions it returns are not sent. When generation resumes from a decision, the
+stored calls and decisions being resumed are appended after the handler's
+messages, so a decision only runs a tool if it was saved with these methods, and
+only in its own continuation. Any other approval call is sent only with its
+result.
 
 ## Client-side flow
 
