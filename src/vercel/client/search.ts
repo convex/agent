@@ -29,12 +29,11 @@ import type {
   ActionCtx,
 } from "./types.js";
 import { inlineMessagesFiles } from "./files.js";
+import { docsToModelMessages, toModelMessage } from "../mapping.js";
 import {
-  autoDenyUnresolvedApprovals,
-  docsToModelMessages,
-  toModelMessage,
-} from "../mapping.js";
-import { prepareApprovalContext } from "./prepareApprovalContext.js";
+  planApprovals,
+  prepareApprovalContext,
+} from "./prepareApprovalContext.js";
 
 const DEFAULT_VECTOR_SCORE_THRESHOLD = 0.0;
 // Bound each page that completes an order split by the recent window.
@@ -141,13 +140,20 @@ export async function fetchRecentAndSearchMessages(
     contextOptions: ContextOptions;
     getEmbedding?: GetEmbedding;
   },
-): Promise<{ recentMessages: MessageDoc[]; searchMessages: MessageDoc[] }> {
+): Promise<{
+  recentMessages: MessageDoc[];
+  searchMessages: MessageDoc[];
+  // Read before filtering, since a continuation can save a message with no
+  // content left.
+  continuedApprovalIds: string[];
+}> {
   assert(args.userId || args.threadId, "Specify userId or threadId");
   const opts = args.contextOptions;
   // Fetch the latest messages from the thread
   let included: Set<string> | undefined;
   let recentMessages: MessageDoc[] = [];
   let searchMessages: MessageDoc[] = [];
+  const continuedApprovalIds: string[] = [];
   const threadId = args.threadId;
   const targetMessageId =
     args.targetMessageId ?? args.upToAndIncludingMessageId;
@@ -202,6 +208,9 @@ export async function fetchRecentAndSearchMessages(
     }
     const retained = trimIncompleteOldestOrder(sorted(page));
     included = new Set(retained.map((m) => m._id));
+    continuedApprovalIds.push(
+      ...retained.flatMap((m) => m.continuedApprovalIds ?? []),
+    );
     recentMessages = filterOutOrphanedToolMessages(retained);
   }
   if (
@@ -282,12 +291,14 @@ export async function fetchRecentAndSearchMessages(
       },
     );
     // TODO: track what messages we used for context
-    searchMessages = filterOutOrphanedToolMessages(
-      sorted(searchResults.filter((m) => !included?.has(m._id))),
+    const found = sorted(searchResults.filter((m) => !included?.has(m._id)));
+    continuedApprovalIds.push(
+      ...found.flatMap((m) => m.continuedApprovalIds ?? []),
     );
+    searchMessages = filterOutOrphanedToolMessages(found);
   }
   // Ensure we don't include tool messages without a corresponding tool call
-  return { recentMessages, searchMessages };
+  return { recentMessages, searchMessages, continuedApprovalIds };
 }
 
 /**
@@ -341,7 +352,7 @@ export function filterOutOrphanedToolMessages(docs: MessageDoc[]) {
   };
 
   // Helper: check if tool call has a pending approval request
-  // (auto-deny handles these downstream, so they must survive the filter)
+  // (context handlers see these, and prepareApprovalContext leaves them out)
   const hasApprovalRequest = (toolCallId: string) => {
     return approvalRequestsByToolCallId.has(toolCallId);
   };
@@ -616,11 +627,13 @@ export async function fetchContextWithPrompt(
   messages: ModelMessage[];
   order: number | undefined;
   stepOrder: number | undefined;
+  continuedProviderApprovalIds: string[];
 }> {
   const { threadId, userId, textEmbeddingModel, embeddingModel } = args;
   const effectiveEmbeddingModel = embeddingModel ?? textEmbeddingModel;
 
   const promptArray = getPromptArray(args.prompt);
+  const continuing = promptArray.length === 0;
 
   const searchText = promptArray.length
     ? extractText(promptArray.at(-1)!)
@@ -630,10 +643,8 @@ export async function fetchContextWithPrompt(
         ? extractText(args.messages.at(-1)!)
         : undefined;
   // If only a messageId is provided, this will add that message to the end.
-  const { recentMessages, searchMessages } = await fetchRecentAndSearchMessages(
-    ctx,
-    component,
-    {
+  const { recentMessages, searchMessages, continuedApprovalIds } =
+    await fetchRecentAndSearchMessages(ctx, component, {
       userId,
       threadId,
       targetMessageId: args.promptMessageId,
@@ -656,8 +667,7 @@ export async function fetchContextWithPrompt(
           embeddingModel: effectiveEmbeddingModel,
         };
       },
-    },
-  );
+    });
 
   const promptMessageIndex = args.promptMessageId
     ? recentMessages.findIndex((m) => m._id === args.promptMessageId)
@@ -676,27 +686,31 @@ export async function fetchContextWithPrompt(
         promptArray.push(promptMessage.message);
       }
     }
-    if (!promptMessage.embeddingId && effectiveEmbeddingModel) {
-      // Lazily generate embeddings for the prompt message, if it doesn't have
-      // embeddings yet. This can happen if the message was saved in a mutation
-      // where the LLM is not available.
-      await generateAndSaveEmbeddings(
-        ctx,
-        component,
-        {
-          ...args,
-          userId,
-          embeddingModel: effectiveEmbeddingModel,
-        },
-        [promptMessage],
-      );
-    }
   }
 
-  const continuation =
-    args.prompt === undefined
-      ? approvalContinuation(promptMessage, searchMessages, recentMessages)
-      : undefined;
+  const approvals = planApprovals({
+    docs: [...searchMessages, ...recentMessages],
+    recorded: continuedApprovalIds,
+    continued: continuing
+      ? approvalContinuation(promptMessage, recentMessages)
+      : undefined,
+    inline: [...messages, ...getPromptArray(args.prompt)],
+  });
+  if (promptMessage && !promptMessage.embeddingId && effectiveEmbeddingModel) {
+    // Lazily generate embeddings for the prompt message, if it doesn't have
+    // embeddings yet. This can happen if the message was saved in a mutation
+    // where the LLM is not available.
+    await generateAndSaveEmbeddings(
+      ctx,
+      component,
+      {
+        ...args,
+        userId,
+        embeddingModel: effectiveEmbeddingModel,
+      },
+      [promptMessage],
+    );
+  }
   const search = docsToModelMessages(searchMessages);
   const recent = docsToModelMessages(prePromptDocs);
   const inputMessages = messages.map(toModelMessage);
@@ -723,18 +737,7 @@ export async function fetchContextWithPrompt(
       })
     : allMessages;
 
-  if (continuation) {
-    processedMessages = prepareApprovalContext(
-      processedMessages,
-      continuation.approvalIds,
-      continuation.storedContext,
-    );
-  }
-
-  // Post-process: auto-deny unresolved approvals so the AI SDK sees a
-  // complete history. Applied after contextHandler so custom handlers
-  // don't need to handle this.
-  processedMessages = autoDenyUnresolvedApprovals(processedMessages);
+  processedMessages = prepareApprovalContext(processedMessages, approvals);
 
   // Process messages to inline localhost files (if not, file urls pointing to localhost will be sent to LLM providers)
   if (process.env.CONVEX_CLOUD_URL?.startsWith("http://127.0.0.1")) {
@@ -745,16 +748,14 @@ export async function fetchContextWithPrompt(
     messages: processedMessages,
     order: promptMessage?.order,
     stepOrder: promptMessage?.stepOrder,
+    continuedProviderApprovalIds: approvals.continuedProviderApprovalIds,
   };
 }
 
-// Read before the context handler runs and from copies, since the messages
-// it is given share nested objects with these docs.
 function approvalContinuation(
   promptMessage: MessageDoc | undefined,
-  searchMessages: MessageDoc[],
   recentMessages: MessageDoc[],
-): { approvalIds: Set<string>; storedContext: ModelMessage[] } | undefined {
+): Set<string> | undefined {
   if (
     promptMessage?.message?.role !== "tool" ||
     !promptMessage.message.content.some(
@@ -795,12 +796,7 @@ function approvalContinuation(
       "Approval continuation requires one complete request message",
     );
   }
-  return {
-    approvalIds,
-    storedContext: docsToModelMessages(
-      structuredClone([...searchMessages, ...recentMessages]),
-    ),
-  };
+  return approvalIds;
 }
 
 export function getPromptArray(

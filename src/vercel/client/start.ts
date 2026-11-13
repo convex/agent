@@ -231,6 +231,7 @@ export async function startGeneration<
   const order = pendingMessage?.order ?? context.order;
   const stepOrder = pendingMessage?.stepOrder ?? context.stepOrder;
   let pendingMessageId = pendingMessage?._id;
+  let recorded = false;
 
   const model = args.model ?? opts.languageModel;
   assert(model, "model is required");
@@ -393,7 +394,11 @@ export async function startGeneration<
           embeddings,
           failPendingSteps: false,
           finishStreamId,
+          ...(!recorded && context.continuedProviderApprovalIds.length > 0
+            ? { continuedApprovalIds: context.continuedProviderApprovalIds }
+            : {}),
         });
+        recorded = true;
         const lastMessage = saved.messages.at(-1)!;
         if (createPendingMessage) {
           if (lastMessage.status === "failed") {

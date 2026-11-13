@@ -209,6 +209,7 @@ const addMessagesArgs = {
   // If provided, finish this stream atomically with the message save.
   // This prevents UI flickering from separate mutations (issue #181).
   finishStreamId: v.optional(v.id("streamingMessages")),
+  continuedApprovalIds: v.optional(v.array(v.string())),
 };
 export const addMessages = mutation({
   args: addMessagesArgs,
@@ -246,6 +247,7 @@ async function addMessagesHandler(
     order: requestedOrder,
     pendingMessageId,
     hideFromUserIdSearch,
+    continuedApprovalIds,
     ...rest
   } = args;
   const promptMessage =
@@ -350,6 +352,7 @@ async function addMessagesHandler(
     }
     const messageDoc = {
       ...rest,
+      ...(i === 0 && continuedApprovalIds ? { continuedApprovalIds } : {}),
       ...message,
       embeddingId,
       parentMessageId: promptMessageId,

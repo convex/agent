@@ -146,6 +146,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           abandonIfPromptMissing?: boolean;
           agentName?: string;
+          continuedApprovalIds?: Array<string>;
           embeddings?: {
             dimension:
               | 128
@@ -856,6 +857,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             _creationTime: number;
             _id: string;
             agentName?: string;
+            continuedApprovalIds?: Array<string>;
             embeddingId?: string;
             error?: string;
             fileIds?: Array<string>;
@@ -1601,6 +1603,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           agentName?: string;
+          continuedApprovalIds?: Array<string>;
           embeddingId?: string;
           error?: string;
           fileIds?: Array<string>;
@@ -2263,6 +2266,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             _creationTime: number;
             _id: string;
             agentName?: string;
+            continuedApprovalIds?: Array<string>;
             embeddingId?: string;
             error?: string;
             fileIds?: Array<string>;
@@ -2990,6 +2994,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           agentName?: string;
+          continuedApprovalIds?: Array<string>;
           embeddingId?: string;
           error?: string;
           fileIds?: Array<string>;
@@ -3634,6 +3639,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           agentName?: string;
+          continuedApprovalIds?: Array<string>;
           embeddingId?: string;
           error?: string;
           fileIds?: Array<string>;
@@ -4897,6 +4903,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           agentName?: string;
+          continuedApprovalIds?: Array<string>;
           embeddingId?: string;
           error?: string;
           fileIds?: Array<string>;

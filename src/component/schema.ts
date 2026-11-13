@@ -63,6 +63,8 @@ export const schema = defineSchema({
     id: v.optional(v.string()), // external id, e.g. from Vercel AI SDK
     parentMessageId: v.optional(v.id("messages")),
     stepId: v.optional(v.string()),
+    // Provider-executed approvals the generation that saved this continued.
+    continuedApprovalIds: v.optional(v.array(v.string())),
     files: v.optional(v.array(v.any())),
   })
     // Allows finding successful visible messages in order

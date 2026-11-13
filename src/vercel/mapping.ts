@@ -16,7 +16,6 @@ import {
   type TextPart,
   type ToolCallPart,
   type ToolResultPart,
-  type ToolApprovalResponse,
   type ProviderMetadata,
   type JSONValue,
 } from "ai";
@@ -146,106 +145,6 @@ export function docsToModelMessages(messages: MessageDoc[]): ModelMessage[] {
     .filter((m) => !!m)
     .filter((m) => !!m.content.length)
     .map(toModelMessage);
-}
-
-const AUTO_DENIED = "auto-denied: new generation started";
-
-/**
- * Settle every tool approval the AI SDK will not resolve itself, so a new
- * generation sends a complete history. The SDK acts only on the decisions in
- * the final tool message, and rejects a local tool call that has no result
- * once later context follows it. So a local call gets an `execution-denied`
- * result, and an undecided provider-executed call gets a denial, which the
- * provider needs in place of a result.
- */
-export function autoDenyUnresolvedApprovals(
-  messages: ModelMessage[],
-): ModelMessage[] {
-  const calls = new Map<string, ToolCallPart>();
-  const requests = new Map<
-    string,
-    { toolCallId: string; messageIndex: number }
-  >();
-  const decisions = new Map<string, ToolApprovalResponse>();
-  const resultIds = new Set<string>();
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (!Array.isArray(msg.content)) continue;
-    for (const part of msg.content) {
-      if (part.type === "tool-call") {
-        calls.set(part.toolCallId, part);
-      } else if (part.type === "tool-approval-request") {
-        requests.set(part.approvalId, {
-          toolCallId: part.toolCallId,
-          messageIndex: i,
-        });
-      } else if (part.type === "tool-approval-response") {
-        if (!decisions.has(part.approvalId)) {
-          decisions.set(part.approvalId, part);
-        }
-      } else if (part.type === "tool-result") {
-        resultIds.add(part.toolCallId);
-      }
-    }
-  }
-  const last = messages.at(-1);
-  const sdkDecided = new Set(
-    last?.role === "tool"
-      ? last.content.flatMap((part) =>
-          part.type === "tool-approval-response" ? [part.approvalId] : [],
-        )
-      : [],
-  );
-
-  const byMessageIndex = new Map<number, ToolContent>();
-  for (const [approvalId, { toolCallId, messageIndex }] of requests) {
-    const call = calls.get(toolCallId);
-    if (!call || resultIds.has(toolCallId) || sdkDecided.has(approvalId)) {
-      continue;
-    }
-    const decision = decisions.get(approvalId);
-    if (call.providerExecuted && decision) continue;
-    const denied = decision?.approved === false;
-    if (!denied) {
-      console.warn(
-        `Auto-denying unresolved tool approval ${approvalId} ` +
-          `(toolCallId: ${toolCallId}): new generation started`,
-      );
-    }
-    const reason = denied ? decision.reason : AUTO_DENIED;
-    let group = byMessageIndex.get(messageIndex);
-    if (!group) {
-      group = [];
-      byMessageIndex.set(messageIndex, group);
-    }
-    group.push(
-      call.providerExecuted
-        ? {
-            type: "tool-approval-response",
-            approvalId,
-            approved: false,
-            reason,
-            providerExecuted: true,
-          }
-        : {
-            type: "tool-result",
-            toolCallId,
-            toolName: call.toolName,
-            output: {
-              type: "execution-denied",
-              ...(reason !== undefined ? { reason } : {}),
-            },
-          },
-    );
-  }
-
-  if (byMessageIndex.size === 0) {
-    return messages;
-  }
-  return messages.flatMap((message, i) => {
-    const content = byMessageIndex.get(i);
-    return content ? [message, { role: "tool" as const, content }] : [message];
-  });
 }
 
 export function serializeUsage(usage: LanguageModelUsage): Usage {
