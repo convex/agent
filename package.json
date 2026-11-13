@@ -30,19 +30,17 @@
     "dev:build": "chokidar 'tsconfig*.json' 'src/**/*.ts' -i '**/*.test.ts' -c 'npm run build:codegen' --initial",
     "predev": "convex init && npm run build:codegen",
     "build": "tsc --project ./tsconfig.build.json",
+    "prepack": "npm run build",
     "build:codegen": "npx convex codegen --component-dir ./src/component && npm run build",
     "build:clean": "rm -rf dist *.tsbuildinfo && npm run build:codegen",
     "typecheck": "tsc --noEmit && tsc -p example && tsc -p example/convex",
     "lint": "eslint .",
     "test": "vitest run --typecheck",
+    "check": "npm run test && npm run typecheck && npm run lint",
+    "test:e2e": "convex dev --once --typecheck-components",
     "test:watch": "vitest --typecheck --clearScreen false",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
-    "test:coverage": "vitest run --coverage --coverage.reporter=text",
-    "preversion": "npm ci && npm run build:clean && npm run test && npm run lint && npm run typecheck",
-    "alpha": "npm version prerelease --preid alpha && npm publish --tag alpha && git push --follow-tags",
-    "release": "npm version patch && npm publish && git push --follow-tags",
-    "version": "(npm whoami || npm login) && vim -c 'normal o' -c 'normal o## '$npm_package_version CHANGELOG.md && prettier -w CHANGELOG.md && git add CHANGELOG.md",
-    "check": "npm run typecheck && npm run lint && npm test"
+    "test:coverage": "vitest run --coverage --coverage.reporter=text"
   },
   "files": [
     "dist",
@@ -99,6 +97,7 @@
     "@ai-sdk/provider-utils": "5.0.68",
     "@assistant-ui/react": "0.15.25",
     "@assistant-ui/react-markdown": "0.14.19",
+    "@changesets/cli": "3.0.3",
     "@convex-dev/ai-sdk-provider": "^0.1.0",
     "@convex-dev/eslint-plugin": "5.0.0",
     "@convex-dev/rag": "0.7.6",
@@ -171,7 +170,8 @@
     "node": ">=22"
   },
   "workspaces": [
-    "playground"
+    "playground",
+    "."
   ],
   "devEngines": {
     "packageManager": {

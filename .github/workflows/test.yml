@@ -16,28 +16,52 @@ jobs:
     name: Test and lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Node setup
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.x"
+          cache-dependency-path: package-lock.json
+          node-version: "24.22.1"
           cache: "npm"
 
       - name: Install and build
         run: |
           npm ci
           npm run build
+      - name: Validate release notes when the proposed merge changes the version
+        env:
+          BASE_SHA:
+            ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          version=$(jq -r .version package.json)
+          previous=$(git show "$BASE_SHA:package.json" | jq -r .version)
+          if [[ "$version" != "$previous" ]]; then
+            git update-ref refs/heads/main HEAD
+            npx changeset status --output "$RUNNER_TEMP/changesets.json"
+            jq -e '.changesets | length == 0' "$RUNNER_TEMP/changesets.json"
+            awk -v version="$version" '/^## / { active=($0 == "## " version); next } active && !/^#/ && /[[:alnum:]]/ { found=1 } END { exit !found }' CHANGELOG.md
+          fi
+      - name: Test
+        run: npm run check
       - name: Build playground
-        run: npm run build -w playground
+        run: |
+          npm run build -w playground
+          npm run lint -w playground
+      - name: Run E2E smoke test and verify generated code
+        env:
+          CONVEX_AGENT_MODE: anonymous
+          CONVEX_DISABLE_TELEMETRY: "1"
+        run: |
+          npm run test:e2e
+          git diff --exit-code -- src/component/_generated
+          test -z "$(git ls-files --others --exclude-standard src/component/_generated)"
       - name: Publish package for testing branch
         run: npx pkg-pr-new publish || echo "pkg-pr-new failed"
-      - name: Test
-        run: |
-          npm run test
-          npm run typecheck
-          npm run lint
