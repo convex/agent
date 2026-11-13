@@ -212,7 +212,7 @@ const addMessagesArgs = {
 };
 export const addMessages = mutation({
   args: addMessagesArgs,
-  handler: addMessagesHandler,
+  handler: (ctx, args) => addMessagesHandler(ctx, args),
   returns: v.object({ messages: v.array(vMessageDoc) }),
 });
 
@@ -227,6 +227,8 @@ function incrementMessagePosition(value: number, field: "order" | "stepOrder") {
 async function addMessagesHandler(
   ctx: MutationCtx,
   args: ObjectType<typeof addMessagesArgs>,
+  // For a caller that already read the prompt and its order's last step.
+  prompt?: { message: Doc<"messages">; lastStepOrder: number },
 ) {
   let userId = args.userId;
   const threadId = args.threadId;
@@ -249,7 +251,8 @@ async function addMessagesHandler(
     ...rest
   } = args;
   const promptMessage =
-    promptMessageId && (await ctx.db.get("messages", promptMessageId));
+    prompt?.message ??
+    (promptMessageId && (await ctx.db.get("messages", promptMessageId)));
   assert(
     requestedOrder === undefined ||
       requestedOrder === "next" ||
@@ -317,8 +320,10 @@ async function addMessagesHandler(
     }
     order = promptMessage.order;
     // Defend against there being existing messages with this parent.
-    const maxMessage = await getMaxMessage(ctx, threadId, order);
-    stepOrder = maxMessage?.stepOrder ?? promptMessage.stepOrder;
+    stepOrder =
+      prompt?.lastStepOrder ??
+      (await getMaxMessage(ctx, threadId, order))?.stepOrder ??
+      promptMessage.stepOrder;
   } else {
     const maxMessage = await getMaxMessage(ctx, threadId);
     order = maxMessage?.order ?? -1;
@@ -615,26 +620,45 @@ export const respondToToolCallApprovals = mutation({
   },
   returns: v.object({ messageId: v.id("messages") }),
   handler: async (ctx, args) => {
-    const page = await listMessagesByThreadIdHandler(ctx, {
-      threadId: args.threadId,
-      order: "desc",
-      paginationOpts: { cursor: null, numItems: APPROVAL_LOOKUP_MESSAGES },
-    });
-    const plan = planToolCallApprovals(
-      page.page,
+    const read: Doc<"messages">[] = [];
+    const plan = await planToolCallApprovals(
+      recentMessages(ctx, args.threadId, read),
       args.decisions,
       args.threadId,
     );
-    const saved = await addMessagesHandler(ctx, {
-      threadId: args.threadId,
-      agentName: args.agentName,
-      promptMessageId: plan.requestMessageId as Id<"messages">,
-      failPendingSteps: false,
-      messages: [{ message: plan.message }],
-    });
+    const request = read.find((doc) => doc._id === plan.requestMessageId)!;
+    // Read newest first through the request, so the first message read at
+    // the request's order is that order's last step.
+    const last = read.find((doc) => doc.order === request.order)!;
+    const saved = await addMessagesHandler(
+      ctx,
+      {
+        threadId: args.threadId,
+        agentName: args.agentName,
+        promptMessageId: request._id,
+        failPendingSteps: false,
+        messages: [{ message: plan.message }],
+      },
+      { message: request, lastStepOrder: last.stepOrder },
+    );
     return { messageId: saved.messages[0]._id as Id<"messages"> };
   },
 });
+
+async function* recentMessages(
+  ctx: QueryCtx,
+  threadId: Id<"threads">,
+  read: Doc<"messages">[],
+) {
+  for await (const doc of orderedMessagesStream(ctx, {
+    threadId,
+    sortOrder: "desc",
+  })) {
+    read.push(doc);
+    yield doc;
+    if (read.length === APPROVAL_LOOKUP_MESSAGES) return;
+  }
+}
 
 const cloneMessageArgs = {
   sourceThreadId: v.id("threads"),
