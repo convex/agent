@@ -10,7 +10,7 @@ import { errorToString } from "./utils.js";
 
 const FINAL_TEXT = "Hello from the model";
 const PROVIDER_FAILURE_TEXT = "Mock provider failure";
-const CLEANUP_FAILURE_TEXT = "finalizeMessage rejected";
+const CLEANUP_FAILURE_TEXT = "saving the failure rejected";
 
 function hasKeys(
   value: unknown,
@@ -230,7 +230,11 @@ const streamTextCleanupFailure = app.action({
     const failingCtx = {
       ...ctx,
       runMutation: (async (reference, args) => {
-        if (hasKeys(args, ["messageId", "result"])) {
+        if (
+          hasKeys(args, ["messageId", "result"]) ||
+          (hasKeys(args, ["failPendingSteps"]) &&
+            JSON.stringify(args).includes('"status":"failed"'))
+        ) {
           throw new Error(CLEANUP_FAILURE_TEXT);
         }
         return ctx.runMutation(reference, args);
@@ -256,6 +260,35 @@ const streamTextCleanupFailure = app.action({
       caught = errorToString(error);
     }
     return { providerErrors, aborts, caught };
+  },
+});
+
+const streamTextFullStreamErrors = app.action({
+  args: {
+    threadId: v.string(),
+    returnImmediately: v.boolean(),
+    saveMessages: v.boolean(),
+  },
+  handler: async (ctx, { threadId, returnImmediately, saveMessages }) => {
+    const result = await failingAgent.streamText(
+      ctx,
+      { threadId },
+      { prompt: "Test", onError: () => {} },
+      {
+        saveStreamDeltas: { returnImmediately, throttleMs: 0 },
+        ...(saveMessages ? {} : { storageOptions: { saveMessages: "none" } }),
+      },
+    );
+    const errors: string[] = [];
+    for await (const part of result.fullStream) {
+      if (part.type === "error") errors.push(errorToString(part.error));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const streams = await ctx.runQuery(components.agent.streams.list, {
+      threadId,
+      statuses: ["streaming", "finished", "aborted"],
+    });
+    return { errors, streams: streams.map((s) => s.status) };
   },
 });
 
@@ -364,6 +397,44 @@ const streamTextWithSources = app.action({
   },
 });
 
+// Something else fills the pending message just before the deferred final
+// save, so that save throws.
+const streamTextFinalSaveRejected = app.action({
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) => {
+    const racingCtx = {
+      ...ctx,
+      runMutation: (async (reference, args) => {
+        if (
+          hasKeys(args, ["finishStreamId", "pendingMessageId"]) &&
+          typeof args.finishStreamId === "string" &&
+          typeof args.pendingMessageId === "string"
+        ) {
+          await ctx.runMutation(components.agent.messages.addMessages, {
+            threadId,
+            pendingMessageId: args.pendingMessageId,
+            messages: [
+              { message: { role: "assistant", content: "filled elsewhere" } },
+            ],
+          });
+        }
+        return ctx.runMutation(reference, args);
+      }) as typeof ctx.runMutation,
+    };
+    try {
+      await agent.streamText(
+        racingCtx,
+        { threadId },
+        { prompt: "Test" },
+        { saveStreamDeltas: { chunking: "word", throttleMs: 0 } },
+      );
+    } catch (error) {
+      return errorToString(error);
+    }
+    return null;
+  },
+});
+
 const { api, createTest } = app.defineModules({
   streamText: {
     streamTextReturnImmediately,
@@ -374,10 +445,12 @@ const { api, createTest } = app.defineModules({
     streamTextNoStorage,
     streamTextNoStorageImmediate,
     streamTextCleanupFailure,
+    streamTextFullStreamErrors,
     streamTextRejectedRequest,
     streamTextAbortedMidStream,
     streamTextEmptyNoStorageAwaited,
     streamTextWithSources,
+    streamTextFinalSaveRejected,
   },
 });
 
@@ -569,6 +642,29 @@ describe("streamText abort cleanup", () => {
   });
 });
 
+describe("provider errors reach fullStream and abort the stream", () => {
+  test.each([
+    { returnImmediately: false, saveMessages: true },
+    { returnImmediately: true, saveMessages: true },
+    { returnImmediately: false, saveMessages: false },
+    { returnImmediately: true, saveMessages: false },
+  ])(
+    "returnImmediately: $returnImmediately, saveMessages: $saveMessages",
+    async (args) => {
+      const t = createTest();
+      const threadId = await t.run(async (ctx) =>
+        createThread(ctx, components.agent, { userId: "u1" }),
+      );
+      expect(
+        await t.action(api.streamText.streamTextFullStreamErrors, {
+          threadId,
+          ...args,
+        }),
+      ).toEqual({ errors: [PROVIDER_FAILURE_TEXT], streams: ["aborted"] });
+    },
+  );
+});
+
 describe("provider rejects the first request (issue #387)", () => {
   test.each([
     ["awaited deltas", { chunking: "word" as const, throttleMs: 250 }],
@@ -725,7 +821,7 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
     ).toBe(FINAL_TEXT);
   });
 
-  test("an out of band abort fails the generation instead of saving it", async () => {
+  test("an out of band abort keeps the step that finished before it was seen", async () => {
     const t = createTest();
     const threadId = await t.run(async (ctx) =>
       createThread(ctx, components.agent, { userId: "u1" }),
@@ -743,7 +839,8 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
     expect(streams).toHaveLength(1);
     expect(streams[0].status).toBe("aborted");
 
-    // Nobody gets to save a successful message onto a row someone aborted.
+    // The generation learns of the abort only after its step finished. An
+    // abort stops what hasn't finished, and doesn't rewrite what has.
     const messages = await t.run(async (ctx) =>
       agent.listMessages(ctx, {
         threadId,
@@ -754,10 +851,10 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
       messages.page
         .filter((m) => m.message?.role === "assistant")
         .map((m) => m.status),
-    ).toEqual(["failed"]);
+    ).toEqual(["success"]);
   });
 
-  test("the awaited path captures the stream-level finish chunk", async () => {
+  test("the awaited path keeps every part up to the last step end", async () => {
     const t = createTest();
     const threadId = await t.run(async (ctx) =>
       createThread(ctx, components.agent, { userId: "u1" }),
@@ -790,12 +887,10 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
 
     const parts = deltas.flatMap((d) => d.parts);
     const types = parts.map((p) => p.type);
-    // Unlike the returnImmediately path, nothing stops accepting parts early
-    // here: consumeStream drains at EOF, so the trailing chunks the AI SDK
-    // emits after the last onStepEnd are persisted too.
+    // The answer's save finishes the stream before the stream-level "finish"
+    // chunk, as on the returnImmediately path.
     expect(types.at(0)).toBe("start");
-    expect(types.at(-1)).toBe("finish");
-    expect(types).toContain("finish-step");
+    expect(types.at(-1)).toBe("finish-step");
     expect(
       parts
         .filter((p) => p.type === "text-delta")
@@ -860,5 +955,38 @@ describe("stream finish ownership without message storage", () => {
       }),
     );
     expect(streams.map((s) => s.status)).toEqual(["finished"]);
+  });
+});
+
+describe("the deferred final save fails", () => {
+  test("aborts the stream and rethrows the save error", async () => {
+    const t = createTest();
+    const threadId = await t.run(async (ctx) =>
+      createThread(ctx, components.agent, { userId: "u1" }),
+    );
+
+    const error = await t.action(api.streamText.streamTextFinalSaveRejected, {
+      threadId,
+    });
+
+    expect(error).toContain("can't be filled");
+    const streams = await t.run(async (ctx) =>
+      ctx.runQuery(components.agent.streams.list, {
+        threadId,
+        statuses: ["streaming", "finished", "aborted"],
+      }),
+    );
+    expect(streams.map((s) => s.status)).toEqual(["aborted"]);
+    const assistant = await t.run(async (ctx) =>
+      ctx.runQuery(components.agent.messages.listMessagesByThreadId, {
+        threadId,
+        order: "asc",
+      }),
+    );
+    expect(
+      assistant.page
+        .filter((m) => m.message?.role === "assistant")
+        .map((m) => [m.status, m.text]),
+    ).toEqual([["success", "filled elsewhere"]]);
   });
 });
