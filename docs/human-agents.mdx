@@ -144,37 +144,29 @@ export const humanResponseAsToolCall = internalAction({
     response: v.string(),
     toolCallId: v.string(),
     threadId: v.string(),
-    messageId: v.string(),
   },
   handler: async (ctx, args) => {
-    await agent.saveMessage(ctx, {
+    // Saved next to its call, even if newer messages were saved since.
+    const { messageId } = await agent.addToolOutput(ctx, {
       threadId: args.threadId,
-      message: {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            output: { type: "text", value: args.response },
-            toolCallId: args.toolCallId,
-            toolName: "askHuman",
-          },
-        ],
-      },
-      metadata: {
-        provider: "human",
-        providerMetadata: {
-          human: { name: args.humanName },
-        },
-      },
+      tool: "askHuman",
+      toolCallId: args.toolCallId,
+      output: { humanName: args.humanName, response: args.response },
     });
     // Continue generating a response from the LLM
     await agent.generateText(
       ctx,
       { threadId: args.threadId },
       {
-        promptMessageId: args.messageId,
+        promptMessageId: messageId,
+        tools: { askHuman },
       },
     );
   },
 });
 ```
+
+`askHuman` is a client-side tool (see
+[Client-side tools](./tool-approval.mdx#client-side-tools)), so continue with
+the same tools: if the step asked more than one question, `generateText` throws
+until every call has a response, and you continue from the last one.
