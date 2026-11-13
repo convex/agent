@@ -2,6 +2,7 @@ import {
   embedMany as embedMany_,
   type EmbeddingModel,
   type ModelMessage,
+  type ToolSet,
 } from "ai";
 import { assert } from "convex-helpers";
 import type { MessageDoc } from "../../validators.js";
@@ -141,13 +142,18 @@ export async function fetchRecentAndSearchMessages(
     contextOptions: ContextOptions;
     getEmbedding?: GetEmbedding;
   },
-): Promise<{ recentMessages: MessageDoc[]; searchMessages: MessageDoc[] }> {
+): Promise<{
+  recentMessages: MessageDoc[];
+  searchMessages: MessageDoc[];
+  step?: MessageDoc[];
+}> {
   assert(args.userId || args.threadId, "Specify userId or threadId");
   const opts = args.contextOptions;
   // Fetch the latest messages from the thread
   let included: Set<string> | undefined;
   let recentMessages: MessageDoc[] = [];
   let searchMessages: MessageDoc[] = [];
+  let step: MessageDoc[] | undefined;
   const threadId = args.threadId;
   const targetMessageId =
     args.targetMessageId ?? args.upToAndIncludingMessageId;
@@ -199,6 +205,13 @@ export async function fetchRecentAndSearchMessages(
         next.page.at(-1)?.order === oldest.order &&
         page.at(-1)!.stepOrder > 0
       );
+    }
+    // Without a target, excluding tool messages leaves out the newest order's.
+    if (targetMessageId || !opts.excludeToolMessages) {
+      const order = targetMessageId
+        ? page.find((m) => m._id === targetMessageId)?.order
+        : (page[0]?.order ?? -1);
+      step = order === undefined ? undefined : newestStep(page, order);
     }
     const retained = trimIncompleteOldestOrder(sorted(page));
     included = new Set(retained.map((m) => m._id));
@@ -287,7 +300,98 @@ export async function fetchRecentAndSearchMessages(
     );
   }
   // Ensure we don't include tool messages without a corresponding tool call
-  return { recentMessages, searchMessages };
+  return { recentMessages, searchMessages, step };
+}
+
+// On an order, the newest message that is not a tool message and the tool
+// messages after it, oldest first. Undefined when the newest-first page ends
+// before reaching that message.
+function newestStep(page: MessageDoc[], order: number) {
+  const step: MessageDoc[] = [];
+  for (const doc of page) {
+    if (doc.order !== order) return step.reverse();
+    step.push(doc);
+    if (doc.message?.role !== "tool") return step.reverse();
+  }
+  return page.length === 0 ? step : undefined;
+}
+
+/**
+ * Throws if the step a generation would continue has a call to one of its
+ * client tools (a tool without `execute` that the provider does not run) with
+ * no output yet, since that output must be saved next to its call, before
+ * anything else on the order.
+ * A step with a client call also waits for its approval decisions: continuing
+ * without one would leave the call out, and models call it again.
+ */
+export async function assertClientCallsAnswered(
+  ctx: ActionCtx,
+  component: AgentComponent,
+  args: {
+    threadId: string;
+    promptMessageId: string | undefined;
+    step: MessageDoc[] | undefined;
+    tools: ToolSet | undefined;
+  },
+) {
+  const clientTools = new Set(
+    Object.entries(args.tools ?? {}).flatMap(([name, tool]) =>
+      tool.execute || tool.isProviderExecuted ? [] : [name],
+    ),
+  );
+  if (clientTools.size === 0) return;
+  const step =
+    args.step ??
+    (await ctx.runQuery(component.messages.getNewestStep, {
+      threadId: args.threadId,
+      messageId: args.promptMessageId,
+    }));
+  const message = step[0]?.message;
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return;
+  const answered = new Set<string>();
+  const decided = new Set<string>();
+  for (const doc of step) {
+    if (!Array.isArray(doc.message?.content)) continue;
+    for (const part of doc.message.content) {
+      if (part.type === "tool-result") answered.add(part.toolCallId);
+      if (part.type === "tool-approval-response") decided.add(part.approvalId);
+    }
+  }
+  const requests = new Map(
+    message.content.flatMap((part) =>
+      part.type === "tool-approval-request"
+        ? [[part.toolCallId, part.approvalId] as const]
+        : [],
+    ),
+  );
+  const calls = message.content.flatMap((part) =>
+    part.type === "tool-call" && !part.providerExecuted ? [part] : [],
+  );
+  let hasClientCall = false;
+  for (const part of calls) {
+    if (!clientTools.has(part.toolName) || requests.has(part.toolCallId)) {
+      continue;
+    }
+    hasClientCall = true;
+    if (!answered.has(part.toolCallId)) {
+      throw new Error(
+        `Tool call ${part.toolCallId} (${part.toolName}) has no output yet. Save it with addToolOutput before continuing its step.`,
+      );
+    }
+  }
+  if (!hasClientCall) return;
+  for (const part of calls) {
+    const approvalId = requests.get(part.toolCallId);
+    if (
+      approvalId &&
+      !decided.has(approvalId) &&
+      !answered.has(part.toolCallId)
+    ) {
+      throw new Error(
+        `Tool call ${part.toolCallId} (${part.toolName}) is awaiting approval. Approve or deny it before continuing its step.`,
+      );
+    }
+  }
 }
 
 /**
@@ -616,6 +720,11 @@ export async function fetchContextWithPrompt(
   messages: ModelMessage[];
   order: number | undefined;
   stepOrder: number | undefined;
+  /**
+   * The newest step on the prompt message's order (or the thread's newest
+   * order), oldest first, when the recent messages hold it.
+   */
+  step?: MessageDoc[];
 }> {
   const { threadId, userId, textEmbeddingModel, embeddingModel } = args;
   const effectiveEmbeddingModel = embeddingModel ?? textEmbeddingModel;
@@ -630,10 +739,8 @@ export async function fetchContextWithPrompt(
         ? extractText(args.messages.at(-1)!)
         : undefined;
   // If only a messageId is provided, this will add that message to the end.
-  const { recentMessages, searchMessages } = await fetchRecentAndSearchMessages(
-    ctx,
-    component,
-    {
+  const { recentMessages, searchMessages, step } =
+    await fetchRecentAndSearchMessages(ctx, component, {
       userId,
       threadId,
       targetMessageId: args.promptMessageId,
@@ -656,8 +763,7 @@ export async function fetchContextWithPrompt(
           embeddingModel: effectiveEmbeddingModel,
         };
       },
-    },
-  );
+    });
 
   const promptMessageIndex = args.promptMessageId
     ? recentMessages.findIndex((m) => m._id === args.promptMessageId)
@@ -745,6 +851,7 @@ export async function fetchContextWithPrompt(
     messages: processedMessages,
     order: promptMessage?.order,
     stepOrder: promptMessage?.stepOrder,
+    step,
   };
 }
 
@@ -755,31 +862,36 @@ function approvalContinuation(
   searchMessages: MessageDoc[],
   recentMessages: MessageDoc[],
 ): { approvalIds: Set<string>; storedContext: ModelMessage[] } | undefined {
-  if (
-    promptMessage?.message?.role !== "tool" ||
-    !promptMessage.message.content.some(
-      (part) => part.type === "tool-approval-response",
-    )
-  ) {
-    return undefined;
-  }
+  if (promptMessage?.message?.role !== "tool") return undefined;
   const responseIds = new Set(
     promptMessage.message.content.flatMap((part) =>
       part.type === "tool-approval-response" ? [part.approvalId] : [],
     ),
   );
+  const resultCallIds = new Set(
+    promptMessage.message.content.flatMap((part) =>
+      part.type === "tool-result" ? [part.toolCallId] : [],
+    ),
+  );
+  // A client tool's result continues its step like a decision does when that
+  // step also requested approvals.
   const requestContents = recentMessages.flatMap((doc) =>
     doc.order === promptMessage.order &&
     doc.message?.role === "assistant" &&
     Array.isArray(doc.message.content) &&
+    doc.message.content.some((part) => part.type === "tool-approval-request") &&
     doc.message.content.some(
       (part) =>
-        part.type === "tool-approval-request" &&
-        responseIds.has(part.approvalId),
+        (part.type === "tool-approval-request" &&
+          responseIds.has(part.approvalId)) ||
+        (part.type === "tool-call" && resultCallIds.has(part.toolCallId)),
     )
       ? [doc.message.content]
       : [],
   );
+  if (responseIds.size === 0 && requestContents.length === 0) {
+    return undefined;
+  }
   if (requestContents.length !== 1) {
     throw new Error(
       "Approval continuation requires one complete request message",

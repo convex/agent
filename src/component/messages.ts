@@ -19,6 +19,7 @@ import {
   vMessageStatus,
   vMessageWithMetadataInternal,
   vPaginationResult,
+  vToolResultOutput,
   type MessageDoc,
 } from "../validators.js";
 import { api, internal } from "./_generated/api.js";
@@ -50,7 +51,7 @@ import {
 import { partial } from "convex-helpers/validators";
 import {
   APPROVAL_LOOKUP_MESSAGES,
-  planToolCallApprovals,
+  planToolCallResponses,
 } from "../approvals.js";
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
@@ -456,11 +457,12 @@ function orderedMessagesStream(
     sortOrder: "asc" | "desc";
     startOrder?: number;
     startOrderBound?: "gte" | "eq";
+    statuses?: Doc<"messages">["status"][];
   },
 ) {
   return mergedStream(
     [true, false].flatMap((tool) =>
-      messageStatuses.map((status) =>
+      (args.statuses ?? messageStatuses).map((status) =>
         stream(ctx.db, schema)
           .query("messages")
           .withIndex("threadId_status_tool_order_stepOrder", (q) => {
@@ -612,6 +614,15 @@ export const respondToToolCallApprovals = mutation({
         reason: v.optional(v.string()),
       }),
     ),
+    outputs: v.optional(
+      v.array(
+        v.object({
+          toolCallId: v.string(),
+          toolName: v.string(),
+          output: vToolResultOutput,
+        }),
+      ),
+    ),
   },
   returns: v.object({ messageId: v.id("messages") }),
   handler: async (ctx, args) => {
@@ -620,9 +631,9 @@ export const respondToToolCallApprovals = mutation({
       order: "desc",
       paginationOpts: { cursor: null, numItems: APPROVAL_LOOKUP_MESSAGES },
     });
-    const plan = planToolCallApprovals(
+    const plan = planToolCallResponses(
       page.page,
-      args.decisions,
+      { decisions: args.decisions, outputs: args.outputs ?? [] },
       args.threadId,
     );
     const saved = await addMessagesHandler(ctx, {
@@ -869,6 +880,45 @@ async function listMessagesByThreadIdHandler(
   }
   return messages;
 }
+
+// The step a generation continues when its context does not hold it: on the
+// message's order, or else the thread's newest, the newest message that is not
+// a tool message and the tool messages after it. A call further back than the
+// lookup window cannot get an output (planToolCallResponses), so neither can
+// the step.
+export const getNewestStep = query({
+  args: {
+    threadId: v.id("threads"),
+    messageId: v.optional(v.id("messages")),
+  },
+  returns: v.array(vMessageDoc),
+  handler: async (ctx, args) => {
+    let order: number | undefined;
+    if (args.messageId) {
+      const message = await ctx.db.get("messages", args.messageId);
+      assert(
+        message?.threadId === args.threadId,
+        "messageId must be a message in the thread",
+      );
+      order = message.order;
+    }
+    const step: Doc<"messages">[] = [];
+    for await (const doc of orderedMessagesStream(ctx, {
+      threadId: args.threadId,
+      sortOrder: "desc",
+      startOrder: order,
+      startOrderBound: "eq",
+      statuses: ["success"],
+    })) {
+      order ??= doc.order;
+      if (doc.order !== order) break;
+      step.push(doc);
+      if (doc.message?.role !== "tool") break;
+      if (step.length === APPROVAL_LOOKUP_MESSAGES) break;
+    }
+    return step.reverse().map(publicMessage);
+  },
+});
 
 export const getMessagesByIds = query({
   args: { messageIds: v.array(v.id("messages")) },
