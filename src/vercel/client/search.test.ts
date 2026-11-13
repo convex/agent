@@ -492,6 +492,7 @@ describe("search.ts", () => {
         excludeToolMessages: undefined,
         statuses: ["success"],
         upToAndIncludingMessageId: undefined,
+        view: "model",
       });
 
       expect(result.length).toBe(2);
@@ -725,6 +726,7 @@ describe("search.ts", () => {
         upToAndIncludingMessageId: undefined,
         order: "desc",
         statuses: ["success"],
+        view: "model",
       });
     });
 
