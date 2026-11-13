@@ -24,11 +24,15 @@ example.
 ```ts
 import { paginationOptsValidator } from "convex/server";
 import { v } from "convex/values";
-import { listUIMessages } from "@convex-dev/agent";
+import {
+  listUIMessages,
+  vStreamUIMessagesReturnValue,
+} from "@convex-dev/agent";
 import { components } from "./_generated/api";
 
 export const listThreadMessages = query({
   args: { threadId: v.string(), paginationOpts: paginationOptsValidator },
+  returns: vStreamUIMessagesReturnValue,
   handler: async (ctx, args) => {
     await authorizeThreadAccess(ctx, threadId);
 

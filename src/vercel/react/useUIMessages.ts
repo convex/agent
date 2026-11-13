@@ -86,6 +86,7 @@ export type UIMessagesQueryResult<
  *     streamArgs: vStreamArgs,
  *     ... other arguments you want
  *   },
+ *   returns: vStreamUIMessagesReturnValue,
  *   handler: async (ctx, args) => {
  *     // await authorizeThreadAccess(ctx, threadId);
  *     // NOTE: listUIMessages returns UIMessages, not MessageDocs.
