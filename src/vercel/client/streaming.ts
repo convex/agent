@@ -722,6 +722,12 @@ export function compressUIMessageChunks(
       } else {
         compressed.push(part);
       }
+    } else if (part.type === "tool-input-delta") {
+      if (last?.type === part.type && part.toolCallId === last.toolCallId) {
+        last.inputTextDelta += part.inputTextDelta;
+      } else {
+        compressed.push(part);
+      }
     } else {
       compressed.push(part);
     }
