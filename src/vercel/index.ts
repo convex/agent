@@ -192,6 +192,7 @@ export {
   listStreams,
   syncStreams,
   vStreamMessagesReturnValue,
+  vStreamUIMessagesReturnValue,
 } from "./client/streaming.js";
 export {
   createThread,

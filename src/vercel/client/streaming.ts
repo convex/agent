@@ -7,10 +7,12 @@ import {
   type ToolSet,
   type UIMessageChunk,
 } from "ai";
-import { v } from "convex/values";
+import type { PaginationResult } from "convex/server";
+import { v, type VObject } from "convex/values";
 import { errorToString } from "../../errors.js";
 import {
   vMessageDoc,
+  vMessageStatus,
   vPaginationResult,
   vStreamDelta,
   vStreamMessage,
@@ -26,16 +28,54 @@ import type {
   QueryCtx,
   SyncStreamsReturnValue,
 } from "./types.js";
+import type { UIMessage } from "../UIMessages.js";
 
+const vSyncStreamsReturnValue = v.optional(
+  v.union(
+    v.object({ kind: v.literal("list"), messages: v.array(vStreamMessage) }),
+    v.object({ kind: v.literal("deltas"), deltas: v.array(vStreamDelta) }),
+  ),
+);
+
+/** The `returns` of a query for `useThreadMessages`, from `listMessages`. */
 export const vStreamMessagesReturnValue = v.object({
   ...vPaginationResult(vMessageDoc).fields,
-  streams: v.optional(
-    v.union(
-      v.object({ kind: v.literal("list"), messages: v.array(vStreamMessage) }),
-      v.object({ kind: v.literal("deltas"), deltas: v.array(vStreamDelta) }),
-    ),
-  ),
+  streams: vSyncStreamsReturnValue,
 });
+
+// `parts` and `metadata` depend on the app's tools, data parts and metadata,
+// so they aren't checked. vStreamUIMessagesReturnValue is still typed with
+// UIMessage, so `useUIMessages` keeps their types for queries that declare it.
+const vUIMessage = v.object({
+  id: v.string(),
+  role: v.union(v.literal("system"), v.literal("user"), v.literal("assistant")),
+  parts: v.array(v.any()),
+  metadata: v.optional(v.any()),
+  key: v.string(),
+  order: v.number(),
+  stepOrder: v.number(),
+  status: v.union(v.literal("streaming"), vMessageStatus),
+  agentName: v.optional(v.string()),
+  userId: v.optional(v.string()),
+  text: v.string(),
+  _creationTime: v.number(),
+});
+
+const vStreamUIMessagesFields = {
+  ...vPaginationResult(vUIMessage).fields,
+  streams: vSyncStreamsReturnValue,
+};
+
+/**
+ * The `returns` of a query for `useUIMessages`, from `listUIMessages` and
+ * optionally `syncStreams`.
+ */
+export const vStreamUIMessagesReturnValue = v.object(
+  vStreamUIMessagesFields,
+) as unknown as VObject<
+  PaginationResult<UIMessage> & { streams?: SyncStreamsReturnValue },
+  typeof vStreamUIMessagesFields
+>;
 
 /**
  * A function that handles fetching stream deltas, used with the React hooks
