@@ -597,7 +597,7 @@ function createAssistantUIMessage<
           const errorText =
             message.error ||
             (hasError
-              ? outputType === "error-json"
+              ? outputType === "error-json" && typeof output !== "string"
                 ? JSON.stringify(output)
                 : String(output)
               : undefined);
