@@ -46,6 +46,7 @@ import {
   finishHandler,
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
+  abortById,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -208,6 +209,7 @@ const addMessagesArgs = {
   hideFromUserIdSearch: v.optional(v.boolean()),
   // If provided, finish this stream atomically with the message save.
   // This prevents UI flickering from separate mutations (issue #181).
+  // Failed messages abort it instead.
   finishStreamId: v.optional(v.id("streamingMessages")),
 };
 export const addMessages = mutation({
@@ -426,7 +428,13 @@ async function addMessagesHandler(
   }
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
-  if (finishStreamId) {
+  const failed = toReturn.find((m) => m.status === "failed");
+  if (finishStreamId && failed) {
+    await abortById(ctx, {
+      streamId: finishStreamId,
+      reason: failed.error ?? "The generation failed",
+    });
+  } else if (finishStreamId) {
     await finishHandler(ctx, {
       streamId: finishStreamId,
     });
