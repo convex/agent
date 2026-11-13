@@ -2,6 +2,7 @@ import { assert } from "convex-helpers";
 import { describe, expect, it } from "vitest";
 import { toUIMessages } from "./UIMessages.js";
 import type { MessageDoc } from "../validators.js";
+import { projectPersistedUIMessageChunks } from "../streaming/materializePersistedUIMessageChunks.js";
 
 // Helper to create a base message doc
 function baseMessageDoc(overrides: Partial<MessageDoc> = {}): MessageDoc {
@@ -908,7 +909,7 @@ describe("toUIMessages", () => {
     const toolResult = (
       output:
         | { type: "error-text"; value: string }
-        | { type: "error-json"; value: { code: number } },
+        | { type: "error-json"; value: { code: number } | string },
     ) =>
       baseMessageDoc({
         _id: "msg2",
@@ -960,6 +961,84 @@ describe("toUIMessages", () => {
       expect(part.state).toBe("output-error");
       expect(part.errorText).toBe('{"code":42}');
     });
+
+    it("renders a string error-json value as errorText unchanged", () => {
+      const part = toolPart([
+        toolCall,
+        toolResult({ type: "error-json", value: "max_uses_exceeded" }),
+      ]);
+      expect(part.state).toBe("output-error");
+      expect(part.errorText).toBe("max_uses_exceeded");
+    });
+
+    it("renders an isError json result holding a bigint as its string", () => {
+      const result = baseMessageDoc({
+        _id: "msg2",
+        order: 1,
+        stepOrder: 2,
+        tool: true,
+        message: {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call1",
+              toolName: "explode",
+              output: { type: "json", value: 42n },
+              isError: true,
+            },
+          ],
+        },
+      });
+      for (const messages of [[toolCall, result], [result]]) {
+        const part = toolPart(messages);
+        expect(part.state).toBe("output-error");
+        expect(part.errorText).toBe("42");
+      }
+    });
+
+    // https://github.com/convex/agent/issues/463
+    it.each([
+      "max_uses_exceeded",
+      '{"type":"web_search_tool_result_error","errorCode":"max_uses_exceeded"}',
+    ])(
+      "reloads a saved provider-executed tool error with its streamed errorText %s",
+      (errorText) => {
+        const saved = projectPersistedUIMessageChunks(
+          {
+            streamId: "s1",
+            status: "finished",
+            format: "UIMessageChunk",
+            order: 0,
+            stepOrder: 0,
+          },
+          [
+            {
+              type: "tool-input-available",
+              toolCallId: "c1",
+              toolName: "web_search",
+              input: { query: "convex" },
+              providerExecuted: true,
+            },
+            {
+              type: "tool-output-error",
+              toolCallId: "c1",
+              errorText,
+              providerExecuted: true,
+            },
+          ],
+          { status: "success" },
+        );
+        const docs = saved.map(({ message }, i) =>
+          baseMessageDoc({ _id: `m${i}`, stepOrder: i, tool: true, message }),
+        );
+        const part = toUIMessages(docs)[0].parts.find(
+          (p) => "toolCallId" in p && p.toolCallId === "c1",
+        ) as any;
+        expect(part.state).toBe("output-error");
+        expect(part.errorText).toBe(errorText);
+      },
+    );
   });
 
   describe("userId preservation", () => {
