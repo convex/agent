@@ -7,5 +7,6 @@
   "fixed": [],
   "linked": [],
   "updateInternalDependencies": "patch",
+  "bumpVersionsWithWorkspaceProtocolOnly": true,
   "ignore": ["@convex-dev/agent-playground"]
 }

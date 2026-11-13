@@ -28,7 +28,7 @@ jobs:
       - name: Node setup
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          cache-dependency-path: package.json
+          cache-dependency-path: package-lock.json
           node-version: "24.22.1"
           cache: "npm"
 

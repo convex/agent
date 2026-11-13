@@ -3,7 +3,6 @@
 ## Running locally
 
 ```sh
-npm ci
 npm run setup
 npm run dev
 ```

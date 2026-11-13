@@ -103,6 +103,16 @@ jobs:
           package-manager-cache: false
       - run: npm ci
       - run: npm run build
+      - name: Verify the bundled Agent matches the published build
+        run: |
+          agent_version=$(jq -r .version package.json)
+          published_dir=$(mktemp -d)
+          npm pack "@convex-dev/agent@$agent_version" --ignore-scripts --pack-destination "$published_dir"
+          tar -xzf "$published_dir"/*.tgz -C "$published_dir" package/dist
+          diff -r "$published_dir/package/dist" dist || {
+            echo 'Agent build differs from the published release; release Agent first' >&2
+            exit 1
+          }
       - run: npm run check
       - run: npm run build -w playground
       - run: npm run lint -w playground
