@@ -3,6 +3,7 @@ import { v } from "convex/values";
 import { z } from "zod/v4";
 import { Agent } from "../index.js";
 import type { MessageDoc } from "../../validators.js";
+import type { ActionCtx } from "./types.js";
 import { app, components } from "./setup.test.js";
 import { mockModel } from "./mockModel.js";
 
@@ -69,7 +70,57 @@ const run = app.action({
   },
 });
 
-const { api, createTest } = app.defineModules({ streamObject: { run } });
+const failedSave = app.action({
+  args: {},
+  handler: async (ctx) => {
+    const agent = new Agent(components.agent, {
+      name: "stream-object",
+      languageModel: mockModel({
+        content: [{ type: "text", text: JSON.stringify({ hello: "world" }) }],
+      }),
+    });
+    const { threadId } = await agent.createThread(ctx, {});
+    const failing: ActionCtx = {
+      ...ctx,
+      runMutation: (async (reference, mutationArgs) => {
+        if ((mutationArgs as { pendingMessageId?: string }).pendingMessageId) {
+          throw new Error("object save failed");
+        }
+        return ctx.runMutation(reference, mutationArgs);
+      }) as ActionCtx["runMutation"],
+    };
+    const result = await agent.streamObject(
+      failing,
+      { threadId },
+      { prompt: "Go.", schema: z.object({ hello: z.string() }) },
+    );
+    // The AI SDK closes fullStream once onFinish has returned.
+    for await (const _ of result.fullStream) {
+      // Drain.
+    }
+    const { page } = await ctx.runQuery(
+      components.agent.messages.listMessagesByThreadId,
+      { threadId, order: "asc" },
+    );
+    return (page as MessageDoc[]).map((m) => [
+      m.message?.role,
+      m.status,
+      m.error ?? null,
+    ]);
+  },
+});
+
+const { api, createTest } = app.defineModules({
+  streamObject: { run, failedSave },
+});
+
+test("a streamed object that fails to save fails its pending message", async () => {
+  const t = createTest();
+  expect(await t.action(api.streamObject.failedSave, {})).toEqual([
+    ["user", "success", null],
+    ["assistant", "failed", "object save failed"],
+  ]);
+});
 
 test("a streamed object that fails its schema fails its pending message", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
