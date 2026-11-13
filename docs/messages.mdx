@@ -52,6 +52,24 @@ UIs that work with the various "parts" on the UIMessage.
 
 If you want to get MessageDocs, you can use `listMessages` instead.
 
+### Text-only lists
+
+If your UI only shows each message's text, pass `textOnly: true` to
+`listUIMessages` or `listMessages`. Each message comes back as its role and
+text, without tool messages, reasoning, sources, files or provider metadata. The
+page sends a fraction of a full one to the client, and doesn't read tool
+messages at all.
+
+```ts
+const paginated = await listUIMessages(ctx, components.agent, {
+  ...args,
+  textOnly: true,
+});
+```
+
+Streamed messages still show every part while they stream, then show only their
+text once saved.
+
 ## Showing messages in React
 
 Examples:
