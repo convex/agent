@@ -185,12 +185,18 @@ export async function startGeneration<
   fail: (reason: string) => Promise<void>;
   getSavedMessages: () => MessageDoc[];
 }> {
-  const userId =
-    opts.userId ??
-    (threadId &&
-      (await ctx.runQuery(component.threads.getThread, { threadId }))
-        ?.userId) ??
-    undefined;
+  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
+  // Unless something reads it before the first save, the userId comes back on
+  // the pending message that save creates.
+  const userIdNeededFirst =
+    saveMessages === "none" ||
+    !!opts.contextHandler ||
+    (!!opts.usageHandler && !!(opts.embeddingModel ?? opts.textEmbeddingModel));
+  let userId = opts.userId ?? undefined;
+  if (userId === undefined && threadId && userIdNeededFirst) {
+    userId = (await ctx.runQuery(component.threads.getThread, { threadId }))
+      ?.userId;
+  }
 
   const context = await fetchContextWithPrompt(ctx, component, {
     ...opts,
@@ -210,7 +216,6 @@ export async function startGeneration<
     );
   }
 
-  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
   const { promptMessageId, pendingMessage, savedMessages } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
@@ -227,6 +232,8 @@ export async function startGeneration<
           pendingMessage: undefined,
           savedMessages: [] as MessageDoc[],
         };
+
+  userId ??= pendingMessage?.userId;
 
   const order = pendingMessage?.order ?? context.order;
   const stepOrder = pendingMessage?.stepOrder ?? context.stepOrder;
