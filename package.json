@@ -133,6 +133,7 @@
     "convex-test": "0.0.64",
     "dayjs": "1.11.20",
     "dotenv": "18.0.1",
+    "esbuild": "0.27.0",
     "eslint": "10.13.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-react-refresh": "0.5.2",
