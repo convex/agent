@@ -7,7 +7,7 @@ import {
   vStreamDelta,
   vStreamMessage,
 } from "../validators.js";
-import { api, internal } from "./_generated/api.js";
+import { internal } from "./_generated/api.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import {
   internalMutation,
@@ -20,7 +20,11 @@ import schema from "./schema.js";
 import { stream } from "convex-helpers/server/stream";
 import { mergedStream } from "convex-helpers/server/stream";
 import { paginator } from "convex-helpers/server/pagination";
-import type { WithoutSystemFields } from "convex/server";
+import type {
+  TransactionLimits,
+  TransactionMetrics,
+  WithoutSystemFields,
+} from "convex/server";
 import {
   getPersistedUIMessageChunkParts,
   projectPersistedUIMessageChunks,
@@ -83,6 +87,55 @@ export function deletionCursor(cursor: string | null | undefined) {
     // Not JSON, so not a paginator cursor.
   }
   return cursor;
+}
+
+// Convex logs a warning once a transaction passes 80% of a limit, so batches
+// stop there. That also leaves room for the work after them, and for a step
+// rolled back on its cap, since a limit trips on the read that crosses it.
+const BATCH_SHARE_OF_LIMITS = 0.8;
+const BATCH_METRICS = [
+  "bytesRead",
+  "bytesWritten",
+  "databaseQueries",
+  "documentsRead",
+  "documentsWritten",
+  "functionsScheduled",
+  "scheduledFunctionArgsBytes",
+] as const;
+
+/**
+ * Repeats `step` while the transaction has room for another step as large as
+ * the ones before it. Each repeat is a sub-transaction capped at what is left
+ * of the batch's share of the limits, so a step that turns out larger is
+ * rolled back and left to the next transaction instead of failing this one.
+ */
+export async function repeatWhileHeadroom<R extends { isDone: boolean }>(
+  ctx: MutationCtx,
+  result: R,
+  stepsSoFar: number,
+  step: (result: R, transactionLimits: TransactionLimits) => Promise<R>,
+): Promise<R> {
+  let previous: TransactionMetrics | undefined;
+  const largest: TransactionLimits = {};
+  while (!result.isDone) {
+    try {
+      const metrics = await ctx.meta.getTransactionMetrics();
+      const limits: TransactionLimits = {};
+      for (const key of BATCH_METRICS) {
+        const { used, remaining } = metrics[key];
+        const cost = previous ? used - previous[key].used : used / stepsSoFar;
+        largest[key] = Math.max(largest[key] ?? 0, cost);
+        limits[key] =
+          Math.floor((used + remaining) * BATCH_SHARE_OF_LIMITS) - used;
+        if (limits[key] <= 0 || limits[key] < largest[key]) return result;
+      }
+      previous = metrics;
+      result = await step(result, limits);
+    } catch {
+      return result;
+    }
+  }
+  return result;
 }
 
 // Half the 16 MiB read limit across a request's cursors.
@@ -414,7 +467,7 @@ async function scheduleStreamDeletion(
 ) {
   return ctx.scheduler.runAfter(
     DELETE_STREAM_DELAY,
-    api.streams.deleteStreamAsync,
+    internal.streams._deleteStreamAsync,
     { streamId },
   );
 }
@@ -560,89 +613,170 @@ export async function deleteStreamsPageForThreadId(
   return { isDone: false, streamOrder: streamMessage.order, deltaCursor };
 }
 
+const deleteThreadStreamsArgs = {
+  threadId: v.id("threads"),
+  streamOrder: v.optional(v.number()),
+  deltaCursor: v.optional(v.string()),
+};
+const deleteThreadStreamsReturns = v.object({
+  isDone: v.boolean(),
+  streamOrder: v.optional(v.number()),
+  deltaCursor: v.optional(v.string()),
+});
+type DeleteThreadStreamsResult = {
+  isDone: boolean;
+  streamOrder?: number;
+  deltaCursor?: string;
+};
+
 export const deleteStreamsPageForThreadIdMutation = internalMutation({
-  args: {
-    threadId: v.id("threads"),
-    streamOrder: v.optional(v.number()),
-    deltaCursor: v.optional(v.string()),
-  },
-  returns: v.object({
-    isDone: v.boolean(),
-    streamOrder: v.optional(v.number()),
-    deltaCursor: v.optional(v.string()),
-  }),
+  args: deleteThreadStreamsArgs,
+  returns: deleteThreadStreamsReturns,
   handler: deleteStreamsPageForThreadId,
 });
 
 export const deleteAllStreamsForThreadIdAsync = mutation({
-  args: {
-    threadId: v.id("threads"),
-    streamOrder: v.optional(v.number()),
-    deltaCursor: v.optional(v.string()),
-  },
-  returns: v.object({
-    isDone: v.boolean(),
-    streamOrder: v.optional(v.number()),
-    deltaCursor: v.optional(v.string()),
-  }),
-  handler: async (
+  args: deleteThreadStreamsArgs,
+  returns: deleteThreadStreamsReturns,
+  handler: (ctx, args) => deleteAllStreamsForThreadIdBatch(ctx, args, false),
+});
+
+export const _deleteAllStreamsForThreadIdAsync = internalMutation({
+  args: deleteThreadStreamsArgs,
+  returns: deleteThreadStreamsReturns,
+  handler: (ctx, args) => deleteAllStreamsForThreadIdBatch(ctx, args, true),
+});
+
+async function deleteAllStreamsForThreadIdBatch(
+  ctx: MutationCtx,
+  args: { threadId: Id<"threads">; streamOrder?: number; deltaCursor?: string },
+  repeat: boolean,
+): Promise<DeleteThreadStreamsResult> {
+  let result: DeleteThreadStreamsResult = await deleteStreamsPageForThreadId(
     ctx,
     args,
-  ): Promise<{
-    isDone: boolean;
-    streamOrder?: number;
-    deltaCursor?: string;
-  }> => {
-    const result = await deleteStreamsPageForThreadId(ctx, args);
-    if (!result.isDone) {
-      await ctx.scheduler.runAfter(
-        0,
-        api.streams.deleteAllStreamsForThreadIdAsync,
-        {
-          threadId: args.threadId,
-          streamOrder: result.streamOrder,
-          deltaCursor: result.deltaCursor,
-        },
-      );
-    } else {
-      await ctx.db.delete("threads", args.threadId);
-    }
-    return result;
-  },
+  );
+  if (repeat) {
+    result = await repeatWhileHeadroom(
+      ctx,
+      result,
+      1,
+      (previous, transactionLimits): Promise<DeleteThreadStreamsResult> =>
+        ctx.runMutation(
+          internal.streams.deleteStreamsPageForThreadIdMutation,
+          {
+            threadId: args.threadId,
+            streamOrder: previous.streamOrder,
+            deltaCursor: previous.deltaCursor,
+          },
+          { transactionLimits },
+        ),
+    );
+  }
+  if (!result.isDone) {
+    await ctx.scheduler.runAfter(
+      0,
+      internal.streams._deleteAllStreamsForThreadIdAsync,
+      {
+        threadId: args.threadId,
+        streamOrder: result.streamOrder,
+        deltaCursor: result.deltaCursor,
+      },
+    );
+  } else {
+    await ctx.db.delete("threads", args.threadId);
+  }
+  return result;
+}
+
+type DeleteStreamPageResult = { isDone: boolean; cursor: string };
+
+async function deleteStreamPage(
+  ctx: MutationCtx,
+  args: { streamId: Id<"streamingMessages">; cursor?: string },
+): Promise<DeleteStreamPageResult> {
+  const deltas = await deletePageForStreamId(ctx, args);
+  return { isDone: deltas.isDone, cursor: deltas.continueCursor };
+}
+
+export const _deleteStreamPage = internalMutation({
+  args: { streamId: v.id("streamingMessages"), cursor: v.optional(v.string()) },
+  returns: v.object({ isDone: v.boolean(), cursor: v.string() }),
+  handler: deleteStreamPage,
 });
+
+function repeatStreamPages(
+  ctx: MutationCtx,
+  streamId: Id<"streamingMessages">,
+  result: DeleteStreamPageResult,
+  pages: number,
+) {
+  return repeatWhileHeadroom(
+    ctx,
+    result,
+    pages,
+    (previous, transactionLimits): Promise<DeleteStreamPageResult> =>
+      ctx.runMutation(
+        internal.streams._deleteStreamPage,
+        { streamId, cursor: previous.cursor },
+        { transactionLimits },
+      ),
+  );
+}
 
 export const deleteStreamSync = mutation({
   args: { streamId: v.id("streamingMessages") },
   returns: v.null(),
   handler: async (ctx, args) => {
-    let deltas = await deletePageForStreamId(ctx, args);
-    for (let pages = 1; !deltas.isDone; pages++) {
-      if (pages >= MAX_SYNC_DELETE_PAGES) {
-        throw new Error(
-          `Stream ${args.streamId} has too many deltas to delete in one transaction; use deleteStreamAsync`,
-        );
-      }
-      deltas = await deletePageForStreamId(ctx, {
-        ...args,
-        cursor: deltas.continueCursor,
-      });
+    let result = await deleteStreamPage(ctx, args);
+    let pages = 1;
+    for (; !result.isDone && pages < MAX_SYNC_DELETE_PAGES; pages++) {
+      result = await deleteStreamPage(ctx, { ...args, cursor: result.cursor });
     }
+    result = await repeatStreamPages(ctx, args.streamId, result, pages);
+    if (!result.isDone) {
+      throw new Error(
+        `Stream ${args.streamId} has too many deltas to delete in one transaction; use deleteStreamAsync`,
+      );
+    }
+    return null;
   },
 });
 
+const deleteStreamArgs = {
+  streamId: v.id("streamingMessages"),
+  cursor: v.optional(v.string()),
+};
+
 export const deleteStreamAsync = mutation({
-  args: { streamId: v.id("streamingMessages"), cursor: v.optional(v.string()) },
+  args: deleteStreamArgs,
   returns: v.null(),
-  handler: async (ctx, args) => {
-    const result = await deletePageForStreamId(ctx, args);
-    if (!result.isDone) {
-      await ctx.scheduler.runAfter(0, api.streams.deleteStreamAsync, {
-        streamId: args.streamId,
-        cursor: result.continueCursor,
-      });
-    }
-  },
+  handler: (ctx, args) => deleteStreamBatch(ctx, args, false),
 });
+
+export const _deleteStreamAsync = internalMutation({
+  args: deleteStreamArgs,
+  returns: v.null(),
+  handler: (ctx, args) => deleteStreamBatch(ctx, args, true),
+});
+
+async function deleteStreamBatch(
+  ctx: MutationCtx,
+  args: { streamId: Id<"streamingMessages">; cursor?: string },
+  repeat: boolean,
+): Promise<null> {
+  let result = await deleteStreamPage(ctx, args);
+  if (repeat) {
+    result = await repeatStreamPages(ctx, args.streamId, result, 1);
+  }
+  if (!result.isDone) {
+    await ctx.scheduler.runAfter(0, internal.streams._deleteStreamAsync, {
+      streamId: args.streamId,
+      cursor: result.cursor,
+    });
+  }
+  return null;
+}
 
 export const deleteAllStreamsForThreadIdSync = action({
   args: { threadId: v.id("threads") },
