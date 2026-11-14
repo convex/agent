@@ -1,6 +1,7 @@
 import {
   type UIMessage as AIMessage,
   type AssistantContent,
+  type AssistantModelMessage,
   type ModelMessage,
   type DataContent,
   type FilePart,
@@ -326,9 +327,10 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     sources: hasToolMessage ? undefined : step.sources,
   } satisfies Omit<MessageWithMetadata, "message" | "text" | "fileIds">;
   const toolFields = { sources: step.sources };
+  const toSerialize = withStepCitations(step, messagesToSerialize);
 
   const messages: MessageWithMetadata[] = await Promise.all(
-    messagesToSerialize.map(async (msg): Promise<MessageWithMetadata> => {
+    toSerialize.map(async (msg): Promise<MessageWithMetadata> => {
       const { message, fileIds } = await serializeMessage(ctx, component, msg);
       return parse(vMessageWithMetadata, {
         message,
@@ -339,6 +341,110 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     }),
   );
   return { messages };
+}
+
+/**
+ * Response messages leave out the citations of the step's text, and text that
+ * is empty, which a provider can still cite on. They are put back on the
+ * step's assistant message, whose parts are the step's content in order less
+ * what `toResponseMessages` skips, or on a new one when the SDK made none.
+ * Anything else is saved as it is.
+ */
+function withStepCitations<TOOLS extends ToolSet>(
+  step: StepResult<TOOLS>,
+  messages: ModelMessage[],
+): ModelMessage[] {
+  if (
+    !step.content.some((part) => part.type === "text" && part.citations?.length)
+  ) {
+    return messages;
+  }
+  const madeAssistant = step.content.some(
+    (part) =>
+      responsePartType(part) !== undefined &&
+      !(part.type === "text" && part.text.length === 0),
+  );
+  let index = -1;
+  for (let i = messages.length - 1; i >= 0 && index === -1; i--) {
+    const message = messages[i];
+    if (
+      message.role === "assistant" &&
+      (madeAssistant || message.content.length === 0)
+    ) {
+      index = i;
+    }
+  }
+  if (index === -1 && madeAssistant) {
+    return messages;
+  }
+  const original: AssistantModelMessage =
+    index === -1
+      ? { role: "assistant", content: [] }
+      : (messages[index] as AssistantModelMessage);
+  if (typeof original.content === "string") {
+    return messages;
+  }
+  const content: AssistantPart[] = [];
+  let next = 0;
+  for (const part of step.content) {
+    if (part.type === "text" && part.text.length === 0) {
+      if (part.citations?.length) {
+        content.push({
+          type: "text",
+          text: "",
+          citations: part.citations,
+          ...(part.providerMetadata
+            ? { providerOptions: part.providerMetadata }
+            : {}),
+        } as TextPart);
+      }
+      continue;
+    }
+    const type = responsePartType(part);
+    if (type === undefined) {
+      continue;
+    }
+    const responsePart = original.content[next++];
+    if (responsePart?.type !== type) {
+      return messages;
+    }
+    content.push(
+      part.type === "text" &&
+        responsePart.type === "text" &&
+        part.citations?.length
+        ? ({ ...responsePart, citations: part.citations } as TextPart)
+        : responsePart,
+    );
+  }
+  if (next !== original.content.length) {
+    return messages;
+  }
+  const message = { ...original, content };
+  return index === -1
+    ? [...messages, message]
+    : [...messages.slice(0, index), message, ...messages.slice(index + 1)];
+}
+
+type AssistantPart = Exclude<AssistantContent, string>[number];
+
+function responsePartType(
+  part: StepResult<ToolSet>["content"][number],
+): AssistantPart["type"] | undefined {
+  switch (part.type) {
+    case "text":
+    case "custom":
+    case "reasoning":
+    case "file":
+    case "reasoning-file":
+    case "tool-call":
+    case "tool-approval-request":
+      return part.type;
+    case "tool-result":
+    case "tool-error":
+      return part.providerExecuted ? "tool-result" : undefined;
+    default:
+      return undefined;
+  }
 }
 
 export async function serializeObjectResult(
@@ -406,6 +512,9 @@ export async function serializeContent(
           return {
             type: part.type,
             text: part.text,
+            ...("citations" in part && part.citations
+              ? { citations: part.citations }
+              : {}),
             ...metadata,
           } satisfies Infer<typeof vTextPart>;
         }
