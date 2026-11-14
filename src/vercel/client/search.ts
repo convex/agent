@@ -71,7 +71,8 @@ export type GetEmbedding = (text: string) => Promise<
 >;
 
 /**
- * Fetch the context messages for a thread.
+ * Fetch the context messages for a thread. Each holds what the model reads,
+ * without usage, provider metadata, sources or warnings.
  * @param ctx Either a query, mutation, or action ctx.
  *   If it is not an action context, you can't do text or
  *   vector search.
@@ -160,6 +161,7 @@ export async function fetchRecentAndSearchMessages(
         upToAndIncludingMessageId: targetMessageId,
         order: "desc",
         statuses: ["success"],
+        view: "model",
       });
     const firstPage = await fetchRecentPage(
       opts.recentMessages ?? DEFAULT_RECENT_MESSAGES,
@@ -183,6 +185,7 @@ export async function fetchRecentAndSearchMessages(
           (
             await ctx.runQuery(component.messages.getMessagesByIds, {
               messageIds: [targetMessageId],
+              view: "model",
             })
           )[0]
         )?.order === oldest.order;

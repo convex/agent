@@ -908,6 +908,9 @@ export class Agent<
    * @param args.excludeToolMessages Whether to exclude tool messages.
    *   False by default.
    * @param args.statuses What statuses to include. All by default.
+   * @param args.textOnly Return each message as its role and text, skipping
+   *   tool messages and the fields only a full read needs, like provider
+   *   metadata. Cheaper to read. False by default.
    * @returns The MessageDoc's in a format compatible with usePaginatedQuery.
    */
   async listMessages(
@@ -917,6 +920,7 @@ export class Agent<
       paginationOpts: PaginationOptions;
       excludeToolMessages?: boolean;
       statuses?: MessageStatus[];
+      textOnly?: boolean;
     },
   ): Promise<PaginationResult<MessageDoc>> {
     return listMessages(ctx, this.component, args);
@@ -1085,6 +1089,7 @@ export class Agent<
     const messages = (
       await ctx.runQuery(this.component.messages.getMessagesByIds, {
         messageIds: args.messageIds,
+        view: "model",
       })
     ).filter((m): m is NonNullable<typeof m> => m !== null);
     if (messages.length !== args.messageIds.length) {

@@ -1066,18 +1066,30 @@ describe("agent", () => {
           parts: [{ type: "text-start", id: "text" }],
         }),
       );
-      for (let i = 0; i < deltas.length; i += 4000) {
-        const batch = deltas.slice(i, i + 4000);
+      // Batches stay under the tests' smallest write budget.
+      for (let i = 0; i < deltas.length; ) {
+        let end = i + 1;
+        let bytes = deltas[i]!.length;
+        while (
+          end < deltas.length &&
+          end - i < 4000 &&
+          bytes + deltas[end]!.length <= 1_000_000
+        ) {
+          bytes += deltas[end++]!.length;
+        }
+        const start = i;
+        const batch = deltas.slice(start, end);
         await t.run(async (ctx) => {
           for (const [j, delta] of batch.entries()) {
             await ctx.db.insert("streamDeltas", {
               streamId,
-              start: i + j + 1,
-              end: i + j + 2,
+              start: start + j + 1,
+              end: start + j + 2,
               parts: [{ type: "text-delta", id: "text", delta }],
             });
           }
         });
+        i = end;
       }
     };
     const finalize = async (
@@ -1151,15 +1163,15 @@ describe("agent", () => {
       // convex-test does not enforce the 1 MiB document ceiling, so a write
       // budget the recovered message exceeds stands in for it.
       name: "a recovered message the store rejects",
-      streams: [fill(3, 300_000)],
+      streams: [fill(4, 300_000)],
       transactionLimits: { bytesWritten: 1024 * 1024 },
     },
     {
       // Each message fits the write budget alone. The second write fails
       // after the first succeeded, so the first must be rolled back too.
       name: "a second recovered message the store rejects",
-      streams: [fill(2, 300_000), fill(2, 300_000)],
-      transactionLimits: { bytesWritten: 1024 * 1024 + 800_000 },
+      streams: [fill(3, 300_000), fill(3, 300_000)],
+      transactionLimits: { bytesWritten: 1024 * 1024 + 300_000 },
     },
     {
       name: "more streams than recovery will attempt",

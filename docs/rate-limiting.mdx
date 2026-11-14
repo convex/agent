@@ -271,7 +271,7 @@ The example includes a simple token estimation function:
 
 ```ts
 import { QueryCtx } from "./_generated/server";
-import { fetchContextMessages } from "@convex-dev/agent";
+import { listMessages } from "@convex-dev/agent";
 import { components } from "./_generated/api";
 
 // This is a rough estimate of the tokens that will be used.
@@ -285,17 +285,18 @@ export async function estimateTokens(
   const promptTokens = question.length / 4;
   // Assume a longer non-zero reply
   const estimatedOutputTokens = promptTokens * 3 + 1;
-  const latestMessages = await fetchContextMessages(ctx, components.agent, {
-    threadId,
-    searchText: question,
-    contextOptions: { recentMessages: 2 },
-  });
+  const latestMessages = threadId
+    ? (
+        await listMessages(ctx, components.agent, {
+          threadId,
+          paginationOpts: { cursor: null, numItems: 2 },
+        })
+      ).page
+    : [];
   // Our new usage will roughly be the previous tokens + the question.
   // The previous tokens include the tokens for the full message history and
   // output tokens, which will be part of our new history.
-  const lastUsageMessage = latestMessages
-    .reverse()
-    .find((message) => message.usage);
+  const lastUsageMessage = latestMessages.find((message) => message.usage);
   const lastPromptTokens = lastUsageMessage?.usage?.totalTokens ?? 1;
   return lastPromptTokens + promptTokens + estimatedOutputTokens;
 }

@@ -185,6 +185,9 @@ If `targetMessageId` is provided, it will only fetch search messages previous to
 that message, and recent messages up to and including that message's "order".
 This enables re-generating a response for an earlier message.
 
+Each message holds what the model reads, without usage, provider metadata,
+sources or warnings. Use `listMessages` for those.
+
 ```ts
 import type { MessageDoc } from "@convex-dev/agent";
 

@@ -28,6 +28,11 @@ export async function listUIMessages(
   args: {
     threadId: string;
     paginationOpts: PaginationOptions;
+    /**
+     * Render each message as its role and text only, skipping tool messages,
+     * reasoning, sources and files. Cheaper to read. False by default.
+     */
+    textOnly?: boolean;
   },
 ): Promise<PaginationResult<UIMessage>> {
   const result = await listMessages(ctx, component, args);

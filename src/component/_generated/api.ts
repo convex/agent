@@ -10,6 +10,7 @@
 
 import type * as apiKeys from "../apiKeys.js";
 import type * as files from "../files.js";
+import type * as messagePayloads from "../messagePayloads.js";
 import type * as messages from "../messages.js";
 import type * as streams from "../streams.js";
 import type * as threads from "../threads.js";
@@ -27,6 +28,7 @@ import { anyApi, componentsGeneric } from "convex/server";
 const fullApi: ApiFromModules<{
   apiKeys: typeof apiKeys;
   files: typeof files;
+  messagePayloads: typeof messagePayloads;
   messages: typeof messages;
   streams: typeof streams;
   threads: typeof threads;
