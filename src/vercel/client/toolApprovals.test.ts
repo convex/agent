@@ -2,7 +2,13 @@ import { stepCountIs, type ModelMessage, type ToolModelMessage } from "ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod/v4";
 import type { Message } from "../../validators.js";
-import { Agent, createTool, type ContextHandler } from "../index.js";
+import {
+  Agent,
+  createTool,
+  docsToModelMessages,
+  type ContextHandler,
+  type ContextOptions,
+} from "../index.js";
 import { MockLanguageModel, mockModel } from "./mockModel.js";
 import { components, initConvexTest } from "./setup.test.js";
 
@@ -1087,6 +1093,96 @@ describe("tool approval semantics", () => {
       expect.stringContaining("Auto-denying unresolved tool approval b"),
     );
   });
+
+  // https://github.com/convex/agent/issues/411
+  const wholeThread =
+    (threadId: string): ContextHandler =>
+    async (ctx) => {
+      const { page } = await agent.listMessages(ctx, {
+        threadId,
+        paginationOpts: { cursor: null, numItems: 200 },
+      });
+      return docsToModelMessages(page.reverse());
+    };
+  function continueWithWindow(
+    s: Scenario,
+    promptMessageId: string,
+    contextOptions: ContextOptions,
+    whole: boolean,
+  ) {
+    return s.t.action(async (ctx) => {
+      const result = await agent.generateText(
+        ctx,
+        { threadId: s.threadId },
+        { promptMessageId },
+        {
+          contextOptions,
+          ...(whole ? { contextHandler: wholeThread(s.threadId) } : {}),
+        },
+      );
+      return result.text;
+    });
+  }
+
+  test.each(
+    [
+      ...[1, 2, 3, 4].map((recentMessages) => ({ recentMessages })),
+      { excludeToolMessages: true },
+    ].flatMap((contextOptions) =>
+      [true, false].map((whole) => [contextOptions, whole] as const),
+    ),
+  )(
+    "continues a later order's approval with %o (whole-thread handler: %s)",
+    async (contextOptions, whole) => {
+      const s = await scenario({ ids: ["a"] });
+      await continueWithWindow(s, await s.approve("a"), contextOptions, whole);
+      await s.addRequest(await s.prompt("Next"), ["x"]);
+
+      expect(
+        await continueWithWindow(
+          s,
+          await s.approve("x"),
+          contextOptions,
+          whole,
+        ),
+      ).toBe("Done");
+
+      expect(executed).toEqual(["a", "x"]);
+      expect(await s.resultIds()).toEqual(["call-a", "call-x"]);
+      if (whole) {
+        expect(partsFor("a").map((part) => part.type)).toEqual([
+          "tool-call",
+          "tool-result",
+        ]);
+      }
+      expectNoDanglingLocalCalls();
+      expectEveryCallAnsweredNext();
+    },
+  );
+
+  test.each<Earlier>(["denied", "approved-not-continued", "pending"])(
+    "an earlier approval outside the window is not run by a whole-thread handler (earlier %s)",
+    async (earlier) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const s = await scenario({ ids: ["a"] });
+      await laterOrder(s, earlier);
+
+      await continueWithWindow(
+        s,
+        await s.approve("x"),
+        { recentMessages: 1 },
+        true,
+      );
+
+      expect(executed).toEqual(["x"]);
+      expect(partsFor("a").map((part) => part.type)).toEqual([
+        "tool-call",
+        "tool-result",
+      ]);
+      expectNoDanglingLocalCalls();
+      expectEveryCallAnsweredNext();
+    },
+  );
 });
 
 describe("approval continuation with excludeToolMessages", () => {
