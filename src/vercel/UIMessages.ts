@@ -335,21 +335,22 @@ function createUserUIMessage<
   const nonStringContent =
     content && typeof content !== "string" ? content : [];
 
-  const partCommon = {
-    state: message.streaming ? ("streaming" as const) : ("done" as const),
-    ...(message.providerMetadata
-      ? { providerMetadata: message.providerMetadata }
-      : {}),
-  };
+  const state = message.streaming ? ("streaming" as const) : ("done" as const);
+  const metadataOf = partProviderMetadata(message, nonStringContent);
 
   const parts: UIMessage<METADATA, DATA_PARTS, TOOLS>["parts"] = [];
   if (text && !nonStringContent.length) {
-    parts.push({ type: "text", text, ...partCommon });
+    parts.push({ type: "text", text, state, ...metadataOf() });
   }
   for (const contentPart of nonStringContent) {
     switch (contentPart.type) {
       case "text":
-        parts.push({ type: "text", text: contentPart.text, ...partCommon });
+        parts.push({
+          type: "text",
+          text: contentPart.text,
+          state,
+          ...metadataOf(contentPart),
+        });
         break;
       case "file":
       case "image":
@@ -466,12 +467,10 @@ function createAssistantUIMessage<
       content && typeof content !== "string" ? content : [];
     const text = extractTextFromMessageDoc(message);
 
-    const partCommon = {
-      state: message.streaming ? ("streaming" as const) : ("done" as const),
-      ...(message.providerMetadata
-        ? { providerMetadata: message.providerMetadata }
-        : {}),
-    };
+    const state = message.streaming
+      ? ("streaming" as const)
+      : ("done" as const);
+    const metadataOf = partProviderMetadata(message, nonStringContent);
 
     // Add reasoning parts
     if (
@@ -481,7 +480,8 @@ function createAssistantUIMessage<
       allParts.push({
         type: "reasoning",
         text: message.reasoning,
-        ...partCommon,
+        state,
+        ...metadataOf(),
       } satisfies ReasoningUIPart);
     }
 
@@ -490,7 +490,8 @@ function createAssistantUIMessage<
       allParts.push({
         type: "text",
         text: text,
-        ...partCommon,
+        state,
+        ...metadataOf(),
       } satisfies TextUIPart);
     }
 
@@ -499,14 +500,18 @@ function createAssistantUIMessage<
       switch (contentPart.type) {
         case "text":
           allParts.push({
-            ...partCommon,
-            ...contentPart,
+            state,
+            ...metadataOf(contentPart),
+            type: "text",
+            text: contentPart.text,
           } satisfies TextUIPart);
           break;
         case "reasoning":
           allParts.push({
-            ...partCommon,
-            ...contentPart,
+            state,
+            ...metadataOf(contentPart),
+            type: "reasoning",
+            text: contentPart.text,
           } satisfies ReasoningUIPart);
           break;
         case "reasoning-file":
@@ -527,6 +532,7 @@ function createAssistantUIMessage<
           allParts.push({
             type: "step-start",
           } satisfies StepStartUIPart);
+          const callProviderMetadata = ownProviderMetadata(contentPart);
           const toolPart: ToolUIPart<TOOLS> = {
             type: `tool-${contentPart.toolName as keyof TOOLS & string}`,
             toolCallId: contentPart.toolCallId,
@@ -535,10 +541,14 @@ function createAssistantUIMessage<
             >,
             providerExecuted: contentPart.providerExecuted,
             ...(message.streaming
-              ? { state: "input-streaming" }
+              ? {
+                  state: "input-streaming",
+                  ...(callProviderMetadata ? { callProviderMetadata } : {}),
+                }
               : {
                   state: "input-available",
-                  callProviderMetadata: message.providerMetadata,
+                  callProviderMetadata:
+                    metadataOf(contentPart).providerMetadata,
                 }),
           };
           allParts.push(toolPart);
@@ -607,7 +617,16 @@ function createAssistantUIMessage<
               "toolCallId" in part &&
               part.toolCallId === contentPart.toolCallId,
           ) as ToolUIPart | undefined;
+          const resultProviderMetadata =
+            metadataOf(contentPart).providerMetadata;
           if (call) {
+            if (resultProviderMetadata) {
+              (
+                call as ToolUIPart & {
+                  resultProviderMetadata?: ProviderOptions;
+                }
+              ).resultProviderMetadata = resultProviderMetadata;
+            }
             if (hasError) {
               call.state = "output-error";
               call.errorText = errorText ?? "Unknown error";
@@ -625,7 +644,7 @@ function createAssistantUIMessage<
                 state: "output-error",
                 input: undefined,
                 errorText: errorText ?? "Unknown error",
-                callProviderMetadata: message.providerMetadata,
+                ...(resultProviderMetadata ? { resultProviderMetadata } : {}),
               } satisfies ToolUIPart<TOOLS>);
             } else {
               allParts.push({
@@ -634,7 +653,7 @@ function createAssistantUIMessage<
                 state: "output-available",
                 input: undefined,
                 output,
-                callProviderMetadata: message.providerMetadata,
+                ...(resultProviderMetadata ? { resultProviderMetadata } : {}),
               } satisfies ToolUIPart<TOOLS>);
             }
           }
@@ -833,6 +852,35 @@ function createAssistantUIMessage<
     status,
     parts: allParts,
     metadata: group.find((m) => m.metadata)?.metadata,
+  };
+}
+
+type ContentMetadata = {
+  providerOptions?: ProviderOptions;
+  providerMetadata?: ProviderOptions;
+};
+
+function ownProviderMetadata(part: object): ProviderOptions | undefined {
+  const { providerOptions, providerMetadata } = part as ContentMetadata;
+  return providerOptions ?? providerMetadata;
+}
+
+// Messages saved without per-part metadata only have the message's, so their
+// parts keep showing it. Once any part has its own, each part carries only
+// its own, as in the AI SDK's UI message stream, so a signature or item id
+// never lands on a part it doesn't belong to. A tool result's metadata only
+// ever fills resultProviderMetadata: combineUIMessages merges a result from
+// another page into its call, which must keep the call's own.
+function partProviderMetadata(
+  message: MessageDoc,
+  content: readonly object[],
+): (part?: object) => { providerMetadata?: ProviderOptions } {
+  const own = content.some((part) => ownProviderMetadata(part));
+  return (part) => {
+    const providerMetadata = own
+      ? part && ownProviderMetadata(part)
+      : message.providerMetadata;
+    return providerMetadata ? { providerMetadata } : {};
   };
 }
 
