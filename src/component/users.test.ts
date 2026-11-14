@@ -427,6 +427,57 @@ describe("users", () => {
     vi.useRealTimers();
   });
 
+  test("deleteAllForUserIdAsync continues within a transaction while it fits", async () => {
+    vi.useFakeTimers();
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    for (let n = 0; n < 3; n++) {
+      const thread = await t.mutation(api.threads.createThread, {
+        userId: "batchedUser",
+      });
+      const threadId = thread._id as Id<"threads">;
+      await t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: Array.from({ length: 150 }, (_, i) => ({
+          message: { role: "user" as const, content: `Message ${i}` },
+        })),
+      });
+      const streamId = await t.mutation(api.streams.create, {
+        threadId,
+        order: 0,
+        stepOrder: 0,
+        format: "UIMessageChunk",
+      });
+      await t.run(async (ctx) => {
+        for (let i = 0; i < 500; i++) {
+          await ctx.db.insert("streamDeltas", {
+            streamId,
+            start: i,
+            end: i + 1,
+            parts: [{ type: "text-delta", id: "t", delta: "x" }],
+          });
+        }
+      });
+    }
+
+    await t.mutation(api.users.deleteAllForUserIdAsync, {
+      userId: "batchedUser",
+    });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    vi.useRealTimers();
+
+    expect(
+      await t.run(async (ctx) => ({
+        threads: (await ctx.db.query("threads").collect()).length,
+        messages: (await ctx.db.query("messages").collect()).length,
+        streams: (await ctx.db.query("streamingMessages").collect()).length,
+        deltas: (await ctx.db.query("streamDeltas").collect()).length,
+        scheduled: (
+          await ctx.db.system.query("_scheduled_functions").collect()
+        ).filter((fn) => fn.name.includes("delete")).length,
+      })),
+    ).toEqual({ threads: 0, messages: 0, streams: 0, deltas: 0, scheduled: 1 });
+  });
+
   test("getThreadUserId returns correct userId", async () => {
     const t = convexTest(schema, modules);
 
