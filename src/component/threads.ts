@@ -18,7 +18,11 @@ import {
 } from "./_generated/server.js";
 import { deleteMessage } from "./messages.js";
 import { schema, v } from "./schema.js";
-import { deleteStreamsPageForThreadId, deletionCursor } from "./streams.js";
+import {
+  deleteStreamsPageForThreadId,
+  deletionCursor,
+  repeatWhileHeadroom,
+} from "./streams.js";
 
 function publicThreadOrNull(thread: Doc<"threads"> | null): ThreadDoc | null {
   if (thread === null) {
@@ -182,42 +186,92 @@ export const _deletePageForThreadId = internalMutation({
  */
 export const deleteAllForThreadIdAsync = mutation({
   args: deleteThreadArgs,
-  handler: async (ctx, args) => {
-    let messagesResult = {
-      isDone: args.messagesDone ?? false,
-      cursor: args.cursor,
-    };
-    if (!args.messagesDone) {
-      messagesResult = await deletePageForThreadIdHandler(ctx, args);
-    }
-    let streamResult = {
-      isDone: args.streamsDone ?? false,
-      streamOrder: args.streamOrder,
-      deltaCursor: args.deltaCursor,
-    };
-    if (!args.streamsDone) {
-      streamResult = await deleteStreamsPageForThreadId(ctx, {
-        threadId: args.threadId,
-        streamOrder: args.streamOrder,
-        deltaCursor: args.deltaCursor,
-      });
-    }
-    const isDone = messagesResult.isDone && streamResult.isDone;
-    if (!isDone) {
-      await ctx.scheduler.runAfter(0, api.threads.deleteAllForThreadIdAsync, {
-        threadId: args.threadId,
-        limit: args.limit,
-        cursor: messagesResult.cursor,
-        messagesDone: messagesResult.isDone,
-        streamsDone: streamResult.isDone,
-        streamOrder: streamResult.streamOrder,
-        deltaCursor: streamResult.deltaCursor,
-      });
-    }
-    return { isDone };
-  },
+  handler: (ctx, args) => deleteAllForThreadIdBatch(ctx, args, false),
   returns: v.object({ isDone: v.boolean() }),
 });
+
+export const _deleteAllForThreadIdAsync = internalMutation({
+  args: deleteThreadArgs,
+  handler: (ctx, args) => deleteAllForThreadIdBatch(ctx, args, true),
+  returns: v.object({ isDone: v.boolean() }),
+});
+
+const deleteThreadStepReturns = v.object({
+  isDone: v.boolean(),
+  next: v.object(deleteThreadArgs),
+});
+type DeleteThreadStep = { isDone: boolean; next: DeleteThreadArgs };
+
+export const _deleteThreadStep = internalMutation({
+  args: deleteThreadArgs,
+  handler: deleteThreadStep,
+  returns: deleteThreadStepReturns,
+});
+
+async function deleteAllForThreadIdBatch(
+  ctx: MutationCtx,
+  args: DeleteThreadArgs,
+  repeat: boolean,
+): Promise<{ isDone: boolean }> {
+  let result = await deleteThreadStep(ctx, args);
+  // An explicit limit bounds each transaction, not just each page.
+  if (repeat && args.limit === undefined) {
+    result = await repeatWhileHeadroom(
+      ctx,
+      result,
+      1,
+      (previous, transactionLimits): Promise<DeleteThreadStep> =>
+        ctx.runMutation(internal.threads._deleteThreadStep, previous.next, {
+          transactionLimits,
+        }),
+    );
+  }
+  if (!result.isDone) {
+    await ctx.scheduler.runAfter(
+      0,
+      internal.threads._deleteAllForThreadIdAsync,
+      result.next,
+    );
+  }
+  return { isDone: result.isDone };
+}
+
+async function deleteThreadStep(
+  ctx: MutationCtx,
+  args: DeleteThreadArgs,
+): Promise<DeleteThreadStep> {
+  let messagesResult = {
+    isDone: args.messagesDone ?? false,
+    cursor: args.cursor,
+  };
+  if (!args.messagesDone) {
+    messagesResult = await deletePageForThreadIdHandler(ctx, args);
+  }
+  let streamResult = {
+    isDone: args.streamsDone ?? false,
+    streamOrder: args.streamOrder,
+    deltaCursor: args.deltaCursor,
+  };
+  if (!args.streamsDone) {
+    streamResult = await deleteStreamsPageForThreadId(ctx, {
+      threadId: args.threadId,
+      streamOrder: args.streamOrder,
+      deltaCursor: args.deltaCursor,
+    });
+  }
+  return {
+    isDone: messagesResult.isDone && streamResult.isDone,
+    next: {
+      threadId: args.threadId,
+      limit: args.limit,
+      cursor: messagesResult.cursor,
+      messagesDone: messagesResult.isDone,
+      streamsDone: streamResult.isDone,
+      streamOrder: streamResult.streamOrder,
+      deltaCursor: streamResult.deltaCursor,
+    },
+  };
+}
 
 async function deletePageForThreadIdHandler(
   ctx: MutationCtx,
