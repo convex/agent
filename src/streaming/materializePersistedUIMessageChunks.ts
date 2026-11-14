@@ -133,6 +133,7 @@ export function projectPersistedUIMessageChunkParts(
         assistantContent.push({
           type: "text",
           text: part.text,
+          ...(part.citations ? { citations: part.citations } : {}),
           ...(part.providerMetadata
             ? { providerOptions: part.providerMetadata }
             : {}),

@@ -155,6 +155,7 @@ export function applyUIMessageChunksIncremental<
         if (idx !== undefined) {
           const textPart = message.parts[idx] as TextUIPart;
           textPart.state = "done";
+          if (part.citations != null) textPart.citations = part.citations;
           const providerMetadata = mergeProviderMetadata(
             textPart.providerMetadata,
             part.providerMetadata,

@@ -38,9 +38,41 @@ export const vRole = v.union(
   v.literal("tool"),
 );
 
+export const vSourcePart = v.union(
+  v.object({
+    type: v.literal("source"),
+    sourceType: v.literal("url"),
+    id: v.string(),
+    url: v.string(),
+    title: v.optional(v.string()),
+    providerOptions,
+    providerMetadata,
+  }),
+  v.object({
+    type: v.literal("source"),
+    sourceType: v.literal("document"),
+    id: v.string(),
+    mediaType: v.string(),
+    title: v.string(),
+    filename: v.optional(v.string()),
+    providerOptions,
+    providerMetadata,
+  }),
+);
+export type SourcePart = Infer<typeof vSourcePart>;
+
+export const vCitation = v.object({
+  source: vSourcePart,
+  startIndex: v.optional(v.number()),
+  endIndex: v.optional(v.number()),
+  citedText: v.optional(v.string()),
+});
+export type Citation = Infer<typeof vCitation>;
+
 export const vTextPart = v.object({
   type: v.literal("text"),
   text: v.string(),
+  citations: v.optional(v.array(vCitation)),
   providerOptions,
   providerMetadata,
 });
@@ -111,29 +143,6 @@ export const vReasoningDetails = v.array(
     v.object({ type: v.literal("redacted"), data: v.string() }),
   ),
 );
-
-export const vSourcePart = v.union(
-  v.object({
-    type: v.literal("source"),
-    sourceType: v.literal("url"),
-    id: v.string(),
-    url: v.string(),
-    title: v.optional(v.string()),
-    providerOptions,
-    providerMetadata,
-  }),
-  v.object({
-    type: v.literal("source"),
-    sourceType: v.literal("document"),
-    id: v.string(),
-    mediaType: v.string(),
-    title: v.string(),
-    filename: v.optional(v.string()),
-    providerOptions,
-    providerMetadata,
-  }),
-);
-export type SourcePart = Infer<typeof vSourcePart>;
 
 // Union type to support both old (args) and new (input) formats
 // Both include input for type hint support
