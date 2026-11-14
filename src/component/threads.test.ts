@@ -458,6 +458,53 @@ describe("threads", () => {
     vi.useRealTimers();
   });
 
+  test("deleteAllForThreadIdAsync continues within a transaction while it fits", async () => {
+    vi.useFakeTimers();
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {
+      userId: "batchedDeleteUser",
+    });
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: Array.from({ length: 300 }, (_, i) => ({
+        message: { role: "user" as const, content: `Message ${i}` },
+      })),
+    });
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    await t.run(async (ctx) => {
+      for (let i = 0; i < 2000; i++) {
+        await ctx.db.insert("streamDeltas", {
+          streamId,
+          start: i,
+          end: i + 1,
+          parts: [{ type: "text-delta", id: "t", delta: "x" }],
+        });
+      }
+    });
+
+    await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    vi.useRealTimers();
+
+    expect(await t.query(api.threads.getThread, { threadId })).toBeNull();
+    expect(
+      await t.run(async (ctx) => ({
+        messages: (await ctx.db.query("messages").collect()).length,
+        streams: (await ctx.db.query("streamingMessages").collect()).length,
+        deltas: (await ctx.db.query("streamDeltas").collect()).length,
+        scheduled: (
+          await ctx.db.system.query("_scheduled_functions").collect()
+        ).filter((fn) => fn.name.includes("delete")).length,
+      })),
+    ).toEqual({ messages: 0, streams: 0, deltas: 0, scheduled: 1 });
+  });
+
   test("deleteAllForThreadIdAsync preserves its limit across continuations", async () => {
     vi.useFakeTimers();
 
