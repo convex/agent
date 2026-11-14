@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.10
+
+### Patch Changes
+
+- a3ded8a: Continue an approval when the context handler returns approvals from
+  outside the fetched messages, instead of throwing (#411).
+- 36bd080: Decode UTF-8 characters split across chunks in `useStreamingText`
+  (#440).
+- 36bd080: Give an approved call that never ran an `execution-denied` result
+  when a new prompt arrives, as required by ai 7.0.138 and later.
+- 36bd080: Fail a `streamObject` pending message when the streamed object fails
+  its schema, instead of leaving the message pending (#438).
+- 36bd080: Keep the whole order being continued in context beyond the recent
+  window (#433, #436).
+- 36bd080: Add a `lastTouchedBefore` cutoff to `getFilesToDelete` and
+  `deleteFiles` for cleaning up recent unreferenced files (#361, #437).
+- 04f3521: Keep a string `error-json` tool output as its `errorText` on reload
+  instead of adding quotes, matching the streamed text (#463).
+- 36bd080: Render tool results containing an `error-text` or `error-json` output
+  as `output-error` (#162, #441).
+- 870c134: Merge streamed tool input into fewer, smaller deltas, and read the
+  stream once per delta write.
+- 36bd080: Store a step whose finish reason is `interrupted` with ai 7.0.149 and
+  later.
+- 36bd080: Store a step's reasoning once, in content, so long reasoning fits the
+  document size limit (#418, #423).
+- 7cd4278: Add `vStreamUIMessagesReturnValue`, the `returns` validator for a
+  query that returns `listUIMessages`, with or without `syncStreams` (#295).
+- 853c286: Drop the `getThread` query a generation made to find its thread's
+  `userId`. The first save returns it. A `contextHandler`, embedding usage, or
+  `saveMessages: "none"` still reads it from the thread first.
+
 ## 0.7.9
 
 - Uses built-in pagination instead of the paginator for listing threads by
