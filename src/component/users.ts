@@ -14,7 +14,11 @@ import {
   query,
 } from "./_generated/server.js";
 import { deleteMessage } from "./messages.js";
-import { deleteStreamsPageForThreadId, deletionCursor } from "./streams.js";
+import {
+  deleteStreamsPageForThreadId,
+  deletionCursor,
+  repeatWhileHeadroom,
+} from "./streams.js";
 import { schema, v } from "./schema.js";
 
 // Note: it only searches for users with threads
@@ -76,15 +80,19 @@ export const deleteAllForUserIdAsync = mutation({
     userId: v.string(),
   },
   handler: async (ctx, args) => {
-    const isDone = await deleteAllForUserIdAsyncHandler(ctx, {
-      userId: args.userId,
-      messagesCursor: null,
-      threadsCursor: null,
-      threadInProgress: null,
-      streamsInProgress: false,
-      streamOrder: undefined,
-      deltaCursor: undefined,
-    });
+    const isDone = await deleteAllForUserIdBatch(
+      ctx,
+      {
+        userId: args.userId,
+        messagesCursor: null,
+        threadsCursor: null,
+        threadInProgress: null,
+        streamsInProgress: false,
+        streamOrder: undefined,
+        deltaCursor: undefined,
+      },
+      false,
+    );
     return isDone;
   },
   returns: v.boolean(),
@@ -113,15 +121,32 @@ type DeleteAllReturns = ObjectType<typeof deleteAllReturns>;
 
 export const _deleteAllForUserIdAsync = internalMutation({
   args: deleteAllArgs,
-  handler: deleteAllForUserIdAsyncHandler,
+  handler: (ctx, args) => deleteAllForUserIdBatch(ctx, args, true),
   returns: v.boolean(),
 });
 
-async function deleteAllForUserIdAsyncHandler(
+async function deleteAllForUserIdBatch(
   ctx: MutationCtx,
   args: DeleteAllArgs,
+  repeat: boolean,
 ): Promise<boolean> {
-  const result = await deletePageForUserId(ctx, args);
+  let result = await deletePageForUserId(ctx, args);
+  if (repeat) {
+    result = await repeatWhileHeadroom(
+      ctx,
+      result,
+      1,
+      (
+        { isDone: _, ...previous },
+        transactionLimits,
+      ): Promise<DeleteAllReturns> =>
+        ctx.runMutation(
+          internal.users._deletePageForUserId,
+          { userId: args.userId, ...previous },
+          { transactionLimits },
+        ),
+    );
+  }
   if (!result.isDone) {
     await ctx.scheduler.runAfter(0, internal.users._deleteAllForUserIdAsync, {
       userId: args.userId,

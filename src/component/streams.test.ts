@@ -30,6 +30,49 @@ async function seedStream(t: ReturnType<typeof initConvexTest>) {
   return { threadId, streamId, fileId };
 }
 
+async function insertDeltas(
+  t: ReturnType<typeof initConvexTest>,
+  streamId: Id<"streamingMessages">,
+  start: number,
+  count: number,
+  size: number,
+) {
+  await t.run(async (ctx) => {
+    for (let i = start; i < start + count; i++) {
+      await ctx.db.insert("streamDeltas", {
+        streamId,
+        start: i,
+        end: i + 1,
+        parts: [{ type: "text-delta", id: "t", delta: "x".repeat(size) }],
+      });
+    }
+  });
+}
+
+async function countDeltas(
+  t: ReturnType<typeof initConvexTest>,
+  streamId: Id<"streamingMessages">,
+) {
+  return t.run(
+    async (ctx) =>
+      (
+        await ctx.db
+          .query("streamDeltas")
+          .withIndex("streamId_start_end", (q) => q.eq("streamId", streamId))
+          .collect()
+      ).length,
+  );
+}
+
+async function scheduledRuns(t: ReturnType<typeof initConvexTest>) {
+  return t.run(
+    async (ctx) =>
+      (await ctx.db.system.query("_scheduled_functions").collect()).filter(
+        (fn) => fn.name.includes("delete"),
+      ).length,
+  );
+}
+
 describe("streams", () => {
   test("listDeltas rejects streams belonging to another thread", async () => {
     const t = initConvexTest();
@@ -273,6 +316,118 @@ describe("streams", () => {
     ).not.toBeNull();
   });
 
+  test("sync deletion finishes a stream that fits in one transaction", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    for (let i = 0; i < 18; i++) {
+      await t.mutation(api.streams.addDelta, {
+        streamId,
+        start: i,
+        end: i + 1,
+        parts: [{ type: "text-delta", id: "t", delta: "x".repeat(300_000) }],
+      });
+    }
+
+    await t.mutation(api.streams.deleteStreamSync, { streamId });
+
+    expect(await countDeltas(t, streamId)).toBe(0);
+    expect(
+      await t.run((ctx) => ctx.db.get("streamingMessages", streamId)),
+    ).toBeNull();
+  });
+
+  test("async deletion continues within a transaction while it fits", async () => {
+    vi.useFakeTimers();
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    await insertDeltas(t, streamId, 0, 5000, 10);
+
+    await t.mutation(api.streams.deleteStreamAsync, { streamId });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect(await countDeltas(t, streamId)).toBe(0);
+    expect(
+      await t.run((ctx) => ctx.db.get("streamingMessages", streamId)),
+    ).toBeNull();
+    expect(await scheduledRuns(t)).toBe(1);
+  });
+
+  test("thread stream deletion continues within a transaction while it fits", async () => {
+    vi.useFakeTimers();
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const streamIds: Id<"streamingMessages">[] = [];
+    for (let order = 0; order < 5; order++) {
+      const streamId = await t.mutation(api.streams.create, {
+        threadId,
+        order,
+        stepOrder: 0,
+        format: "UIMessageChunk",
+      });
+      await insertDeltas(t, streamId, 0, 1000, 10);
+      streamIds.push(streamId);
+    }
+
+    await t.mutation(api.streams.deleteAllStreamsForThreadIdAsync, {
+      threadId,
+    });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    for (const streamId of streamIds) {
+      expect(await countDeltas(t, streamId)).toBe(0);
+    }
+    expect(
+      await t.query(api.streams.list, {
+        threadId,
+        statuses: ["streaming", "finished", "aborted"],
+      }),
+    ).toEqual([]);
+    expect(await t.query(api.threads.getThread, { threadId })).toBeNull();
+    expect(await scheduledRuns(t)).toBe(1);
+  });
+
+  test("async deletion leaves a page that does not fit to the next transaction", async () => {
+    vi.useFakeTimers();
+    const t = convexTest({
+      schema,
+      modules,
+      transactionLimits: { bytesRead: 3 * 1024 * 1024 },
+    });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    await insertDeltas(t, streamId, 0, 2000, 10);
+    await insertDeltas(t, streamId, 2000, 4, 600_000);
+
+    await t.mutation(api.streams.deleteStreamAsync, { streamId });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect(await countDeltas(t, streamId)).toBe(0);
+    expect(
+      await t.run((ctx) => ctx.db.get("streamingMessages", streamId)),
+    ).toBeNull();
+  });
+
   test("async deletion stays within transaction read limits", async () => {
     vi.useFakeTimers();
 
@@ -343,9 +498,7 @@ describe("streams", () => {
           streamId,
           start: i,
           end: i + 1,
-          parts: [
-            { type: "text-delta", id: "t", delta: "x".repeat(600_000) },
-          ],
+          parts: [{ type: "text-delta", id: "t", delta: "x".repeat(600_000) }],
         });
       }
     }
