@@ -78,8 +78,17 @@ export function prepareApprovalContext(
     }
   }
 
-  // Every approval part a handler returns is a copy of a stored one. A handler
-  // may repeat a part (cloning the context, say), so the first copy is
+  // A handler may return history from outside the fetched context, and those
+  // approvals pass through as in any other generation.
+  const outsideContext = (
+    part: Exclude<ModelMessage["content"], string>[number],
+  ) =>
+    (part.type === "tool-approval-request" ||
+      part.type === "tool-approval-response") &&
+    !storedRequests.has(part.approvalId);
+
+  // Every other approval part a handler returns is a copy of a stored one. A
+  // handler may repeat a part (cloning the context, say), so the first copy is
   // canonical and carries any part-level provider options it added.
   const supplied = new Map<string, ApprovalPart>();
   for (const message of messages) {
@@ -89,6 +98,7 @@ export function prepareApprovalContext(
           `Continuation context has a ${part.type} in a ${message.role} message`,
         );
       }
+      if (outsideContext(part)) continue;
       const original = stored.get(key);
       if (!original) {
         throw new Error(
@@ -171,6 +181,7 @@ export function prepareApprovalContext(
       continue;
     }
     const content = message.content.filter((part) => {
+      if (outsideContext(part)) return true;
       if (part.type === "tool-call" || part.type === "tool-approval-request") {
         if (deferred.has(part.toolCallId) || undecided.has(part.toolCallId)) {
           return false;
