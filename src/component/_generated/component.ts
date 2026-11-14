@@ -179,6 +179,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -236,6 +273,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -871,6 +945,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -928,6 +1039,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -1616,6 +1764,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -1664,6 +1849,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -2278,6 +2500,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -2335,6 +2594,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -3013,6 +3309,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -3061,6 +3394,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -3657,6 +4027,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -3705,6 +4112,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -4291,6 +4735,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -4348,6 +4829,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     | string
                     | Array<
                         | {
+                            citations?: Array<{
+                              citedText?: string;
+                              endIndex?: number;
+                              source:
+                                | {
+                                    id: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "url";
+                                    title?: string;
+                                    type: "source";
+                                    url: string;
+                                  }
+                                | {
+                                    filename?: string;
+                                    id: string;
+                                    mediaType: string;
+                                    providerMetadata?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    providerOptions?: Record<
+                                      string,
+                                      Record<string, any>
+                                    >;
+                                    sourceType: "document";
+                                    title: string;
+                                    type: "source";
+                                  };
+                              startIndex?: number;
+                            }>;
                             providerMetadata?: Record<
                               string,
                               Record<string, any>
@@ -4932,6 +5450,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>
@@ -4980,6 +5535,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   | string
                   | Array<
                       | {
+                          citations?: Array<{
+                            citedText?: string;
+                            endIndex?: number;
+                            source:
+                              | {
+                                  id: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "url";
+                                  title?: string;
+                                  type: "source";
+                                  url: string;
+                                }
+                              | {
+                                  filename?: string;
+                                  id: string;
+                                  mediaType: string;
+                                  providerMetadata?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  providerOptions?: Record<
+                                    string,
+                                    Record<string, any>
+                                  >;
+                                  sourceType: "document";
+                                  title: string;
+                                  type: "source";
+                                };
+                            startIndex?: number;
+                          }>;
                           providerMetadata?: Record<
                             string,
                             Record<string, any>

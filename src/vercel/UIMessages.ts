@@ -93,12 +93,28 @@ export async function fromUIMessages<METADATA = unknown>(
         tool: false,
       } satisfies MessageDoc & { streaming: boolean; metadata?: METADATA };
       const modelMessages = await convertToModelMessages([uiMessage]);
+      const citations = uiMessage.parts.flatMap((part) =>
+        part.type === "text" ? [part.citations] : [],
+      );
+      const cited = citations.some((partCitations) => partCitations?.length);
+      let textPartIndex = 0;
       return modelMessages
         .map((modelMessage, i) => {
           if (modelMessage.content.length === 0) {
             return undefined;
           }
           const message = fromModelMessage(modelMessage);
+          if (cited && Array.isArray(message.content)) {
+            message.content = message.content.map((part) => {
+              if (part.type !== "text") {
+                return part;
+              }
+              const partCitations = citations[textPartIndex++];
+              return partCitations?.length
+                ? { ...part, citations: partCitations }
+                : part;
+            }) as typeof message.content;
+          }
           const tool = isTool(message);
           const doc: MessageDoc & { streaming: boolean; metadata?: METADATA } =
             {
@@ -466,6 +482,11 @@ function createAssistantUIMessage<
     const nonStringContent =
       content && typeof content !== "string" ? content : [];
     const text = extractTextFromMessageDoc(message);
+    const storedContent = message.message!.content;
+    const storedTextParts = Array.isArray(storedContent)
+      ? storedContent.filter((part) => part.type === "text")
+      : [];
+    let textPartIndex = 0;
 
     const state = message.streaming
       ? ("streaming" as const)
@@ -498,14 +519,17 @@ function createAssistantUIMessage<
     // Add all structured content parts
     for (const contentPart of nonStringContent) {
       switch (contentPart.type) {
-        case "text":
+        case "text": {
+          const citations = storedTextParts[textPartIndex++]?.citations;
           allParts.push({
             state,
             ...metadataOf(contentPart),
             type: "text",
             text: contentPart.text,
+            ...(citations ? { citations } : {}),
           } satisfies TextUIPart);
           break;
+        }
         case "reasoning":
           allParts.push({
             state,
