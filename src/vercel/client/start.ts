@@ -39,6 +39,7 @@ import {
   encodeToolJsonInMessages,
   sendToolJson,
 } from "../../streaming/toolJson.js";
+import { onSaveMessagesHandle } from "./messages.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
@@ -216,9 +217,12 @@ export async function startGeneration<
     userId = (await ctx.runQuery(component.threads.getThread, { threadId }))
       ?.userId;
   }
+  const onSaveMessages =
+    opts.onSaveMessages && (await onSaveMessagesHandle(opts.onSaveMessages));
 
   const context = await fetchContextWithPrompt(ctx, component, {
     ...opts,
+    onSaveMessagesHandle: onSaveMessages,
     userId,
     threadId,
     messages: args.messages,
@@ -243,6 +247,7 @@ export async function startGeneration<
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
+          onSaveMessagesHandle: onSaveMessages,
           userId,
           threadId,
           prompt: args.prompt,
@@ -315,6 +320,7 @@ export async function startGeneration<
           await ctx.runMutation(component.messages.finalizeMessage, {
             messageId: pendingMessageId,
             result: { status: "failed", error },
+            onSaveMessages,
           });
         }
       }
@@ -458,6 +464,7 @@ export async function startGeneration<
             embeddings,
             failPendingSteps: false,
             finishStreamId,
+            onSaveMessages,
           }),
       );
       const lastMessage = saved.messages.at(-1);

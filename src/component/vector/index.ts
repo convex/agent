@@ -7,6 +7,11 @@ import {
   type MutationCtx,
   query,
 } from "../_generated/server.js";
+import {
+  reportSavedMessages,
+  vOnSaveMessages,
+  type SavedMessage,
+} from "../../reportSavedMessages.js";
 import schema from "../schema.js";
 import {
   type EmbeddingsWithoutDenormalizedFields,
@@ -101,10 +106,11 @@ export const insertBatch = mutation({
         messageId: v.optional(v.id("messages")),
       }),
     ),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: v.array(vVectorId),
   handler: async (ctx, args) => {
-    return Promise.all(
+    const ids = await Promise.all(
       args.vectors.map(async ({ messageId, ...v }) => {
         const embeddingId = await insertVector(ctx, args.vectorDimension, v);
         if (messageId) {
@@ -113,6 +119,15 @@ export const insertBatch = mutation({
         return embeddingId;
       }),
     );
+    if (args.onSaveMessages) {
+      const saved: SavedMessage[] = [];
+      for (const { messageId } of args.vectors) {
+        const doc = messageId && (await ctx.db.get("messages", messageId));
+        if (doc) saved.push({ kind: "update", doc });
+      }
+      await reportSavedMessages(ctx, args.onSaveMessages, saved);
+    }
+    return ids;
   },
 });
 

@@ -11,6 +11,7 @@
 import type * as apiKeys from "../apiKeys.js";
 import type * as files from "../files.js";
 import type * as messages from "../messages.js";
+import type * as onSaveMessages from "../onSaveMessages.js";
 import type * as streams from "../streams.js";
 import type * as threads from "../threads.js";
 import type * as users from "../users.js";
@@ -28,6 +29,7 @@ const fullApi: ApiFromModules<{
   apiKeys: typeof apiKeys;
   files: typeof files;
   messages: typeof messages;
+  onSaveMessages: typeof onSaveMessages;
   streams: typeof streams;
   threads: typeof threads;
   users: typeof users;

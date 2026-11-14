@@ -43,6 +43,11 @@ import {
 } from "./vector/tables.js";
 import { changeRefcount } from "./files.js";
 import {
+  reportSavedMessages,
+  vOnSaveMessages,
+  type SavedMessage,
+} from "../reportSavedMessages.js";
+import {
   getStreamingMessagesWithMetadata,
   finishHandler,
   releaseStreamFileOwnershipByIds,
@@ -99,7 +104,10 @@ async function abortStreamsForDeleted(
 }
 
 export const deleteByIds = mutation({
-  args: { messageIds: v.array(v.id("messages")) },
+  args: {
+    messageIds: v.array(v.id("messages")),
+    onSaveMessages: vOnSaveMessages,
+  },
   returns: v.array(v.id("messages")),
   handler: async (ctx, args) => {
     const deleted = await Promise.all(
@@ -113,7 +121,15 @@ export const deleteByIds = mutation({
       }),
     );
     await abortStreamsForDeleted(ctx, deleted);
-    return deleted.filter((m) => m !== null).map((m) => m._id);
+    const found = deleted.filter((m) => m !== null);
+    if (args.onSaveMessages) {
+      await reportSavedMessages(
+        ctx,
+        args.onSaveMessages,
+        found.map((doc) => ({ kind: "delete", doc })),
+      );
+    }
+    return found.map((m) => m._id);
   },
 });
 
@@ -128,16 +144,19 @@ async function markPendingMessageFailed(
   ctx: MutationCtx,
   message: Doc<"messages">,
   error: string,
+  onSaveMessages: string | undefined,
 ) {
   if (message.embeddingId) {
     const { tableName } = getVectorIdInfo(ctx, message.embeddingId);
     await ctx.db.delete(tableName, message.embeddingId);
   }
-  await ctx.db.patch("messages", message._id, {
-    status: "failed",
-    error,
-    embeddingId: undefined,
-  });
+  const patch = { status: "failed" as const, error, embeddingId: undefined };
+  await ctx.db.patch("messages", message._id, patch);
+  if (onSaveMessages) {
+    await reportSavedMessages(ctx, onSaveMessages, [
+      { kind: "update", doc: { ...message, ...patch } },
+    ]);
+  }
 }
 
 export const deleteByOrder = mutation({
@@ -147,6 +166,7 @@ export const deleteByOrder = mutation({
     startStepOrder: v.optional(v.number()),
     endOrder: v.number(),
     endStepOrder: v.optional(v.number()),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: v.object({
     isDone: v.boolean(),
@@ -180,6 +200,13 @@ export const deleteByOrder = mutation({
       .take(64);
     await Promise.all(messages.map((m) => deleteMessage(ctx, m)));
     await abortStreamsForDeleted(ctx, messages);
+    if (args.onSaveMessages) {
+      await reportSavedMessages(
+        ctx,
+        args.onSaveMessages,
+        messages.map((doc) => ({ kind: "delete", doc })),
+      );
+    }
     return {
       isDone: messages.length < 64,
       lastOrder: messages.at(-1)?.order,
@@ -213,6 +240,7 @@ const addMessagesArgs = {
   // This prevents UI flickering from separate mutations (issue #181).
   // Failed messages abort it instead.
   finishStreamId: v.optional(v.id("streamingMessages")),
+  onSaveMessages: vOnSaveMessages,
 };
 export const addMessages = mutation({
   args: addMessagesArgs,
@@ -252,6 +280,7 @@ async function addMessagesHandler(
     order: requestedOrder,
     pendingMessageId,
     hideFromUserIdSearch,
+    onSaveMessages,
     ...rest
   } = args;
   const promptMessage =
@@ -273,6 +302,7 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
+  const saved: SavedMessage[] | undefined = onSaveMessages ? [] : undefined;
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
     const pendingMessages = await ctx.db
@@ -282,21 +312,28 @@ async function addMessagesHandler(
       )
       .order("desc")
       .take(100);
+    const restarted = pendingMessages
+      .filter((m) => !promptMessage || m.order === promptMessage.order)
+      .filter((m) => !pendingMessageId || m._id !== pendingMessageId);
+    const patch = {
+      status: "failed" as const,
+      error: "Restarting",
+      embeddingId: undefined,
+    };
     await Promise.all(
-      pendingMessages
-        .filter((m) => !promptMessage || m.order === promptMessage.order)
-        .filter((m) => !pendingMessageId || m._id !== pendingMessageId)
-        .map(async (m) => {
-          if (m.embeddingId) {
-            const { tableName } = getVectorIdInfo(ctx, m.embeddingId);
-            await ctx.db.delete(tableName, m.embeddingId);
-          }
-          await ctx.db.patch("messages", m._id, {
-            status: "failed",
-            error: "Restarting",
-            embeddingId: undefined,
-          });
-        }),
+      restarted.map(async (m) => {
+        if (m.embeddingId) {
+          const { tableName } = getVectorIdInfo(ctx, m.embeddingId);
+          await ctx.db.delete(tableName, m.embeddingId);
+        }
+        await ctx.db.patch("messages", m._id, patch);
+      }),
+    );
+    saved?.push(
+      ...restarted.map((m) => ({
+        kind: "update" as const,
+        doc: { ...m, ...patch },
+      })),
     );
   }
   let order, stepOrder;
@@ -315,6 +352,9 @@ async function addMessagesHandler(
     stepOrder = maxMessage?.stepOrder ?? -1;
   } else if (promptMessageId) {
     if (!promptMessage && abandonIfPromptMissing) {
+      if (onSaveMessages && saved) {
+        await reportSavedMessages(ctx, onSaveMessages, saved);
+      }
       return { messages: [] };
     }
     assert(promptMessage, `Parent message ${promptMessageId} not found`);
@@ -401,7 +441,9 @@ async function addMessagesHandler(
         order: pendingMessage.order,
         stepOrder: pendingMessage.stepOrder,
       });
-      toReturn.push((await ctx.db.get("messages", pendingMessage._id))!);
+      const replaced = (await ctx.db.get("messages", pendingMessage._id))!;
+      toReturn.push(replaced);
+      saved?.push({ kind: "update", doc: replaced });
       continue;
     }
     if ((startsAtNextOrder || explicitOrder !== undefined) && i === 0) {
@@ -436,7 +478,9 @@ async function addMessagesHandler(
       await changeRefcount(ctx, [], message.fileIds);
     }
     // TODO: delete the associated stream data for the order/stepOrder
-    toReturn.push((await ctx.db.get("messages", messageId))!);
+    const inserted = (await ctx.db.get("messages", messageId))!;
+    toReturn.push(inserted);
+    saved?.push({ kind: "insert", doc: inserted });
   }
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
@@ -451,6 +495,9 @@ async function addMessagesHandler(
       streamId: finishStreamId,
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
+  }
+  if (onSaveMessages && saved) {
+    await reportSavedMessages(ctx, onSaveMessages, saved);
   }
   return { messages: toReturn.map(publicMessage) };
 }
@@ -511,9 +558,10 @@ export const finalizeMessage = mutation({
       v.object({ status: v.literal("success") }),
       v.object({ status: v.literal("failed"), error: v.string() }),
     ),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: v.null(),
-  handler: async (ctx, { messageId, result }) => {
+  handler: async (ctx, { messageId, result, onSaveMessages }) => {
     const message = await ctx.db.get("messages", messageId);
     assert(message, `Message ${messageId} not found`);
     if (message.status !== "pending") {
@@ -536,39 +584,67 @@ export const finalizeMessage = mutation({
           ctx,
           message,
           result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
+          onSaveMessages,
         );
         return;
       }
       if (messages.length > 0) {
         // Nested so an oversized recovered message rolls back on its own and
         // the pending message is marked failed instead of stuck.
+        let recovered;
         try {
-          await ctx.runMutation(api.messages.addMessages, {
-            messages,
-            threadId: message.threadId,
-            agentName: message.agentName,
-            failPendingSteps: false,
-            pendingMessageId: messageId,
-            userId: message.userId,
-            embeddings: undefined,
-          });
+          ({ messages: recovered } = await ctx.runMutation(
+            api.messages.addMessages,
+            {
+              messages,
+              threadId: message.threadId,
+              agentName: message.agentName,
+              failPendingSteps: false,
+              pendingMessageId: messageId,
+              userId: message.userId,
+              embeddings: undefined,
+            },
+          ));
         } catch (error) {
           console.error("Failed to persist recovered assistant streams", error);
           await markPendingMessageFailed(
             ctx,
             message,
             result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
+            onSaveMessages,
           );
           return;
         }
         await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
+        // Reported here, not by the nested save, so a report that can't be
+        // scheduled fails the finalize instead of reading as failed recovery.
+        if (onSaveMessages) {
+          await reportSavedMessages(
+            ctx,
+            onSaveMessages,
+            recovered.map((doc) => ({
+              kind: doc._id === messageId ? "update" : "insert",
+              doc,
+            })),
+          );
+        }
         return;
       }
     }
     if (result.status === "failed") {
-      await markPendingMessageFailed(ctx, message, result.error);
+      await markPendingMessageFailed(
+        ctx,
+        message,
+        result.error,
+        onSaveMessages,
+      );
     } else {
       await ctx.db.patch("messages", messageId, { status: "success" });
+      if (onSaveMessages) {
+        await reportSavedMessages(ctx, onSaveMessages, [
+          { kind: "update", doc: { ...message, status: "success" } },
+        ]);
+      }
     }
   },
 });
@@ -592,6 +668,7 @@ export const updateMessage = mutation({
         ]),
       ),
     ),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: vMessageDoc,
   handler: async (ctx, args) => {
@@ -619,7 +696,13 @@ export const updateMessage = mutation({
     }
 
     await ctx.db.patch("messages", args.messageId, patch);
-    return publicMessage((await ctx.db.get("messages", args.messageId))!);
+    const updated = (await ctx.db.get("messages", args.messageId))!;
+    if (args.onSaveMessages) {
+      await reportSavedMessages(ctx, args.onSaveMessages, [
+        { kind: "update", doc: updated },
+      ]);
+    }
+    return publicMessage(updated);
   },
 });
 
@@ -651,6 +734,7 @@ export const respondToToolCallApprovals = mutation({
         }),
       ),
     ),
+    onSaveMessages: vOnSaveMessages,
   },
   returns: v.object({ messageId: v.id("messages") }),
   handler: async (ctx, args) => {
@@ -672,6 +756,7 @@ export const respondToToolCallApprovals = mutation({
         promptMessageId: request._id,
         failPendingSteps: false,
         messages: [{ message: plan.message }],
+        onSaveMessages: args.onSaveMessages,
       },
       { message: request, lastStepOrder: last.stepOrder },
     );

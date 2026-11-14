@@ -17,6 +17,10 @@ import {
   query,
 } from "./_generated/server.js";
 import { deleteMessage } from "./messages.js";
+import {
+  reportSavedMessages,
+  vOnSaveMessages,
+} from "../reportSavedMessages.js";
 import { schema, v } from "./schema.js";
 import {
   deleteStreamsPageForThreadId,
@@ -138,13 +142,22 @@ export const searchThreadTitles = query({
  * If it times out or fails, you'll have to run it again.
  */
 export const deleteAllForThreadIdSync = action({
-  args: { threadId: v.id("threads"), limit: v.optional(v.number()) },
+  args: {
+    threadId: v.id("threads"),
+    limit: v.optional(v.number()),
+    onSaveMessages: vOnSaveMessages,
+  },
   handler: async (ctx, args) => {
     let cursor: string | undefined = undefined;
     while (true) {
       const result: DeleteThreadReturns = await ctx.runMutation(
         internal.threads._deletePageForThreadId,
-        { threadId: args.threadId, cursor, limit: args.limit },
+        {
+          threadId: args.threadId,
+          cursor,
+          limit: args.limit,
+          onSaveMessages: args.onSaveMessages,
+        },
       );
       if (result.isDone) {
         break;
@@ -166,6 +179,7 @@ const deleteThreadArgs = {
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),
   limit: v.optional(v.number()),
+  onSaveMessages: vOnSaveMessages,
 };
 type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
@@ -269,6 +283,7 @@ async function deleteThreadStep(
       streamsDone: streamResult.isDone,
       streamOrder: streamResult.streamOrder,
       deltaCursor: streamResult.deltaCursor,
+      onSaveMessages: args.onSaveMessages,
     },
   };
 }
@@ -287,6 +302,13 @@ async function deletePageForThreadIdHandler(
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
+  if (args.onSaveMessages) {
+    await reportSavedMessages(
+      ctx,
+      args.onSaveMessages,
+      messages.page.map((doc) => ({ kind: "delete", doc })),
+    );
+  }
   if (messages.isDone) {
     const thread = await ctx.db.get("threads", args.threadId);
     if (thread) {
