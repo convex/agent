@@ -118,6 +118,11 @@ The helper adds these additional fields:
 To reference these, ensure you're importing `UIMessage` from
 `@convex-dev/agent`.
 
+Text parts keep the `citations` a provider attaches to them, such as Anthropic's
+web search and document citations, while streaming and after a reload, as the AI
+SDK's own UI message stream does. They are saved on the message's text parts.
+Citations need `ai` 7.0.138 or later.
+
 #### `toUIMessages` helper
 
 `toUIMessages` is a helper function that transforms MessageDocs into AI SDK
