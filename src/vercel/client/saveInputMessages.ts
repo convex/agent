@@ -40,26 +40,12 @@ export async function saveInputMessages(
   pendingMessage: MessageDoc;
   savedMessages: MessageDoc[];
 }> {
-  const shouldSave = args.storageOptions?.saveMessages ?? "promptAndOutput";
-  // If only a promptMessageId is provided, this will be empty.
-  const promptArray = getPromptArray(prompt);
-
-  const toSave: (ModelMessage | Message)[] = [];
-  if (args.promptMessageId) {
-    // We don't save any inputs if a promptMessageId is provided.
-    // It's unclear where they'd want to save the new messages.
-  } else if (shouldSave === "all") {
-    if (messages) toSave.push(...messages);
-    toSave.push(...promptArray);
-  } else {
-    if (promptArray.length) {
-      // We treat the whole promptArray as the prompt message to save.
-      toSave.push(...promptArray);
-    } else if (messages) {
-      // Otherwise, treat the last message as the prompt message to save.
-      toSave.push(...messages.slice(-1));
-    }
-  }
+  const toSave = inputMessagesToSave({
+    prompt,
+    messages,
+    promptMessageId: args.promptMessageId,
+    saveMessages: args.storageOptions?.saveMessages,
+  });
   let embeddings:
     | {
         vectors: (number[] | null)[];
@@ -101,4 +87,41 @@ export async function saveInputMessages(
     pendingMessage: saved.messages.at(-1)!,
     savedMessages: saved.messages.slice(0, -1),
   };
+}
+
+/**
+ * The input messages a generation saves before its pending message. With none
+ * that is a user message, the pending message continues an existing order.
+ */
+export function inputMessagesToSave({
+  prompt,
+  messages,
+  promptMessageId,
+  saveMessages = "promptAndOutput",
+}: {
+  prompt: string | (ModelMessage | Message)[] | undefined;
+  messages: (ModelMessage | Message)[] | undefined;
+  promptMessageId: string | undefined;
+  saveMessages?: "all" | "promptAndOutput" | "none";
+}): (ModelMessage | Message)[] {
+  // If only a promptMessageId is provided, this will be empty.
+  const promptArray = getPromptArray(prompt);
+
+  const toSave: (ModelMessage | Message)[] = [];
+  if (promptMessageId) {
+    // We don't save any inputs if a promptMessageId is provided.
+    // It's unclear where they'd want to save the new messages.
+  } else if (saveMessages === "all") {
+    if (messages) toSave.push(...messages);
+    toSave.push(...promptArray);
+  } else {
+    if (promptArray.length) {
+      // We treat the whole promptArray as the prompt message to save.
+      toSave.push(...promptArray);
+    } else if (messages) {
+      // Otherwise, treat the last message as the prompt message to save.
+      toSave.push(...messages.slice(-1));
+    }
+  }
+  return toSave;
 }

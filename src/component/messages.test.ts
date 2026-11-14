@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
+import type { FunctionArgs } from "convex/server";
 import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -1710,5 +1711,398 @@ describe("cloneThread", () => {
       upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
     });
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
+  });
+});
+
+describe("what each save reads", () => {
+  type AddArgs = FunctionArgs<typeof api.messages.addMessages>;
+  type RespondArgs = FunctionArgs<
+    typeof api.messages.respondToToolCallApprovals
+  >;
+  type Save = AddArgs["messages"][number];
+  const call = (toolCallId: string) => ({
+    type: "tool-call" as const,
+    toolCallId,
+    toolName: "lookup",
+    input: {},
+  });
+  const result = (toolCallId: string) => ({
+    type: "tool-result" as const,
+    toolCallId,
+    toolName: "lookup",
+    output: { type: "text" as const, value: "found" },
+  });
+  const request = (toolCallId: string) => ({
+    type: "tool-approval-request" as const,
+    toolCallId,
+    approvalId: `ap-${toolCallId}`,
+  });
+  const decision = (toolCallId: string) => ({
+    type: "tool-approval-response" as const,
+    approvalId: `ap-${toolCallId}`,
+    approved: true,
+  });
+  const user = (content: string): Save => ({
+    message: { role: "user", content },
+  });
+  const assistant = (
+    content: string | ReturnType<typeof call | typeof request>[],
+  ): Save => ({ message: { role: "assistant", content } });
+  const tool = (
+    content: ReturnType<typeof result | typeof decision>[],
+  ): Save => ({ message: { role: "tool", content } });
+  const pending: Save = {
+    message: { role: "assistant", content: [] },
+    status: "pending",
+  };
+  const failed = (save: Save): Save => ({ ...save, status: "failed" });
+
+  // Each seed batch is saved in its own mutation, on the order of the message
+  // at `after` when given. The measured save sees the ids of every seeded row.
+  type Seed = { after?: number; messages: Save[] } | Save[];
+  type Measured =
+    | { addMessages: (ids: Id<"messages">[]) => Omit<AddArgs, "threadId"> }
+    | {
+        respond: (ids: Id<"messages">[]) => Omit<RespondArgs, "threadId">;
+      };
+
+  async function measure(seeds: Seed[], measured: Measured) {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const ids: Id<"messages">[] = [];
+    for (const seed of seeds) {
+      const { after, messages } = Array.isArray(seed)
+        ? { after: undefined, messages: seed }
+        : seed;
+      const saved = await t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId: after === undefined ? undefined : ids[after],
+        messages,
+      });
+      ids.push(...saved.messages.map((m) => m._id as Id<"messages">));
+    }
+    return t.run(async (ctx) => {
+      const before = await ctx.meta.getTransactionMetrics();
+      if ("addMessages" in measured) {
+        await ctx.runMutation(api.messages.addMessages, {
+          threadId,
+          ...measured.addMessages(ids),
+        });
+      } else {
+        await ctx.runMutation(api.messages.respondToToolCallApprovals, {
+          threadId,
+          ...measured.respond(ids),
+        });
+      }
+      const after = await ctx.meta.getTransactionMetrics();
+      return {
+        documents: after.documentsRead.used - before.documentsRead.used,
+        bytes: after.bytesRead.used - before.bytesRead.used,
+      };
+    });
+  }
+
+  const startAfter = (index: number) => (ids: Id<"messages">[]) => ({
+    promptMessageId: ids[index],
+    failPendingSteps: true,
+    messages: [pending],
+  });
+  const three = [
+    call("a"),
+    request("a"),
+    call("b"),
+    request("b"),
+    call("c"),
+    request("c"),
+  ];
+  const paths: Record<string, [Seed[], Measured]> = {
+    "a user prompt on an empty thread": [
+      [],
+      { addMessages: () => ({ messages: [user("Hi")] }) },
+    ],
+    "a user prompt after history": [
+      [[user("Earlier"), assistant("Answer")]],
+      { addMessages: () => ({ messages: [user("Hi")] }) },
+    ],
+    "a generation start after its prompt": [
+      [[user("Earlier"), assistant("Answer"), user("Prompt")]],
+      { addMessages: startAfter(2) },
+    ],
+    "a step save of a call and its result with the next pending message": [
+      [[user("Prompt"), pending]],
+      {
+        addMessages: (ids) => ({
+          promptMessageId: ids[0],
+          pendingMessageId: ids[1],
+          messages: [assistant([call("a")]), tool([result("a")]), pending],
+        }),
+      },
+    ],
+    "a final step save": [
+      [[user("Prompt"), assistant([call("a")]), tool([result("a")]), pending]],
+      {
+        addMessages: (ids) => ({
+          promptMessageId: ids[0],
+          pendingMessageId: ids[3],
+          messages: [assistant("Done")],
+        }),
+      },
+    ],
+    "a step save without a pending message": [
+      [[user("Prompt")]],
+      {
+        addMessages: (ids) => ({
+          promptMessageId: ids[0],
+          messages: [
+            assistant([call("a")]),
+            tool([result("a")]),
+            assistant("Done"),
+          ],
+        }),
+      },
+    ],
+    "a step save without a pending message after a tool message": [
+      [[user("Prompt"), assistant([call("a")]), tool([result("a")])]],
+      {
+        addMessages: (ids) => ({
+          promptMessageId: ids[0],
+          messages: [assistant("Done")],
+        }),
+      },
+    ],
+    "a generation start after a text message": [
+      [[user("Prompt"), assistant("Answer")]],
+      { addMessages: startAfter(0) },
+    ],
+    "a generation start after a tool message": [
+      [[user("Prompt"), assistant([call("a")]), tool([result("a")])]],
+      { addMessages: startAfter(2) },
+    ],
+    "a generation start after five separately saved results": [
+      [
+        [
+          user("Prompt"),
+          assistant(["a", "b", "c", "d", "e"].map(call)),
+          ...["a", "b", "c", "d", "e"].map((id) => tool([result(id)])),
+        ],
+      ],
+      { addMessages: startAfter(0) },
+    ],
+    "a generation start after a failed call": [
+      [[user("Prompt"), failed(assistant([call("a")]))]],
+      { addMessages: startAfter(0) },
+    ],
+    "an assistant message without a prompt after a user message": [
+      [[user("Earlier"), assistant("Answer"), user("Prompt")]],
+      { addMessages: () => ({ messages: [assistant("Hi")] }) },
+    ],
+    "an assistant message without a prompt after a tool message": [
+      [[user("Prompt"), assistant([call("a")]), tool([result("a")])]],
+      { addMessages: () => ({ messages: [assistant("Hi")] }) },
+    ],
+    "an assistant message without a prompt after a call without a result": [
+      [[user("Prompt"), assistant([call("a")])]],
+      { addMessages: () => ({ messages: [assistant("Later")] }) },
+    ],
+    "a tool message without a prompt after its call": [
+      [[user("Prompt"), assistant([call("a")])]],
+      { addMessages: () => ({ messages: [tool([result("a")])] }) },
+    ],
+    "an assistant message on an explicit order after a tool message": [
+      [[user("Prompt"), assistant([call("a")]), tool([result("a")])]],
+      { addMessages: () => ({ order: 0, messages: [assistant("Hi")] }) },
+    ],
+    "a call and text in one save": [
+      [[user("Prompt")]],
+      {
+        addMessages: (ids) => ({
+          promptMessageId: ids[0],
+          messages: [assistant([call("a")]), assistant("Text")],
+        }),
+      },
+    ],
+    "an approval decision": [
+      [[user("Prompt"), assistant([call("a"), request("a")])]],
+      {
+        respond: () => ({
+          decisions: [{ approvalId: "ap-a", approved: true }],
+        }),
+      },
+    ],
+    "a third approval decision after two saved separately": [
+      [
+        [user("Prompt"), assistant(three)],
+        { after: 1, messages: [tool([decision("a")])] },
+        { after: 1, messages: [tool([decision("b")])] },
+      ],
+      {
+        respond: () => ({
+          decisions: [{ approvalId: "ap-c", approved: true }],
+        }),
+      },
+    ],
+    "an approval continuation start after one decision": [
+      [
+        [user("Prompt"), assistant([call("a"), request("a")])],
+        { after: 1, messages: [tool([decision("a")])] },
+      ],
+      { addMessages: startAfter(2) },
+    ],
+    "an approval continuation start after three decisions saved separately": [
+      [
+        [user("Prompt"), assistant(three)],
+        { after: 1, messages: [tool([decision("a")])] },
+        { after: 1, messages: [tool([decision("b")])] },
+        { after: 1, messages: [tool([decision("c")])] },
+      ],
+      { addMessages: startAfter(4) },
+    ],
+    "an approval continuation step save": [
+      [
+        [user("Prompt"), assistant([call("a"), request("a")])],
+        { after: 1, messages: [tool([decision("a")])] },
+        { after: 2, messages: [pending] },
+      ],
+      {
+        addMessages: (ids) => ({
+          promptMessageId: ids[2],
+          pendingMessageId: ids[3],
+          messages: [tool([result("a")]), assistant("Done")],
+        }),
+      },
+    ],
+  };
+
+  test("a client tool output reads as much as an approval decision", async () => {
+    const output = await measure([[user("Prompt"), assistant([call("a")])]], {
+      respond: () => ({
+        decisions: [],
+        outputs: [
+          {
+            toolCallId: "a",
+            toolName: "lookup",
+            output: { type: "text", value: "found" },
+          },
+        ],
+      }),
+    });
+    const approval = await measure(...paths["an approval decision"]);
+    expect(output.documents).toBe(approval.documents);
+  });
+
+  test("the step a continuation reads without its context is only that step", async () => {
+    const newestStep = async (seeds: Seed[], from?: number) => {
+      const t = initConvexTest();
+      const thread = await t.mutation(api.threads.createThread, {});
+      const threadId = thread._id as Id<"threads">;
+      const ids: Id<"messages">[] = [];
+      for (const messages of seeds as Save[][]) {
+        const saved = await t.mutation(api.messages.addMessages, {
+          threadId,
+          messages,
+        });
+        ids.push(...saved.messages.map((m) => m._id as Id<"messages">));
+      }
+      return t.run(async (ctx) => {
+        const before = await ctx.meta.getTransactionMetrics();
+        const step = await ctx.runQuery(api.messages.getNewestStep, {
+          threadId,
+          messageId: from === undefined ? undefined : ids[from],
+        });
+        const after = await ctx.meta.getTransactionMetrics();
+        return {
+          roles: step.map((m) => m.message?.role),
+          documents: after.documentsRead.used - before.documentsRead.used,
+        };
+      });
+    };
+    const history = [user("Earlier"), assistant("Answer")];
+    const text = await newestStep([[...history, user("Prompt")]]);
+    expect(text.roles).toEqual(["user"]);
+    const results = ["a", "b", "c", "d", "e"];
+    const tools = await newestStep([
+      [
+        ...history,
+        user("Prompt"),
+        assistant(results.map(call)),
+        ...results.map((id) => tool([result(id)])),
+      ],
+    ]);
+    expect(tools.roles).toEqual(["assistant", ...results.map(() => "tool")]);
+    expect(tools.documents - text.documents).toBe(results.length + 1);
+    const older = await newestStep(
+      [
+        [user("Prompt"), assistant([call("a")])],
+        [user("Newer"), failed(assistant("Failed"))],
+      ],
+      1,
+    );
+    expect(older.roles).toEqual(["assistant"]);
+  });
+
+  test("no save path reads more than on main", async () => {
+    const measured: Record<string, { documents: number; bytes: number }> = {};
+    for (const [name, [seeds, save]] of Object.entries(paths)) {
+      measured[name] = await measure(seeds, save);
+    }
+    // Measured on main at 7cd4278b, before client tools.
+    expect(measured).toEqual({
+      "a user prompt on an empty thread": { documents: 2, bytes: 282 },
+      "a user prompt after history": { documents: 3, bytes: 499 },
+      "a generation start after its prompt": { documents: 4, bytes: 750 },
+      "a step save of a call and its result with the next pending message": {
+        documents: 9,
+        bytes: 1976,
+      },
+      "a final step save": { documents: 8, bytes: 1636 },
+      "a step save without a pending message": { documents: 6, bytes: 1397 },
+      "a step save without a pending message after a tool message": {
+        documents: 5,
+        bytes: 1042,
+      },
+      "a generation start after a text message": { documents: 4, bytes: 755 },
+      "a generation start after a tool message": { documents: 5, bytes: 1092 },
+      "a generation start after five separately saved results": {
+        documents: 5,
+        bytes: 1027,
+      },
+      "a generation start after a failed call": { documents: 5, bytes: 1004 },
+      "an assistant message without a prompt after a user message": {
+        documents: 3,
+        bytes: 499,
+      },
+      "an assistant message without a prompt after a tool message": {
+        documents: 4,
+        bytes: 776,
+      },
+      "an assistant message without a prompt after a call without a result": {
+        documents: 4,
+        bytes: 760,
+      },
+      "a tool message without a prompt after its call": {
+        documents: 4,
+        bytes: 822,
+      },
+      "an assistant message on an explicit order after a tool message": {
+        documents: 4,
+        bytes: 776,
+      },
+      "a call and text in one save": { documents: 5, bytes: 1070 },
+      "an approval decision": { documents: 7, bytes: 1751 },
+      "a third approval decision after two saved separately": {
+        documents: 9,
+        bytes: 2810,
+      },
+      "an approval continuation start after one decision": {
+        documents: 5,
+        bytes: 1140,
+      },
+      "an approval continuation start after three decisions saved separately": {
+        documents: 5,
+        bytes: 1140,
+      },
+      "an approval continuation step save": { documents: 9, bytes: 2226 },
+    });
   });
 });

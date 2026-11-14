@@ -13,7 +13,11 @@ import {
   serializeResponseMessages,
   serializeObjectResult,
 } from "../mapping.js";
-import { embedMessages, fetchContextWithPrompt } from "./search.js";
+import {
+  assertClientCallsAnswered,
+  embedMessages,
+  fetchContextWithPrompt,
+} from "./search.js";
 import type {
   ActionCtx,
   AgentCallSettings,
@@ -33,7 +37,7 @@ import {
 import { wrapTools, type ToolCtx } from "./createTool.js";
 import type { Agent } from "../index.js";
 import { assert, omit } from "convex-helpers";
-import { saveInputMessages } from "./saveInputMessages.js";
+import { inputMessagesToSave, saveInputMessages } from "./saveInputMessages.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
@@ -211,6 +215,20 @@ export async function startGeneration<
   }
 
   const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
+  const continuesOrder = !inputMessagesToSave({
+    prompt: args.prompt,
+    messages: args.messages,
+    promptMessageId: args.promptMessageId,
+    saveMessages,
+  }).some((message) => message.role === "user");
+  if (threadId && continuesOrder) {
+    await assertClientCallsAnswered(ctx, component, {
+      threadId,
+      promptMessageId: args.promptMessageId,
+      step: context.step,
+      tools: args.tools,
+    });
+  }
   const { promptMessageId, pendingMessage, savedMessages } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
