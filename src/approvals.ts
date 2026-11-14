@@ -7,14 +7,17 @@ export type ToolCallApprovalDecision = {
 };
 
 // The window a batch is resolved against. Approvals are near the end of a
-// thread, so one bounded page finds them.
+// thread, so reading back at most this many messages finds them.
 export const APPROVAL_LOOKUP_MESSAGES = 100;
 
-export function planToolCallApprovals(
-  messages: MessageDoc[],
+export async function planToolCallApprovals(
+  messages: AsyncIterable<MessageDoc>,
   decisions: ToolCallApprovalDecision[],
   threadId: string,
-): { requestMessageId: string; message: Extract<Message, { role: "tool" }> } {
+): Promise<{
+  requestMessageId: string;
+  message: Extract<Message, { role: "tool" }>;
+}> {
   if (decisions.length === 0) {
     throw new Error("An approval batch must contain at least one decision");
   }
@@ -25,7 +28,7 @@ export function planToolCallApprovals(
   let requestMessageId: string | undefined;
   const providerExecuted = new Set<string>();
 
-  for (const doc of messages) {
+  for await (const doc of messages) {
     if (!Array.isArray(doc.message?.content)) continue;
     const providerCalls = new Set(
       doc.message.content.flatMap((part) =>

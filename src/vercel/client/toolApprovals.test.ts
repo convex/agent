@@ -1170,3 +1170,304 @@ describe("approval continuation with excludeToolMessages", () => {
     },
   );
 });
+
+describe("where a decision is saved", () => {
+  const filler = (text: string): Message => ({
+    role: "assistant",
+    content: [{ type: "text", text }],
+  });
+  async function position(s: Scenario, messageId: string) {
+    const doc = (await s.messages()).page.find(
+      (stored) => stored._id === messageId,
+    );
+    expect(doc).toBeDefined();
+    return { at: [doc!.order, doc!.stepOrder], status: doc!.status };
+  }
+  async function stepsAt(s: Scenario, order: number) {
+    return (await s.messages()).page
+      .filter((stored) => stored.order === order)
+      .map((stored) => stored.stepOrder)
+      .sort((x, y) => x - y);
+  }
+  async function appendAtRequest(s: Scenario, count: number) {
+    await s.t.run((ctx) =>
+      agent.saveMessages(ctx, {
+        threadId: s.threadId,
+        promptMessageId: s.requestMessageId,
+        messages: Array.from({ length: count }, (_, i) => filler(`step ${i}`)),
+        skipEmbeddings: true,
+      }),
+    );
+  }
+
+  test("after the request", async () => {
+    const s = await scenario();
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 2],
+      status: "success",
+    });
+  });
+
+  test("siblings decided at once each take their own step", async () => {
+    const s = await scenario({ ids: ["a", "b", "c"] });
+
+    const ids = await Promise.all([
+      s.approve("a"),
+      s.approve("b"),
+      s.approve("c"),
+    ]);
+
+    const at = await Promise.all(ids.map((id) => position(s, id)));
+    expect(at.map(({ at }) => at[0])).toEqual([0, 0, 0]);
+    expect(at.map(({ at }) => at[1]).sort()).toEqual([2, 3, 4]);
+    expect(await stepsAt(s, 0)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  test("after a continuation's steps", async () => {
+    const s = await scenario();
+    await s.completeA();
+    const before = await stepsAt(s, 0);
+
+    expect(await position(s, await s.approve("b"))).toEqual({
+      at: [0, before.at(-1)! + 1],
+      status: "success",
+    });
+  });
+
+  test("at the request's order when newer prompts follow it", async () => {
+    const s = await scenario();
+    const next = await s.prompt("Next");
+    await s.save({ promptMessageId: next, message: filler("reply") });
+    await s.prompt("Again");
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 2],
+      status: "success",
+    });
+    expect(await stepsAt(s, 1)).toEqual([0, 1]);
+  });
+
+  test("after a newer prompt raced in between two decisions", async () => {
+    const s = await scenario();
+    await s.completeA();
+    const last = (await stepsAt(s, 0)).at(-1)!;
+    await s.prompt("Meanwhile");
+
+    expect(await position(s, await s.approve("b"))).toEqual({
+      at: [0, last + 1],
+      status: "success",
+    });
+  });
+
+  test("after a pending step at the request's order", async () => {
+    const s = await scenario();
+    await s.t.run((ctx) =>
+      ctx.runMutation(components.agent.messages.addMessages, {
+        threadId: s.threadId,
+        promptMessageId: s.requestMessageId,
+        messages: [{ message: filler("streaming"), status: "pending" }],
+      }),
+    );
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 3],
+      status: "success",
+    });
+  });
+
+  test("after failed steps at the request's order", async () => {
+    const s = await scenario();
+    await s.t.run((ctx) =>
+      ctx.runMutation(components.agent.messages.addMessages, {
+        threadId: s.threadId,
+        promptMessageId: s.requestMessageId,
+        messages: [
+          { message: filler("one"), status: "failed", error: "x" },
+          { message: filler("two"), status: "failed", error: "x" },
+        ],
+      }),
+    );
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 4],
+      status: "success",
+    });
+  });
+
+  test("as failed when the request failed", async () => {
+    const s = await scenario();
+    await s.t.run((ctx) =>
+      ctx.runMutation(components.agent.messages.updateMessage, {
+        messageId: s.requestMessageId,
+        patch: { status: "failed", error: "Model crashed" },
+      }),
+    );
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 2],
+      status: "failed",
+    });
+  });
+
+  test("in place of a deleted last step", async () => {
+    const s = await scenario();
+    await appendAtRequest(s, 3);
+    const steps = await s.messages();
+    const last = steps.page.find(
+      (stored) => stored.order === 0 && stored.stepOrder === 4,
+    )!;
+    await s.t.run((ctx) => agent.deleteMessage(ctx, { messageId: last._id }));
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 4],
+      status: "success",
+    });
+  });
+
+  test("after a gap left by a deleted middle step", async () => {
+    const s = await scenario();
+    await appendAtRequest(s, 3);
+    const middle = (await s.messages()).page.find(
+      (stored) => stored.order === 0 && stored.stepOrder === 3,
+    )!;
+    await s.t.run((ctx) => agent.deleteMessage(ctx, { messageId: middle._id }));
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [0, 5],
+      status: "success",
+    });
+  });
+
+  test("nowhere when the request was deleted", async () => {
+    const s = await scenario();
+    await s.t.run((ctx) =>
+      agent.deleteMessage(ctx, { messageId: s.requestMessageId }),
+    );
+    const before = await s.messages();
+
+    expect(
+      await s.decideAndCatch([{ approvalId: "a", approved: true }]),
+    ).toMatch(/not found/i);
+    expect(await s.messages()).toEqual(before);
+  });
+
+  test("when the request is the last message of the lookup window", async () => {
+    const s = await scenario({ olderMessages: 20 });
+    await appendAtRequest(s, 99);
+
+    expect(await position(s, await s.approve("a"))).toEqual({
+      at: [20, 101],
+      status: "success",
+    });
+  });
+
+  test("nowhere once later steps push the request out of the window", async () => {
+    const s = await scenario({ olderMessages: 20 });
+    await appendAtRequest(s, 100);
+    const before = await s.messages();
+
+    expect(
+      await s.decideAndCatch([{ approvalId: "a", approved: true }]),
+    ).toMatch(/not found in the last 100 messages/);
+    expect(await s.messages()).toEqual(before);
+  });
+
+  test("after decisions and outputs on a long order", async () => {
+    const s = await scenario({ ids: ["a", "b", "c"], olderMessages: 20 });
+    await appendAtRequest(s, 40);
+    const a = await s.approve("a");
+    await s.continue(a);
+    await appendAtRequest(s, 40);
+    const last = (await stepsAt(s, 20)).at(-1)!;
+
+    expect(await position(s, await s.approve("b"))).toEqual({
+      at: [20, last + 1],
+      status: "success",
+    });
+    expect(await position(s, await s.approve("c"))).toEqual({
+      at: [20, last + 2],
+      status: "success",
+    });
+  });
+});
+
+// Reads per call, pinned so a regression shows up here.
+describe("approval decision read costs", () => {
+  type Reads = [documentsRead: number, bytesRead: number, queries: number];
+  async function measure(s: Scenario, decisions: Decision[]): Promise<Reads> {
+    return s.t.run(async (ctx) => {
+      try {
+        await agent.respondToToolCallApprovals(ctx, {
+          threadId: s.threadId,
+          decisions,
+        });
+      } catch {
+        // A rejected batch still pays for what it read.
+      }
+      const { documentsRead, bytesRead, databaseQueries } = await (
+        ctx.meta as {
+          getTransactionMetrics(): Promise<
+            Record<
+              "documentsRead" | "bytesRead" | "databaseQueries",
+              { used: number }
+            >
+          >;
+        }
+      ).getTransactionMetrics();
+      return [documentsRead.used, bytesRead.used, databaseQueries.used];
+    });
+  }
+
+  test.each<[string, Reads]>([
+    ["first decision", [4, 1231, 8]],
+    ["batch", [4, 1297, 8]],
+    ["provider-executed", [4, 1285, 8]],
+    ["sibling after a continuation", [7, 2542, 8]],
+    ["after a newer prompt", [5, 1470, 8]],
+    ["long thread", [4, 1231, 8]],
+    ["behind 30 later steps", [34, 10811, 8]],
+    ["last message of the window", [103, 32891, 8]],
+    ["not in the window", [100, 808090, 6]],
+  ])("%s", async (path, expected) => {
+    const long = ["long thread", "not in the window"].includes(path);
+    const s = await scenario({
+      providerExecuted: path === "provider-executed",
+      olderMessages: long ? 120 : 0,
+    });
+    let decisions: Decision[] = [{ approvalId: "a", approved: true }];
+    if (path === "batch") {
+      decisions = [
+        { approvalId: "a", approved: true },
+        { approvalId: "b", approved: false, reason: "No" },
+      ];
+    }
+    if (path === "sibling after a continuation") {
+      await s.completeA();
+      decisions = [{ approvalId: "b", approved: true }];
+    }
+    if (path === "after a newer prompt") await s.prompt("Next");
+    const later = {
+      "behind 30 later steps": 30,
+      "last message of the window": 99,
+    }[path];
+    if (later) {
+      await s.t.run((ctx) =>
+        agent.saveMessages(ctx, {
+          threadId: s.threadId,
+          promptMessageId: s.requestMessageId,
+          messages: Array.from({ length: later }, (_, i) => ({
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: `step ${i}` }],
+          })),
+          skipEmbeddings: true,
+        }),
+      );
+    }
+    if (path === "not in the window") {
+      decisions = [{ approvalId: "missing", approved: true }];
+    }
+
+    expect(await measure(s, decisions)).toEqual(expected);
+  });
+});
