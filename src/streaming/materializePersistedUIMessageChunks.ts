@@ -1,12 +1,12 @@
 import {
-  vToolResultOutput,
+  isRawToolResultOutput,
   type Message,
   type MessageContentParts,
   type MessageWithMetadataInternal,
   type StreamDelta,
   type StreamMessage,
 } from "../validators.js";
-import { validate } from "convex-helpers/validators";
+import { encodeToolJsonFields } from "./toolJson.js";
 import {
   collectContiguousStreamParts,
   createPersistedUIMessageChunkState,
@@ -177,12 +177,13 @@ export function projectPersistedUIMessageChunkParts(
           part.state === "output-error"
             ? (part.input ?? part.rawInput ?? {})
             : (part.input ?? {});
+        const stored = encodeToolJsonFields({ input }, "input");
         assistantContent.push({
           type: "tool-call",
           toolCallId: part.toolCallId,
           toolName: getToolName(part),
-          input,
-          args: input,
+          ...stored,
+          args: stored.input,
           providerExecuted: part.providerExecuted,
           ...(part.title ? { title: part.title } : {}),
           ...(part.toolMetadata ? { toolMetadata: part.toolMetadata } : {}),
@@ -367,11 +368,8 @@ function toolResult(
         ? { type: "error-text" as const, value: String(raw) }
         : mode === "error-json"
           ? { type: "error-json" as const, value: raw ?? null }
-          : validate(vToolResultOutput, raw)
-            ? (raw as Extract<
-                MessageContentParts,
-                { type: "tool-result" }
-              >["output"])
+          : isRawToolResultOutput(raw)
+            ? raw
             : typeof raw === "string"
               ? { type: "text" as const, value: raw }
               : { type: "json" as const, value: raw ?? null };
@@ -381,7 +379,10 @@ function toolResult(
     type: "tool-result",
     toolCallId: part.toolCallId,
     toolName: getToolName(part),
-    output,
+    output:
+      output?.type === "json" || output?.type === "error-json"
+        ? encodeToolJsonFields(output, "value")
+        : output,
     ...(providerOptions ? { providerOptions } : {}),
   };
 }

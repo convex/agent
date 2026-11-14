@@ -37,6 +37,7 @@ import {
   type vToolResultPart,
   type SourcePart,
   vToolResultOutput,
+  isRawToolResultOutput,
   type MessageDoc,
   vToolApprovalRequest,
   vToolApprovalResponse,
@@ -47,6 +48,10 @@ import type { MutationCtx } from "./client/types.js";
 import { MAX_FILE_SIZE, storeFile } from "./client/files.js";
 import { materializeCanonicalToolResultContentFiles } from "./fileMaterialization.js";
 import type { Infer } from "convex/values";
+import {
+  decodeToolJsonFields,
+  encodeToolJsonFields,
+} from "../streaming/toolJson.js";
 import {
   convertUint8ArrayToBase64,
   type FileData,
@@ -457,12 +462,15 @@ export async function serializeContent(
         }
         case "tool-call": {
           // Handle legacy data where only args field exists
-          const input = part.input ?? (part as any)?.args ?? {};
+          const stored = encodeToolJsonFields(
+            { input: toolCallInput(part) },
+            "input",
+          );
           return {
             type: part.type,
-            input,
+            ...stored,
             /** @deprecated Use `input` instead. */
-            args: input,
+            args: stored.input,
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             providerExecuted: part.providerExecuted,
@@ -594,18 +602,22 @@ export function fromModelMessageContent(content: Content): Message["content"] {
             mediaType: getMimeOrMediaType(part)!,
             ...metadata,
           } satisfies Infer<typeof vFilePart>;
-        case "tool-call":
-          // Handle legacy data where only args field exists
+        case "tool-call": {
+          const stored = encodeToolJsonFields(
+            { input: toolCallInput(part) },
+            "input",
+          );
           return {
             type: part.type,
-            input: part.input ?? (part as any)?.args ?? {},
+            ...stored,
             /** @deprecated Use `input` instead. */
-            args: part.input ?? (part as any)?.args ?? {},
+            args: stored.input,
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             providerExecuted: part.providerExecuted,
             ...metadata,
           } satisfies Infer<typeof vToolCallPart>;
+        }
         case "tool-result":
           return serializeToolResult(part, metadata);
         case "reasoning":
@@ -703,11 +715,9 @@ export function toModelMessageContent(
             ...metadata,
           } satisfies FilePart;
         case "tool-call": {
-          // Handle legacy data where only args field exists
-          const input = part.input ?? (part as any)?.args ?? {};
           return {
             type: part.type,
-            input,
+            input: toolCallInput(part),
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             providerExecuted: part.providerExecuted,
@@ -787,13 +797,20 @@ export function normalizeToolOutput(
       value: result,
     };
   }
-  if (validate(vToolResultOutput, result)) {
+  if (isRawToolResultOutput(result)) {
     return result as unknown as ToolResultOutput;
   }
   return {
     type: "json",
     value: result ?? null,
   };
+}
+
+function toolCallInput(
+  part: ToolCallPart | Infer<typeof vToolCallPart>,
+): unknown {
+  const decoded = decodeToolJsonFields(part, "input");
+  return decoded.input ?? ("args" in decoded ? decoded.args : undefined) ?? {};
 }
 
 function serializeToolResult(
@@ -805,12 +822,11 @@ function serializeToolResult(
 ): Infer<typeof vToolResultPart> {
   return {
     type: part.type,
-    output:
-      "output" in part && part.output !== undefined
-        ? serializeToolResultOutput(part.output)
-        : (normalizeToolOutput(
-            "result" in part ? part.result : undefined,
-          ) as Infer<typeof vToolResultOutput>),
+    output: serializeToolResultOutput(
+      part.output !== undefined
+        ? part.output
+        : normalizeToolOutput("result" in part ? part.result : undefined),
+    ),
     toolCallId: part.toolCallId,
     toolName: part.toolName,
     ...("providerExecuted" in part
@@ -855,7 +871,10 @@ function serializeToolResultOutput(
   }
   if (output.type !== "content") {
     if (validate(vToolResultOutput, output)) {
-      return output as Infer<typeof vToolResultOutput>;
+      const stored = output as Infer<typeof vToolResultOutput>;
+      return stored.type === "json" || stored.type === "error-json"
+        ? encodeToolJsonFields(stored, "value")
+        : stored;
     }
     throw new Error(`Invalid AI SDK 7 tool-result output: ${output.type}`);
   }
@@ -933,6 +952,9 @@ function deserializeToolResultOutput(output: unknown): ToolResultOutput {
     return normalizeToolOutput(output as JSONValue);
   }
   const stored = output as Infer<typeof vToolResultOutput>;
+  if (stored.type === "json" || stored.type === "error-json") {
+    return decodeToolJsonFields(stored, "value");
+  }
   if (stored.type !== "content") return stored as unknown as ToolResultOutput;
   return {
     type: "content",
