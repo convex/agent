@@ -36,6 +36,7 @@
     "typecheck": "tsc --noEmit && tsc -p example && tsc -p example/convex",
     "lint": "eslint .",
     "test": "vitest run --typecheck",
+    "test:floor": "sh test-floor/run.sh",
     "check": "npm run test && npm run typecheck && npm run lint",
     "test:e2e": "convex dev --once --typecheck-components",
     "test:watch": "vitest --typecheck --clearScreen false",

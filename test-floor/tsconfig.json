@@ -1,0 +1,21 @@
+{
+  // Checks every public entry, as a consumer resolves it, against the oldest
+  // convex in peerDependencies. `/test` is .ts source, so it is checked even
+  // under skipLibCheck. `paths` sends every convex import, including those
+  // inside dist, src and other packages, to the copy that run.sh unpacks here.
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "dom", "dom.iterable"],
+    "noEmit": true,
+    "skipLibCheck": false,
+    "types": ["node"],
+    "paths": {
+      "convex": ["./node_modules/convex/dist/esm-types/index.d.ts"],
+      "convex/*": ["./node_modules/convex/dist/esm-types/*/index.d.ts"]
+    }
+  },
+  "files": ["index.ts"]
+}
