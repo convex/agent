@@ -1,5 +1,6 @@
 import type { ModelMessage, ToolModelMessage, ToolSet } from "ai";
 import type { ActionCtx, AgentComponent } from "./types.js";
+import { errorToString } from "./utils.js";
 
 /**
  * Thrown when a durable generation (`pendingMessageId`) may not run.
@@ -7,7 +8,7 @@ import type { ActionCtx, AgentComponent } from "./types.js";
  *   `retryAt`, when its lease expires.
  * - `TurnEnded`: the pending message was answered, or the turn stopped:
  *   `reason` says why (for example its pending message or prompt was filled,
- *   failed or deleted by another writer).
+ *   failed or deleted by another writer, or its stream was aborted).
  */
 export class TurnError extends Error {
   readonly code: "TurnBusy" | "TurnEnded";
@@ -36,7 +37,7 @@ export class TurnError extends Error {
   }
 }
 
-/** Passed by generateText, the only driver of a turn. */
+/** Passed by generateText and streamText, the only drivers of a turn. */
 export const turnDriver = Symbol("turnDriver");
 
 export type Turn = {
@@ -64,26 +65,41 @@ export async function claimTurn(
     messageId: pendingMessageId,
   });
   if ("refused" in claimed) throw new TurnError(claimed.refused);
-  const { takeover: _takeover, ...turn } = claimed;
-  return { ...turn, unsaved: false };
+  const { takeover, ...claimedTurn } = claimed;
+  const turn = { ...claimedTurn, unsaved: false };
+  // An attempt whose lease expired may have left its stream running.
+  if (takeover) {
+    try {
+      await ctx.runMutation(component.streams.abortByOrder, {
+        threadId,
+        order: turn.order,
+        reason: "The turn was taken over",
+      });
+    } catch (error) {
+      await failTurn(ctx, component, turn, errorToString(error));
+      throw error;
+    }
+  }
+  return turn;
 }
 
 /**
- * The attempt's one failure write. It releases only if no tool started since
- * the last committed save, so whatever failed the attempt, nothing it left
- * unsaved can run twice.
+ * The attempt's one failure write. A stream refusal stops the turn. Otherwise
+ * it releases only if no tool started since the last committed save, so
+ * whatever failed the attempt, nothing it left unsaved can run twice.
  */
 export async function failTurn(
   ctx: ActionCtx,
   component: AgentComponent,
   turn: Turn,
   error: string,
+  stopped?: string,
 ) {
   await ctx.runMutation(component.turns.fail, {
     turnId: turn.turnId,
     attempt: turn.attempt,
-    error,
-    then: turn.unsaved ? "hold" : "release",
+    error: stopped ?? error,
+    then: stopped !== undefined ? "stop" : turn.unsaved ? "hold" : "release",
   });
 }
 

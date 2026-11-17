@@ -248,7 +248,7 @@ export class DeltaStreamer<T> {
   streamId: string | undefined;
   public readonly config: {
     throttleMs: number;
-    onAsyncAbort: (reason: string) => Promise<void>;
+    onAsyncAbort: (reason: string, refused?: boolean) => Promise<void>;
     compress: ((parts: T[]) => T[]) | null;
     materialize:
       | ((parts: T[]) => Promise<{
@@ -284,7 +284,7 @@ export class DeltaStreamer<T> {
     public readonly ctx: MutationCtx | ActionCtx,
     config: {
       throttleMs: number | undefined;
-      onAsyncAbort: (reason: string) => Promise<void>;
+      onAsyncAbort: (reason: string, refused?: boolean) => Promise<void>;
       abortSignal: AbortSignal | undefined;
       compress: ((parts: T[]) => T[]) | null;
       /** Defaults to false, meaning `consumeStream` finishes the stream. */
@@ -586,7 +586,8 @@ export class DeltaStreamer<T> {
       if (this.#stoppedAccepting) {
         return;
       }
-      await this.#abortDelta("async abort");
+      // Not streaming any more: the stream was aborted elsewhere.
+      await this.#abortDelta("async abort", true);
       return;
     }
     // Now that we've sent the delta, check if we need to send another one.
@@ -665,10 +666,10 @@ export class DeltaStreamer<T> {
     await this.#abort(reason);
   }
 
-  async #abortDelta(reason: string) {
+  async #abortDelta(reason: string, refused = false) {
     let callbackFailure: { error: unknown } | undefined;
     try {
-      await this.config.onAsyncAbort(reason);
+      await this.config.onAsyncAbort(reason, refused);
     } catch (error) {
       callbackFailure = { error };
     }

@@ -118,7 +118,7 @@ export async function startGeneration<
     promptMessageId?: string;
     /**
      * Generate into this pending message, which the app saved. Only
-     * generateText takes it.
+     * generateText and streamText take it.
      */
     pendingMessageId?: string;
     /**
@@ -203,7 +203,7 @@ export async function startGeneration<
     createPendingMessage?: boolean,
     finishStreamId?: string,
   ) => Promise<void>;
-  fail: (reason: unknown) => Promise<void>;
+  fail: (reason: unknown, stopped?: string) => Promise<void>;
   endStep: <TOOLS extends ToolSet>(
     step: StepResult<TOOLS, RUNTIME_CONTEXT>,
     error?: string,
@@ -221,7 +221,7 @@ export async function startGeneration<
     // Everything that can fail without a side effect fails before the claim.
     assert(
       driver === turnDriver,
-      "Only generateText takes a pendingMessageId",
+      "Only generateText and streamText take a pendingMessageId",
     );
     assert(
       threadId,
@@ -377,7 +377,11 @@ export async function startGeneration<
   // The generation ends once, where the AI SDK ends it: what it finished is
   // saved, and if it failed, so does what is still pending.
   let ending: Promise<void> | undefined;
-  const settle = (failed?: { error: unknown }, finishStreamId?: string) =>
+  const settle = (
+    failed?: { error: unknown },
+    finishStreamId?: string,
+    stopped?: string,
+  ) =>
     (ending ??= (async () => {
       await saving.catch(() => {});
       if (!failed && !saveFailure) {
@@ -389,13 +393,17 @@ export async function startGeneration<
       }
       const error = errorToString((failed ?? saveFailure)!.error);
       try {
-        // A step that ended keeps its messages, ahead of the failed one.
-        if (held) await saveHeld(held.error === undefined);
+        // A step that ended keeps its messages, ahead of the failed one. A
+        // turn whose stream was aborted elsewhere stops, and saves nothing
+        // more.
+        if (held && !(turn && stopped !== undefined)) {
+          await saveHeld(held.error === undefined);
+        }
       } finally {
         if (turn) {
           // A refused save already settled the turn.
           if (!(saveFailure?.error instanceof TurnError)) {
-            await failTurn(ctx, component, turn, error);
+            await failTurn(ctx, component, turn, error, stopped);
           }
         } else {
           const messageId = await pendingMessageNow();
@@ -645,7 +653,7 @@ export async function startGeneration<
         activeModel = model;
       }
     },
-    fail: (reason) => settle({ error: reason }),
+    fail: (reason, stopped) => settle({ error: reason }, undefined, stopped),
     endStep: async (step, error) => {
       // A step that ends after the generation did is only reported.
       if (!ending) {

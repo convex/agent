@@ -446,6 +446,18 @@ export type StreamingTextArgs<
    * in the Agent constructor or createThread / continueThread.
    */
   tools?: TOOLS;
+  /**
+   * Generate into this pending message, which the app saved (for example with
+   * `saveMessage({ message: { role: "assistant", content: [] }, metadata: {
+   * status: "pending" } })`). The generation claims it first: a second attempt
+   * while one is running, or after the message is answered, throws a
+   * `TurnError` before the model is called. An attempt that crashed is taken
+   * over once its lease expires, and continues from its saved steps. Its
+   * context is the thread up to the message's order, so it takes no `prompt`,
+   * `messages` or `promptMessageId`. Its result's `savedMessages` is empty:
+   * read what it saved from the thread.
+   */
+  pendingMessageId?: string;
   /** @deprecated Use onStepEnd. */
   onStepFinish?: Parameters<
     typeof streamText<

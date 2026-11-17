@@ -23,6 +23,7 @@ import type {
 } from "./types.js";
 import type { Output as AISDKOutput } from "ai";
 import { startGeneration } from "./start.js";
+import { turnDriver } from "./turn.js";
 import type { Agent } from "../index.js";
 import { getModelName, getProviderName } from "../../shared.js";
 import { errorToString } from "./utils.js";
@@ -107,7 +108,7 @@ export async function streamText<
       Tools,
       object,
       RUNTIME_CONTEXT
-    >(ctx, component, streamTextArgs, options, "streamText");
+    >(ctx, component, streamTextArgs, options, "streamText", turnDriver);
 
   const savesMessages = options?.storageOptions?.saveMessages !== "none";
   const willAwaitStream =
@@ -119,6 +120,8 @@ export async function streamText<
   // Why the deltas stopped, for the failure it causes: the streamer aborts the
   // AI SDK, which ends the generation where it stops.
   let deltasFailed: string | undefined;
+  // Set when the stream was aborted elsewhere. That stops a durable turn.
+  let deltasRefused: string | undefined;
   const streamer =
     threadId && options.saveStreamDeltas
       ? new DeltaStreamer(
@@ -129,8 +132,11 @@ export async function streamText<
               typeof options.saveStreamDeltas === "object"
                 ? options.saveStreamDeltas.throttleMs
                 : undefined,
-            onAsyncAbort: async (reason) => {
+            onAsyncAbort: async (reason, refused) => {
               deltasFailed ??= reason;
+              if (refused) {
+                deltasRefused ??= "The turn's stream was aborted elsewhere";
+              }
             },
             compress: compressUIMessageChunks,
             materialize: (parts) =>
@@ -153,7 +159,7 @@ export async function streamText<
 
   const failGeneration = (reason: string) =>
     runStreamCleanup({
-      failCall: () => call.fail(reason),
+      failCall: () => call.fail(reason, deltasRefused),
       failStreamer: async () => streamer?.fail(reason),
     });
   const endGeneration = (options?: Parameters<typeof call.end>[0]) =>
@@ -165,20 +171,6 @@ export async function streamText<
   let finished = false;
   let stopped = false;
   let stepEnds = 0;
-  const transforms = mergeTransforms(
-    options?.saveStreamDeltas,
-    streamTextArgs.experimental_transform,
-  ).map(
-    (transform): StreamTextTransform<Tools> =>
-      (transformOptions) =>
-        transform({
-          ...transformOptions,
-          stopStream: () => {
-            stopped = true;
-            transformOptions.stopStream();
-          },
-        }),
-  );
   // The generation ends where its stream does, before the result resolves:
   // at `finish`, after the last onStepEnd, the last step is saved and its
   // stream finished before passing it on. A stream that ends without `finish`
@@ -227,43 +219,69 @@ export async function streamText<
     });
   };
 
-  const result = streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>({
-    ...args,
-    abortSignal: streamer?.abortController.signal ?? args.abortSignal,
-    experimental_transform: [...transforms, saveLastStep],
-    onAbort: async (event) => {
-      const reason =
-        deltasFailed ??
-        (args.abortSignal?.reason
-          ? errorToString(args.abortSignal.reason)
-          : "streamText aborted");
-      await runStreamCleanup({
-        failCall: () => call.fail(reason),
-        failStreamer: async () => streamer?.fail(reason),
-        onAbort: () => streamTextArgs.onAbort?.(event),
-      });
-    },
-    prepareStep: async (options) => {
-      await call.beforeStep(options);
-      const result = await streamTextArgs.prepareStep?.(options);
-      if (result) {
-        const model = result.model ?? options.model;
-        call.updateModel(model);
-        return result;
-      }
-      return undefined;
-    },
-    onStepEnd: async (step) => {
-      await call.endStep(step, stepError);
-      return (streamTextArgs.onStepEnd ?? streamTextArgs.onStepFinish)?.(step);
-    },
-    onEnd: async (event) => {
-      await endGeneration();
-      return (streamTextArgs.onEnd ?? streamTextArgs.onFinish)?.(event);
-    },
-  } as Parameters<
-    typeof streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>
-  >[0]) as StreamTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
+  let result: StreamTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
+  try {
+    // Throws on an invalid `chunking`.
+    const transforms = mergeTransforms(
+      options?.saveStreamDeltas,
+      streamTextArgs.experimental_transform,
+    ).map(
+      (transform): StreamTextTransform<Tools> =>
+        (transformOptions) =>
+          transform({
+            ...transformOptions,
+            stopStream: () => {
+              stopped = true;
+              transformOptions.stopStream();
+            },
+          }),
+    );
+    result = streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>({
+      ...args,
+      abortSignal: streamer?.abortController.signal ?? args.abortSignal,
+      experimental_transform: [...transforms, saveLastStep],
+      onAbort: async (event) => {
+        const reason =
+          deltasFailed ??
+          (args.abortSignal?.reason
+            ? errorToString(args.abortSignal.reason)
+            : "streamText aborted");
+        await runStreamCleanup({
+          failCall: () => call.fail(reason, deltasRefused),
+          failStreamer: async () => streamer?.fail(reason),
+          onAbort: () => streamTextArgs.onAbort?.(event),
+        });
+      },
+      prepareStep: async (options) => {
+        await call.beforeStep(options);
+        const result = await streamTextArgs.prepareStep?.(options);
+        if (result) {
+          const model = result.model ?? options.model;
+          call.updateModel(model);
+          return result;
+        }
+        return undefined;
+      },
+      onStepEnd: async (step) => {
+        await call.endStep(step, stepError);
+        return (streamTextArgs.onStepEnd ?? streamTextArgs.onStepFinish)?.(
+          step,
+        );
+      },
+      onEnd: async (event) => {
+        await endGeneration();
+        return (streamTextArgs.onEnd ?? streamTextArgs.onFinish)?.(event);
+      },
+    } as Parameters<
+      typeof streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>
+    >[0]) as StreamTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
+  } catch (error) {
+    // Nothing has started, so a turn is released at once.
+    if (streamTextArgs.pendingMessageId !== undefined) {
+      await failGeneration(errorToString(error)).catch(() => {});
+    }
+    throw error;
+  }
   const stream = streamer?.consumeStream(
     result.toUIMessageStream<AIUIMessage<Tools>>({
       sendSources:
