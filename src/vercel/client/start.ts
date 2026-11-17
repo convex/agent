@@ -35,7 +35,20 @@ import type { Agent } from "../index.js";
 import { assert, omit } from "convex-helpers";
 import { saveInputMessages } from "./saveInputMessages.js";
 import { errorToString } from "./utils.js";
-import type { GenericActionCtx, GenericDataModel } from "convex/server";
+import {
+  claimTurn,
+  failTurn,
+  mergeTrailingToolMessages,
+  trackToolStarts,
+  TurnError,
+  turnDriver,
+  type Turn,
+} from "./turn.js";
+import type {
+  FunctionArgs,
+  GenericActionCtx,
+  GenericDataModel,
+} from "convex/server";
 
 export function resolveUsageModel(
   toSave:
@@ -104,6 +117,11 @@ export async function startGeneration<
      */
     promptMessageId?: string;
     /**
+     * Generate into this pending message, which the app saved. Only
+     * generateText takes it.
+     */
+    pendingMessageId?: string;
+    /**
      * The model to use for the LLM calls. This will override the model specified
      * in the Agent constructor.
      */
@@ -160,6 +178,7 @@ export async function startGeneration<
     | "streamText"
     | "generateObject"
     | "streamObject",
+  driver?: typeof turnDriver,
 ): Promise<{
   args: WithoutModel<T> & {
     instructions?: Instructions;
@@ -196,34 +215,89 @@ export async function startGeneration<
   end: (options?: { finishStreamId?: string }) => Promise<void>;
   getSavedMessages: () => MessageDoc[];
 }> {
-  const userId =
-    opts.userId ??
-    (threadId &&
-      (await ctx.runQuery(component.threads.getThread, { threadId }))
-        ?.userId) ??
-    undefined;
-
-  const context = await fetchContextWithPrompt(ctx, component, {
-    ...opts,
-    userId,
-    threadId,
-    messages: args.messages,
-    prompt: args.prompt,
-    promptMessageId: args.promptMessageId,
-  });
-  const allowSystemInMessages = args.allowSystemInMessages ?? true;
-  if (
-    !allowSystemInMessages &&
-    context.messages.some((message) => message.role === "system")
-  ) {
-    throw new Error(
-      "System messages in assembled message history require allowSystemInMessages: true. Use instructions for top-level system guidance.",
+  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
+  let turn: Turn | undefined;
+  if (args.pendingMessageId !== undefined) {
+    // Everything that can fail without a side effect fails before the claim.
+    assert(
+      driver === turnDriver,
+      "Only generateText takes a pendingMessageId",
     );
+    assert(
+      threadId,
+      "A generation into a pendingMessageId requires a threadId",
+    );
+    assert(
+      args.prompt === undefined &&
+        args.messages === undefined &&
+        args.promptMessageId === undefined,
+      "A generation into a pendingMessageId takes no prompt, messages or promptMessageId",
+    );
+    assert(
+      saveMessages !== "none",
+      "A generation into a pendingMessageId saves its messages",
+    );
+    assert(args.model ?? opts.languageModel, "model is required");
+    turn = await claimTurn(ctx, component, {
+      threadId,
+      pendingMessageId: args.pendingMessageId,
+    });
+  }
+  const allowSystemInMessages = args.allowSystemInMessages ?? true;
+  let userId: string | undefined;
+  let context: Awaited<ReturnType<typeof fetchContextWithPrompt>>;
+  try {
+    userId =
+      opts.userId ??
+      (threadId &&
+        (await ctx.runQuery(component.threads.getThread, { threadId }))
+          ?.userId) ??
+      undefined;
+
+    context = await fetchContextWithPrompt(ctx, component, {
+      ...opts,
+      userId,
+      threadId,
+      messages: args.messages,
+      prompt: args.prompt,
+      promptMessageId: turn ? turn.anchorId : args.promptMessageId,
+      // Answers saved one at a time are separate tool messages, and the AI SDK
+      // only resumes the approvals in the last one.
+      ...(turn && {
+        contextHandler: async (handlerCtx, handlerArgs) =>
+          mergeTrailingToolMessages(
+            opts.contextHandler
+              ? await opts.contextHandler(handlerCtx, handlerArgs)
+              : handlerArgs.allMessages,
+          ),
+      }),
+    });
+    if (
+      !allowSystemInMessages &&
+      context.messages.some((message) => message.role === "system")
+    ) {
+      throw new Error(
+        "System messages in assembled message history require allowSystemInMessages: true. Use instructions for top-level system guidance.",
+      );
+    }
+  } catch (error) {
+    // No tool has started, so this releases the turn.
+    if (turn) await failTurn(ctx, component, turn, errorToString(error));
+    throw error;
   }
 
-  const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
-  const { promptMessageId, pendingMessage, savedMessages } =
-    threadId && saveMessages !== "none"
+  const { promptMessageId, pendingMessage, savedMessages } = turn
+    ? {
+        promptMessageId:
+          turn.anchorId !== args.pendingMessageId ? turn.anchorId : undefined,
+        pendingMessage: {
+          _id: turn.slotId,
+          order: turn.order,
+          stepOrder: turn.stepOrder,
+        },
+        savedMessages: [] as MessageDoc[],
+      }
+    : threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
           userId,
@@ -318,12 +392,19 @@ export async function startGeneration<
         // A step that ended keeps its messages, ahead of the failed one.
         if (held) await saveHeld(held.error === undefined);
       } finally {
-        const messageId = await pendingMessageNow();
-        if (messageId) {
-          await ctx.runMutation(component.messages.finalizeMessage, {
-            messageId,
-            result: { status: "failed", error },
-          });
+        if (turn) {
+          // A refused save already settled the turn.
+          if (!(saveFailure?.error instanceof TurnError)) {
+            await failTurn(ctx, component, turn, error);
+          }
+        } else {
+          const messageId = await pendingMessageNow();
+          if (messageId) {
+            await ctx.runMutation(component.messages.finalizeMessage, {
+              messageId,
+              result: { status: "failed", error },
+            });
+          }
         }
       }
       if (saveFailure) throw saveFailure.error;
@@ -335,13 +416,22 @@ export async function startGeneration<
     promptMessageId,
     agent: opts.agentForToolCtx,
   } satisfies ToolCtx;
-  const tools = wrapTools(toolCtx, args.tools) as Tools;
+  const tools = (
+    turn
+      ? trackToolStarts(
+          wrapTools(toolCtx, args.tools),
+          turn,
+          () => ending !== undefined,
+        )
+      : wrapTools(toolCtx, args.tools)
+  ) as Tools;
   const argsWithoutSystem = omit(
     args as typeof args & { system?: Instructions },
     ["system"],
   );
   const {
     promptMessageId: _promptMessageId,
+    pendingMessageId: _pendingMessageId,
     messages: _messages,
     prompt: _prompt,
     instructions: _instructions,
@@ -396,6 +486,8 @@ export async function startGeneration<
     createPendingMessage: boolean | undefined,
     { finishStreamId, error }: { finishStreamId?: string; error?: string },
   ): Promise<string | undefined> => {
+    // A turn's slot stays pending through a failed step, for the next attempt.
+    if (turn && error !== undefined) return undefined;
     if (threadId && saveMessages !== "none") {
       let serialized;
       if ("object" in toSave) {
@@ -439,6 +531,18 @@ export async function startGeneration<
           status: "pending",
         });
         embeddings?.vectors.push(null);
+      }
+      if (turn) {
+        await saveStep(turn, {
+          userId,
+          threadId,
+          agentName: opts.agentName,
+          messages: serialized.messages,
+          embeddings,
+          finishStreamId,
+          final: !createPendingMessage,
+        });
+        return undefined;
       }
       let saved;
       try {
@@ -487,6 +591,23 @@ export async function startGeneration<
       }
     }
     return undefined;
+  };
+  const saveStep = async (
+    turn: Turn,
+    args: Omit<
+      FunctionArgs<AgentComponent["turns"]["saveStep"]>,
+      "turnId" | "attempt" | "step"
+    >,
+  ) => {
+    const result = await ctx.runMutation(component.turns.saveStep, {
+      ...args,
+      turnId: turn.turnId,
+      attempt: turn.attempt,
+      step: turn.step,
+    });
+    if (result) throw new TurnError(result.refused);
+    turn.step++;
+    turn.unsaved = false;
   };
   const report = async <TOOLS extends ToolSet>(toSave: ToSave<TOOLS>) => {
     const output = "object" in toSave ? toSave.object : toSave.step;

@@ -84,6 +84,7 @@ import {
   generateAndSaveEmbeddings,
 } from "./client/search.js";
 import { startGeneration } from "./client/start.js";
+import { turnDriver } from "./client/turn.js";
 import { syncStreams, type StreamingOptions } from "./client/streaming.js";
 import { createThread, getThreadMetadata } from "../client/threads.js";
 import { runMutation } from "../client/run.js";
@@ -180,6 +181,7 @@ export {
   embedMany,
 } from "./client/search.js";
 export { startGeneration } from "./client/start.js";
+export { TurnError } from "./client/turn.js";
 export {
   DEFAULT_STREAMING_OPTIONS,
   DeltaStreamer,
@@ -560,6 +562,7 @@ export class Agent<
         agentForToolCtx: this,
       },
       "generateText",
+      turnDriver,
     );
     try {
       const result = (await generateText<Tools, RUNTIME_CONTEXT, OUTPUT>({
