@@ -175,6 +175,76 @@ Note that the action doesn't need to return anything. All messages are saved by
 default, so any client subscribed to the thread messages will receive the new
 message as it is generated asynchronously.
 
+### Generating into a pending message, one attempt at a time
+
+To retry the generating action blindly, save the pending answer in the mutation
+too, and pass its id as `pendingMessageId`. The generation claims that message
+before it fetches context or calls the model, so at most one attempt runs at a
+time and the message is answered at most once.
+
+```ts
+import { saveMessage, TurnError } from "@convex-dev/agent";
+
+export const sendMessage = mutation({
+  args: { threadId: v.id("threads"), prompt: v.string() },
+  handler: async (ctx, { threadId, prompt }) => {
+    const { messageId: promptMessageId } = await saveMessage(
+      ctx,
+      components.agent,
+      { threadId, prompt },
+    );
+    const { messageId: pendingMessageId } = await saveMessage(
+      ctx,
+      components.agent,
+      {
+        threadId,
+        promptMessageId,
+        message: { role: "assistant", content: [] },
+        metadata: { status: "pending" },
+      },
+    );
+    await ctx.scheduler.runAfter(0, internal.example.answer, {
+      threadId,
+      pendingMessageId,
+    });
+  },
+});
+
+export const answer = internalAction({
+  args: { threadId: v.string(), pendingMessageId: v.string() },
+  handler: async (ctx, { threadId, pendingMessageId }) => {
+    try {
+      await agent.generateText(ctx, { threadId }, { pendingMessageId });
+    } catch (error) {
+      if (error instanceof TurnError) return; // Another attempt has it.
+      throw error;
+    }
+  },
+});
+```
+
+- A second attempt while one runs throws `TurnError` with `code: "TurnBusy"` and
+  `retryAt`. One after the message is answered, or after the generation stopped,
+  throws `code: "TurnEnded"`, with the `reason` it stopped. Neither calls the
+  model.
+- An attempt that fails or is aborted before a tool started in its current step
+  releases the message, so a retry runs at once and continues from the steps
+  already saved. If a tool had started, the attempt holds the message for 15
+  minutes instead, as after a crash, so a retry can't overlap that tool.
+- An attempt that crashed holds the message for 15 minutes. After that, a retry
+  takes it over and continues from its saved steps. A tool that was running when
+  it crashed may run again.
+- The context is the thread up to the message's order, so `generateText` takes
+  no `prompt`, `messages` or `promptMessageId` with it. `streamText` and
+  `agent.start` don't take a `pendingMessageId` yet.
+- If the last step waits on tool approvals, answer them as usual with
+  `approveToolCall` or `denyToolCall`, then retry with the same
+  `pendingMessageId`. The generation continues in a new pending message after
+  the answers.
+- The generation stops, and later attempts throw `TurnEnded`, if another writer
+  fills, fails or deletes the pending message (for example a plain regeneration
+  from the same prompt), or deletes or fails its prompt.
+
 ### Generating an object
 
 Similar to the AI SDK, you can generate or stream an object. The same arguments
