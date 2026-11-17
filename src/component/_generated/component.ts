@@ -73,11 +73,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       deleteFiles: FunctionReference<
         "mutation",
         "internal",
-        {
-          fileIds: Array<string>;
-          force?: boolean;
-          lastTouchedBefore?: number;
-        },
+        { fileIds: Array<string>; force?: boolean; lastTouchedBefore?: number },
         Array<string>,
         Name
       >;
@@ -2964,6 +2960,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             approvalId: string;
             approved: boolean;
             reason?: string;
+          }>;
+          outputs?: Array<{
+            output:
+              | { type: "text"; value: string }
+              | { type: "json"; value: any }
+              | { type: "error-text"; value: string };
+            toolCallId: string;
+            toolName: string;
           }>;
           threadId: string;
         },
