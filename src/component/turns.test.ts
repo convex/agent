@@ -179,3 +179,119 @@ describe("layer 1: one attempt at a time", () => {
     },
   );
 });
+
+describe("layer 1: step saves", () => {
+  type Turn = Awaited<ReturnType<typeof claimed>>;
+  const text = (content: string) => ({
+    message: { role: "assistant" as const, content },
+  });
+  const pending = {
+    message: { role: "assistant" as const, content: [] },
+    status: "pending" as const,
+  };
+  const save = (
+    t: T,
+    q: Q,
+    turn: Pick<Turn, "turnId" | "attempt" | "step">,
+    final: boolean,
+    messages: { message: { role: "assistant"; content: any } }[],
+  ) =>
+    t.mutation(api.turns.saveStep, {
+      turnId: turn.turnId,
+      attempt: turn.attempt,
+      step: turn.step,
+      final,
+      threadId: q.threadId,
+      messages,
+    });
+  const rows = (t: T, q: Q) =>
+    t.run(async (ctx) =>
+      (
+        await ctx.db
+          .query("messages")
+          .withIndex("threadId_status_tool_order_stepOrder", (i) =>
+            i.eq("threadId", q.threadId),
+          )
+          .collect()
+      ).map((m) => [m._id, m.order, m.status]),
+    );
+
+  test("each step fills the turn's slot at its order, and the final one answers it", async () => {
+    const t = init();
+    const q = await queue(t);
+    const turn = await claimed(t, q);
+    const first = await save(t, q, turn, false, [text("one"), pending]);
+    const busy = await claim(t, q);
+    const last = await save(t, q, { ...turn, step: 1 }, true, [text("two")]);
+    const saved = await rows(t, q);
+    expect([first, last]).toEqual([null, null]);
+    expect(busy).toMatchObject({ refused: { code: "TurnBusy" } });
+    expect(await claim(t, q)).toMatchObject({ refused: { code: "TurnEnded" } });
+    expect(saved.map(([, order, s]) => [order, s])).toEqual(
+      Array(3).fill([turn.order, "success"]),
+    );
+  });
+
+  test("a step save retried after it committed is refused and writes nothing", async () => {
+    const t = init();
+    const q = await queue(t);
+    const turn = await claimed(t, q);
+    await save(t, q, turn, false, [text("once"), pending]);
+    const before = await rows(t, q);
+    const again = await save(t, q, turn, false, [text("once"), pending]);
+    expect(again).toMatchObject({ refused: { code: "TurnBusy" } });
+    expect(await rows(t, q)).toEqual(before);
+  });
+
+  test("a save from an attempt that was taken over is refused and writes nothing", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = init();
+    const q = await queue(t);
+    const zombie = await claimed(t, q);
+    later();
+    await claimed(t, q);
+    const before = await rows(t, q);
+    const late = await save(t, q, zombie, true, [text("late")]);
+    expect(late).toMatchObject({ refused: { code: "TurnBusy" } });
+    expect(await rows(t, q)).toEqual(before);
+  });
+
+  test("a save into a slot that already succeeded is refused before it writes", async () => {
+    const t = init();
+    const q = await queue(t);
+    const turn = await claimed(t, q);
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: q.key,
+      result: { status: "success" },
+    });
+    const before = await rows(t, q);
+    const saved = await save(t, q, turn, true, [text("late")]);
+    expect(saved).toMatchObject({ refused: { code: "TurnEnded" } });
+    expect(await rows(t, q)).toEqual(before);
+  });
+
+  test("a final save that waits on answers leaves the turn open, and a late failure write changes nothing", async () => {
+    const t = init();
+    const q = await queue(t);
+    const turn = await claimed(t, q);
+    const call = {
+      type: "tool-call" as const,
+      input: {},
+      toolCallId: "1",
+      toolName: "note",
+    };
+    await save(t, q, turn, true, [
+      { message: { role: "assistant", content: [call] } },
+    ]);
+    await t.mutation(api.turns.fail, {
+      turnId: turn.turnId,
+      attempt: turn.attempt,
+      error: "late",
+      then: "stop",
+    });
+    const next = await claimed(t, q);
+    expect(next).toMatchObject({ attempt: 2, step: 1, order: turn.order });
+    expect(next.slotId).not.toBe(q.key);
+    expect(await status(t, next.slotId as Id<"messages">)).toBe("pending");
+  });
+});
