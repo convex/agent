@@ -71,6 +71,7 @@ export type SaveMessagesArgs = {
   embeddings?: MessageEmbeddings;
   /**
    * A pending message ID to replace when adding messages.
+   * Throws if that message already succeeded.
    */
   pendingMessageId?: string;
 };
@@ -140,6 +141,7 @@ export type SaveMessageArgs = {
   embedding?: { vector: number[]; model: string };
   /**
    * A pending message ID to replace with this message.
+   * Throws if that message already succeeded.
    */
   pendingMessageId?: string;
 } & (
