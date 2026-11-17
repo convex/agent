@@ -16,7 +16,7 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
+import { deleteMessage, deleteTurnsPage } from "./messages.js";
 import { schema, v } from "./schema.js";
 import { deleteStreamsPageForThreadId, deletionCursor } from "./streams.js";
 
@@ -223,17 +223,20 @@ async function deletePageForThreadIdHandler(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
 ): Promise<DeleteThreadReturns> {
+  const numItems = args.limit ?? 100;
   const messages = await ctx.db
     .query("messages")
     .withIndex("threadId_status_tool_order_stepOrder", (q) =>
       q.eq("threadId", args.threadId),
     )
     .paginate({
-      numItems: args.limit ?? 100,
+      numItems,
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-  if (messages.isDone) {
+  const isDone =
+    messages.isDone && (await deleteTurnsPage(ctx, args.threadId, numItems));
+  if (isDone) {
     const thread = await ctx.db.get("threads", args.threadId);
     if (thread) {
       await ctx.db.delete("threads", args.threadId);
@@ -241,6 +244,6 @@ async function deletePageForThreadIdHandler(
   }
   return {
     cursor: messages.continueCursor,
-    isDone: messages.isDone,
+    isDone,
   };
 }

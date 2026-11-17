@@ -13,7 +13,7 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
+import { deleteMessage, deleteTurnsPage } from "./messages.js";
 import { deleteStreamsPageForThreadId, deletionCursor } from "./streams.js";
 import { schema, v } from "./schema.js";
 
@@ -196,7 +196,7 @@ async function deletePageForUserId(
       });
     await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
 
-    if (messages.isDone) {
+    if (messages.isDone && (await deleteTurnsPage(ctx, threadInProgress))) {
       // Messages are done, move to streams deletion phase
       streamsInProgress = true;
       messagesCursor = null;

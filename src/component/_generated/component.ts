@@ -73,11 +73,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       deleteFiles: FunctionReference<
         "mutation",
         "internal",
-        {
-          fileIds: Array<string>;
-          force?: boolean;
-          lastTouchedBefore?: number;
-        },
+        { fileIds: Array<string>; force?: boolean; lastTouchedBefore?: number },
         Array<string>,
         Name
       >;
@@ -5792,6 +5788,43 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           title?: string;
           userId?: string;
         },
+        Name
+      >;
+    };
+    turns: {
+      claim: FunctionReference<
+        "mutation",
+        "internal",
+        { messageId: string; threadId: string },
+        | {
+            refused: {
+              code: "TurnBusy" | "TurnEnded";
+              error?: string;
+              retryAt?: number;
+            };
+          }
+        | {
+            anchorId: string;
+            attempt: number;
+            order: number;
+            slotId: string;
+            step: number;
+            stepOrder: number;
+            takeover: boolean;
+            turnId: string;
+          },
+        Name
+      >;
+      fail: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          attempt: number;
+          error: string;
+          then: "release" | "hold" | "stop";
+          turnId: string;
+        },
+        null,
         Name
       >;
     };

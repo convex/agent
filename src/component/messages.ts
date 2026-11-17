@@ -60,6 +60,24 @@ function publicMessage(message: Doc<"messages">): MessageDoc {
   );
 }
 
+/**
+ * Deletes a page of a thread's turn rows. Deletion calls it only once the
+ * thread's messages are gone, so no turn row goes while its pending message
+ * could still be claimed. Returns whether none are left.
+ */
+export async function deleteTurnsPage(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+  numItems = 100,
+) {
+  const turns = await ctx.db
+    .query("turns")
+    .withIndex("threadId", (q) => q.eq("threadId", threadId))
+    .take(numItems);
+  await Promise.all(turns.map((turn) => ctx.db.delete("turns", turn._id)));
+  return turns.length < numItems;
+}
+
 export async function deleteMessage(
   ctx: MutationCtx,
   messageDoc: Doc<"messages">,
@@ -123,7 +141,7 @@ export const messageStatuses = vMessageDoc.fields.status.members.map(
 const STREAM_RECOVERY_FAILURE =
   "Failed to recover persisted assistant stream output";
 
-async function markPendingMessageFailed(
+export async function markPendingMessageFailed(
   ctx: MutationCtx,
   message: Doc<"messages">,
   error: string,
@@ -457,7 +475,7 @@ export async function getMaxMessage(
   }).first();
 }
 
-function orderedMessagesStream(
+export function orderedMessagesStream(
   ctx: QueryCtx,
   args: {
     threadId: Id<"threads">;

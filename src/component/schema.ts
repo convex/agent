@@ -162,6 +162,28 @@ export const schema = defineSchema({
   })
     .index("hash", ["hash"])
     .index("refcount_lastTouchedAt", ["refcount", "lastTouchedAt"]),
+  // A durable generation into the app's pending message `messageId`. Only
+  // turns.ts writes these. Deletion removes them after the thread's messages.
+  turns: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    order: v.number(),
+    // The prompt, or the pending message itself if nothing precedes it at its
+    // order. The context is read up to it.
+    anchorId: v.id("messages"),
+    // Fence token: +1 per claim.
+    attempt: v.number(),
+    // Steps saved so far. Only a step save moves it.
+    step: v.number(),
+    leaseUntil: v.optional(v.number()),
+    // The pending message the next step save fills.
+    slotId: v.optional(v.id("messages")),
+    // Why the last attempt failed, or why the turn stopped.
+    error: v.optional(v.string()),
+    end: v.optional(v.union(v.literal("answered"), v.literal("stopped"))),
+  })
+    .index("messageId", ["messageId"])
+    .index("threadId", ["threadId"]),
   ...vectorTables,
   // To authenticate playground usage
   // Delete a key to invalidate it
