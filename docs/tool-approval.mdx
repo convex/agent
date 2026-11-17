@@ -218,6 +218,95 @@ The `ToolUIPart` states relevant to approval are:
 | `output-denied`      | Tool was denied                                      |
 | `output-error`       | Tool execution failed                                |
 
+## Client-side tools
+
+A tool without `execute` runs in the browser. Generation stops at its call, and
+the tool part waits in the `input-available` state until the client answers it
+with `addToolOutput`. Like an approval, the output is saved next to its call,
+and a second answer is rejected. Naming the tool keeps a client from answering a
+call to any other tool. A client tool cannot set `needsApproval`: ask the user
+in the client before answering.
+
+```ts
+import { approvalAgent } from "../agents/approval";
+
+// Add to approvalAgent's tools.
+const getLocation = createTool({
+  description: "Get the user's location from their browser",
+  inputSchema: z.object({ precise: z.boolean() }),
+});
+
+export const submitToolOutput = mutation({
+  args: {
+    threadId: v.string(),
+    toolCallId: v.string(),
+    output: v.optional(v.any()),
+    errorText: v.optional(v.string()),
+  },
+  handler: async (ctx, { threadId, toolCallId, output, errorText }) => {
+    // Check the user can access the thread.
+    const { messageId } = await approvalAgent.addToolOutput(ctx, {
+      threadId,
+      tool: "getLocation",
+      toolCallId,
+      ...(errorText === undefined
+        ? { output }
+        : { state: "output-error" as const, errorText }),
+    });
+    // Once every client call in this step has an output, schedule
+    // generateResponse with promptMessageId: messageId, as submitApproval
+    // does in the example files below.
+  },
+});
+```
+
+The output is sent to the model as text (a string) or JSON; a tool's
+`toModelOutput` is not applied. Pass `state: "output-error"` and `errorText`
+instead of `output` to report a failure to the model.
+
+As with the AI SDK's `lastAssistantMessageIsCompleteWithToolCalls`, continue a
+step once each of its client calls has an output and each of its approvals has a
+decision, from whichever answer comes last. A continuation that starts earlier
+leaves the unanswered calls out of the step, and their outputs are then
+rejected.
+
+Messages saved by hand are not checked. Once anything but a tool result is saved
+on the step's order, for example by `saveMessage`, by a generation given tools
+without the client tool, or by two generations racing on one order,
+`addToolOutput` rejects the call's output, since it would no longer follow its
+call, and the call stays `input-available`.
+
+On the client, answer each call once its message is saved. A call seen only in
+stream deltas is not saved yet, and `addToolOutput` rejects it:
+
+```tsx
+const submitToolOutput = useMutation(api.chat.submitToolOutput);
+const answered = useRef(new Set<string>());
+useEffect(() => {
+  for (const message of messages) {
+    if (message.status !== "success") continue;
+    for (const part of message.parts) {
+      if (part.type !== "tool-getLocation") continue;
+      if (part.state !== "input-available") continue;
+      const { toolCallId } = part;
+      if (answered.current.has(toolCallId)) continue;
+      answered.current.add(toolCallId);
+      readLocation(part.input)
+        .then(
+          (output) => submitToolOutput({ threadId, toolCallId, output }),
+          (error) =>
+            submitToolOutput({
+              threadId,
+              toolCallId,
+              errorText: String(error),
+            }),
+        )
+        .catch(() => answered.current.delete(toolCallId));
+    }
+  }
+}, [messages, threadId, submitToolOutput]);
+```
+
 ## Example files
 
 For a complete working example, see:
