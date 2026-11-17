@@ -205,7 +205,7 @@ export const deleteByOrder = mutation({
   },
 });
 
-const addMessagesArgs = {
+export const addMessagesArgs = {
   userId: v.optional(v.string()),
   threadId: v.id("threads"),
   promptMessageId: v.optional(v.id("messages")),
@@ -244,9 +244,12 @@ function incrementMessagePosition(value: number, field: "order" | "stepOrder") {
   return value + 1;
 }
 
-async function addMessagesHandler(
+export async function addMessagesHandler(
   ctx: MutationCtx,
   args: ObjectType<typeof addMessagesArgs>,
+  // A durable turn's saves stay at its order, even with no prompt to place
+  // them. Not in the validator: plain callers never pass it.
+  turnOrder?: number,
 ) {
   let userId = args.userId;
   const threadId = args.threadId;
@@ -317,7 +320,7 @@ async function addMessagesHandler(
   let error: string | undefined;
   const startsAtNextOrder = requestedOrder === "next";
   const explicitOrder =
-    typeof requestedOrder === "number" ? requestedOrder : undefined;
+    typeof requestedOrder === "number" ? requestedOrder : turnOrder;
   if (startsAtNextOrder) {
     const maxMessage = await getMaxMessage(ctx, threadId);
     order = incrementMessagePosition(maxMessage?.order ?? -1, "order");

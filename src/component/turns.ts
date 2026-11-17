@@ -3,10 +3,16 @@
 // messages can only refuse one.
 //
 // Nothing a plain entry loads may import this module (bundleGraph.test.ts).
-import { assert } from "convex-helpers";
-import type { Doc } from "./_generated/dataModel.js";
+import { assert, omit } from "convex-helpers";
+import type {
+  MessageContentParts,
+  MessageWithMetadataInternal,
+} from "../validators.js";
+import type { Doc, Id } from "./_generated/dataModel.js";
 import { mutation, type MutationCtx } from "./_generated/server.js";
 import {
+  addMessagesArgs,
+  addMessagesHandler,
   markPendingMessageFailed,
   orderedMessagesStream,
 } from "./messages.js";
@@ -153,8 +159,24 @@ export const claim = mutation({
     }
     const checked = await check(ctx, turn);
     if (checked.error) return stop(ctx, turn, checked.error, checked.slot);
-    const slot = checked.slot;
-    assert(slot, "An open turn has a slot");
+    let slot: Pick<Doc<"messages">, "_id" | "stepOrder">;
+    if (checked.slot) {
+      slot = checked.slot;
+    } else {
+      // The last save waited on answers. Where the slot goes is a placement
+      // read, not a permission.
+      const { messages } = await addMessagesHandler(ctx, {
+        threadId,
+        order: turn.order,
+        messages: [
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+      });
+      slot = {
+        _id: messages[0]._id as Id<"messages">,
+        stepOrder: messages[0].stepOrder,
+      };
+    }
     const attempt = turn.attempt + 1;
     await ctx.db.patch("turns", turn._id, {
       attempt,
@@ -172,6 +194,85 @@ export const claim = mutation({
       anchorId: turn.anchorId,
       takeover: turn.leaseUntil !== undefined,
     };
+  },
+});
+
+const saveArgs = omit(addMessagesArgs, [
+  "order",
+  "pendingMessageId",
+  "failPendingSteps",
+  "promptMessageId",
+  "abandonIfPromptMissing",
+]);
+
+export const saveStep = mutation({
+  args: {
+    turnId: v.id("turns"),
+    attempt: v.number(),
+    step: v.number(),
+    // The AI SDK continues past this step iff this is false.
+    final: v.boolean(),
+    ...saveArgs,
+  },
+  returns: v.union(v.object({ refused: vRefusal }), v.null()),
+  handler: async (ctx, { turnId, attempt, step, final, ...save }) => {
+    const turn = await ctx.db.get("turns", turnId);
+    if (!turn || turn.end) return ended(turn?.error);
+    if (
+      turn.attempt !== attempt ||
+      turn.step !== step ||
+      turn.leaseUntil === undefined ||
+      turn.leaseUntil <= Date.now()
+    ) {
+      return busy(turn);
+    }
+    assert(turn.slotId, "A turn under lease has a slot");
+    assert(save.threadId === turn.threadId, "The save is in another thread");
+    const last = save.messages.at(-1);
+    assert(
+      final === (last?.status !== "pending"),
+      "Only a step the AI SDK continues past ends with a pending message",
+    );
+    const checked = await check(ctx, turn);
+    if (checked.error) return stop(ctx, turn, checked.error, checked.slot);
+    const saved = await addMessagesHandler(
+      ctx,
+      {
+        ...save,
+        promptMessageId:
+          turn.anchorId !== turn.messageId ? turn.anchorId : undefined,
+        pendingMessageId: turn.slotId,
+        failPendingSteps: false,
+      },
+      turn.order,
+    );
+    const next = saved.messages.at(-1);
+    // Throwing rolls the save back: the turn moves only on a full write.
+    assert(
+      saved.messages.length === save.messages.length &&
+        saved.messages[0]._id === turn.slotId &&
+        saved.messages.every(
+          (m, i) =>
+            m.order === turn.order &&
+            m.status === (save.messages[i].status ?? "success"),
+        ),
+      "The step was not saved into the turn's slot",
+    );
+    await ctx.db.patch(
+      "turns",
+      turn._id,
+      final
+        ? {
+            step: step + 1,
+            slotId: undefined,
+            leaseUntil: undefined,
+            ...(!waitsForAnswers(save.messages) && {
+              end: "answered" as const,
+            }),
+          }
+        : { step: step + 1, slotId: next!._id as Id<"messages"> },
+    );
+    return null;
   },
 });
 
@@ -207,3 +308,26 @@ export const fail = mutation({
     return null;
   },
 });
+
+/** A tool call with no result, or an approval request with no response. */
+function waitsForAnswers(messages: MessageWithMetadataInternal[]) {
+  const open = new Set<string>();
+  const parts = messages.flatMap(({ message }) =>
+    typeof message.content === "string"
+      ? []
+      : (message.content as MessageContentParts[]),
+  );
+  for (const part of parts) {
+    if (part.type === "tool-call") open.add(`call:${part.toolCallId}`);
+    if (part.type === "tool-approval-request") {
+      open.add(`approval:${part.approvalId}`);
+    }
+  }
+  for (const part of parts) {
+    if (part.type === "tool-result") open.delete(`call:${part.toolCallId}`);
+    if (part.type === "tool-approval-response") {
+      open.delete(`approval:${part.approvalId}`);
+    }
+  }
+  return open.size > 0;
+}
