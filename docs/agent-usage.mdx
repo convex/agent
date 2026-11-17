@@ -234,16 +234,16 @@ export const answer = internalAction({
 - An attempt that crashed holds the message for 15 minutes. After that, a retry
   takes it over and continues from its saved steps. A tool that was running when
   it crashed may run again.
-- The context is the thread up to the message's order, so `generateText` takes
-  no `prompt`, `messages` or `promptMessageId` with it. `streamText` and
-  `agent.start` don't take a `pendingMessageId` yet.
+- The context is the thread up to the message's order, so `generateText` and
+  `streamText` take no `prompt`, `messages` or `promptMessageId` with it.
+  `agent.start` doesn't take a `pendingMessageId`.
 - If the last step waits on tool approvals, answer them as usual with
   `approveToolCall` or `denyToolCall`, then retry with the same
   `pendingMessageId`. The generation continues in a new pending message after
   the answers.
 - The generation stops, and later attempts throw `TurnEnded`, if another writer
   fills, fails or deletes the pending message (for example a plain regeneration
-  from the same prompt), or deletes or fails its prompt.
+  from the same prompt), deletes or fails its prompt, or aborts its stream.
 
 ### Generating an object
 
