@@ -1,10 +1,11 @@
-import { stepCountIs } from "ai";
+import { simulateReadableStream, stepCountIs } from "ai";
 import { getFunctionName } from "convex/server";
 import { z } from "zod/v4";
 import type {
   LanguageModelV4CallOptions,
   LanguageModelV4Content,
   LanguageModelV4GenerateResult,
+  LanguageModelV4StreamPart,
 } from "@ai-sdk/provider";
 import { Agent, createTool, TurnError } from "../index.js";
 import { components, initConvexTest } from "./setup.test.js";
@@ -32,6 +33,7 @@ export const world = {
   prompts: [] as LanguageModelV4CallOptions["prompt"][],
   holds: {} as Record<string, Promise<void> | undefined>,
   needsApproval: false,
+  streamError: false,
 };
 
 export function reset(plan: Step[]) {
@@ -41,6 +43,7 @@ export function reset(plan: Step[]) {
   world.prompts = [];
   world.holds = {};
   world.needsApproval = false;
+  world.streamError = false;
 }
 
 /** Holds `tool` mid-call until the returned function is called. */
@@ -92,10 +95,40 @@ function respond(
   };
 }
 
+function toStream(
+  result: LanguageModelV4GenerateResult,
+): LanguageModelV4StreamPart[] {
+  return [
+    { type: "stream-start", warnings: [] },
+    ...result.content.flatMap((part, i): LanguageModelV4StreamPart[] =>
+      part.type === "text"
+        ? [
+            { type: "text-start", id: `t${i}` },
+            { type: "text-delta", id: `t${i}`, delta: part.text },
+            { type: "text-end", id: `t${i}` },
+          ]
+        : part.type === "reasoning"
+          ? [
+              { type: "reasoning-start", id: `r${i}` },
+              { type: "reasoning-delta", id: `r${i}`, delta: part.text },
+              { type: "reasoning-end", id: `r${i}` },
+            ]
+          : [part as LanguageModelV4StreamPart],
+    ),
+    ...(world.streamError
+      ? [{ type: "error" as const, error: new Error("provider error") }]
+      : []),
+    { type: "finish", finishReason: result.finishReason, usage: result.usage },
+  ];
+}
+
 export const model = (modelId = "mock") =>
   mockModel({
     modelId,
     doGenerate: async (options) => respond(options),
+    doStream: async (options) => ({
+      stream: simulateReadableStream({ chunks: toStream(respond(options)) }),
+    }),
   });
 
 export const tools = {
@@ -217,19 +250,51 @@ export async function outcome(p: Promise<{ text: string; turn?: unknown }>) {
   }
 }
 
-/** Runs the turn once with generateText. */
+/**
+ * Runs the turn once with generateText or streamText. "deltas" streams with a
+ * short throttle, so the stream row exists while a tool runs.
+ */
 export async function attempt(
   ctx: ActionCtx,
   q: Queued,
-  _mode: "generate" = "generate",
+  mode: "generate" | "stream" | "deltas" = "generate",
   extra: Record<string, unknown> = {},
   a: Agent = agent,
 ): Promise<{ text: string; turn?: unknown }> {
-  return a.generateText(
+  if (mode === "generate") {
+    return a.generateText(
+      ctx,
+      { threadId: q.threadId },
+      { pendingMessageId: q.key, ...extra },
+    );
+  }
+  const result = await a.streamText(
     ctx,
     { threadId: q.threadId },
     { pendingMessageId: q.key, ...extra },
+    { saveStreamDeltas: { throttleMs: mode === "deltas" ? 1 : 60_000 } },
   );
+  await result.consumeStream();
+  const text = await result.text;
+  return { text, turn: await (result as { turn?: unknown }).turn };
+}
+
+/** Waits until a stream row exists at `order`. */
+export async function streamAt(
+  ctx: ActionCtx,
+  threadId: string,
+  order: number,
+) {
+  for (let i = 0; i < 400; i++) {
+    const streams = await ctx.runQuery(components.agent.streams.list, {
+      threadId,
+      startOrder: order,
+      statuses: ["streaming"],
+    });
+    if (streams.some((s) => s.order === order)) return;
+    await tick(5);
+  }
+  throw new Error("Timed out waiting for a stream");
 }
 
 export type Row = {

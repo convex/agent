@@ -22,6 +22,7 @@ import {
   queue,
   reset,
   rows,
+  streamAt,
   tick,
   until,
   world,
@@ -123,7 +124,7 @@ describe("layer 1: a second attempt is refused before the model call", () => {
     const r = await t.action(async (ctx) => {
       const q = await queue(ctx);
       const first = await outcome(attempt(ctx, q));
-      const retry = await outcome(attempt(ctx, q));
+      const retry = await outcome(attempt(ctx, q, "stream"));
       return { first, retry };
     });
     expect(r.first).toMatchObject({ text: "All done" });
@@ -363,8 +364,10 @@ const writers: Record<string, Writer> = {
 };
 
 describe("layer 1: no plain writer permits a turn action", () => {
+  // "deltas" streams with the stream row in place while the tool runs, so
+  // the writers that abort streams reach the attempt (cloud round 1).
   test.each(
-    (["generate"] as const).flatMap((mode) =>
+    (["generate", "deltas"] as const).flatMap((mode) =>
       Object.keys(writers).map((name) => [mode, name] as const),
     ),
   )(
@@ -386,6 +389,7 @@ describe("layer 1: no plain writer permits a turn action", () => {
         const order = (await rows(ctx, q.threadId)).find(
           (m) => m.id === q.key,
         )!.order;
+        if (mode === "deltas") await streamAt(ctx, q.threadId, order);
         const slot = (await rows(ctx, q.threadId))
           .filter((m) => m.order === order && m.status === "pending")
           .at(-1)!;
@@ -529,7 +533,7 @@ describe("layer 1: cloud failures and review findings", () => {
 
   // agent.start hands the AI SDK call to the app, so nothing tracks its tool
   // starts or ends its attempt.
-  test("agent.start and streamText refuse a pendingMessageId", async () => {
+  test("agent.start refuses a pendingMessageId, even named as generateText", async () => {
     reset([{ text: "All done" }]);
     const t = initConvexTest();
     const r = await t.action(async (ctx) => {
@@ -544,21 +548,13 @@ describe("layer 1: cloud failures and review findings", () => {
           )
           .then(() => ({ text: "started" })),
       );
-      const streamed = await outcome(
-        agent
-          .streamText(ctx, { threadId: q.threadId }, {
-            pendingMessageId: q.key,
-          } as never)
-          .then(() => ({ text: "streamed" })),
-      );
       const retry = await outcome(attempt(ctx, q));
-      return { started, streamed, retry };
+      return { started, retry };
     });
-    expect(r).toMatchObject({
-      started: { error: expect.stringMatching(/Only generateText/) },
-      streamed: { error: expect.stringMatching(/Only generateText/) },
-      retry: { text: "All done" },
+    expect(r.started).toMatchObject({
+      error: expect.stringMatching(/Only generateText and streamText/),
     });
+    expect(r.retry).toMatchObject({ text: "All done" });
   });
 
   // Codex round 1 P2 #2: a throw after the claim held the lease.
@@ -612,8 +608,6 @@ describe("layer 1: cloud failures and review findings", () => {
     expect(r.retry).toMatchObject({ text: "All done" });
   });
 
-  // Independent review of the round 2 design: a release after a tool started
-  // lets a retry run it again, whatever failed the attempt.
   test("a step save that fails after its tool started holds the lease", async () => {
     reset([{ calls: [{ tool: "pay" }] }, { text: "All done" }]);
     const t = initConvexTest();
@@ -633,6 +627,107 @@ describe("layer 1: cloud failures and review findings", () => {
       return { first, retry, callsByRetry: world.modelCalls - calls };
     });
     expect(r.first).toMatchObject({ error: expect.stringMatching(/lost/) });
+    expect(r.retry).toMatchObject({ refused: "TurnBusy" });
+    expect(r.callsByRetry).toBe(0);
+    expect(world.runs.pay).toBe(1);
+  });
+
+  // Round 2 Codex P2 #1: the takeover's stream cleanup ran outside every
+  // catch, so its failure held the new lease.
+  test("a takeover whose stream cleanup fails releases the turn at once", async () => {
+    reset([{ calls: [{ tool: "note" }] }, { text: "All done" }]);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t = initConvexTest();
+    const r = await t.action(async (ctx) => {
+      const q = await queue(ctx);
+      let saves = 0;
+      const d = dying(
+        ctx,
+        (name) =>
+          isStepSave(name) && (world.runs.note ?? 0) > 0 && ++saves === 2,
+      );
+      void attempt(d.ctx, q).catch(() => {});
+      await until(() => d.dead, "the second step save");
+      await tick(20);
+      later();
+      let aborts = 0;
+      const flaky = {
+        ...ctx,
+        runMutation: ((ref: never, args: never) =>
+          functionName(ref) === "streams/abortByOrder" && ++aborts === 1
+            ? Promise.reject(new Error("cleanup down"))
+            : ctx.runMutation(ref, args)) as ActionCtx["runMutation"],
+      } as ActionCtx;
+      const failed = await outcome(attempt(flaky, q));
+      const retry = await outcome(attempt(flaky, q));
+      return { failed, retry };
+    });
+    expect(r.failed).toMatchObject({
+      error: expect.stringMatching(/cleanup down/),
+    });
+    expect(r.retry).toMatchObject({ text: "All done" });
+    expect(world.runs.note).toBe(1);
+  });
+
+  test("an invalid chunking option releases the turn at once", async () => {
+    reset([{ text: "All done" }]);
+    const t = initConvexTest();
+    const r = await t.action(async (ctx) => {
+      const q = await queue(ctx);
+      const run = (chunking: unknown) =>
+        outcome(
+          agent
+            .streamText(
+              ctx,
+              { threadId: q.threadId },
+              { pendingMessageId: q.key },
+              { saveStreamDeltas: { chunking: chunking as "word" } },
+            )
+            .then(async (result) => {
+              await result.consumeStream();
+              return { text: await result.text };
+            }),
+        );
+      return { failed: await run("bogus"), retry: await run("word") };
+    });
+    expect(r.failed).toMatchObject({
+      error: expect.stringMatching(/Chunking must be/),
+    });
+    expect(r.retry).toMatchObject({ text: "All done" });
+  });
+
+  test("a synchronous throw from the AI SDK's streamText releases the turn at once", async () => {
+    reset([{ text: "All done" }]);
+    const t = initConvexTest();
+    const r = await t.action(async (ctx) => {
+      const q = await queue(ctx);
+      const failed = await outcome(
+        attempt(ctx, q, "stream", { maxRetries: -1 }),
+      );
+      const retry = await outcome(attempt(ctx, q, "stream"));
+      return { failed, retry };
+    });
+    expect(r.failed).toMatchObject({
+      error: expect.stringMatching(/maxRetries/),
+    });
+    expect(r.retry).toMatchObject({ text: "All done" });
+  });
+
+  // Independent review of the round 2 design: a release after a tool started
+  // lets a retry run it again, whatever failed the attempt.
+  test("a streamed step that errors after its tool started holds the lease", async () => {
+    reset([{ calls: [{ tool: "pay" }] }]);
+    world.streamError = true;
+    const t = initConvexTest();
+    const r = await t.action(async (ctx) => {
+      const q = await queue(ctx);
+      const first = await outcome(attempt(ctx, q, "deltas"));
+      world.streamError = false;
+      const calls = world.modelCalls;
+      const retry = await within(outcome(attempt(ctx, q, "deltas")));
+      return { first, retry, callsByRetry: world.modelCalls - calls };
+    });
+    expect(r.first).not.toMatchObject({ text: "All done" });
     expect(r.retry).toMatchObject({ refused: "TurnBusy" });
     expect(r.callsByRetry).toBe(0);
     expect(world.runs.pay).toBe(1);
