@@ -1496,6 +1496,224 @@ describe("late saves racing a failed pending message (issue #320)", () => {
   });
 });
 
+describe("saving into a pending message that already succeeded", () => {
+  const NOT_PENDING = /can't be filled: its status is "success"/;
+
+  async function seeded() {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {
+      userId: "u1",
+    });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "weather?" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const prompt = messages[0]._id as Id<"messages">;
+    const pending = messages[1]._id as Id<"messages">;
+    const snapshot = () =>
+      t.run(async (ctx) => ({
+        messages: (await ctx.db.query("messages").collect()).sort(
+          (a, b) => a.order - b.order || a.stepOrder - b.stepOrder,
+        ),
+        vectors: await ctx.db.query("embeddings_128").collect(),
+        streams: await ctx.db.query("streamingMessages").collect(),
+      }));
+    return { t, threadId, prompt, pending, snapshot };
+  }
+
+  const toolStep = (text: string) => [
+    {
+      message: {
+        role: "assistant" as const,
+        content: [
+          { type: "text" as const, text },
+          {
+            type: "tool-call" as const,
+            toolCallId: "1",
+            toolName: "weather",
+            args: {},
+          },
+        ],
+      },
+    },
+    {
+      message: {
+        role: "tool" as const,
+        content: [
+          {
+            type: "tool-result" as const,
+            toolName: "weather",
+            result: "72F",
+            toolCallId: "1",
+          },
+        ],
+      },
+    },
+    {
+      message: { role: "assistant" as const, content: [] },
+      status: "pending" as const,
+    },
+  ];
+
+  test("a repeated single fill throws and writes nothing", async () => {
+    const { t, threadId, pending, snapshot } = await seeded();
+    const { messages: first } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: pending,
+      messages: [{ message: { role: "assistant", content: "first answer" } }],
+    });
+    expect(first).toEqual([
+      expect.objectContaining({
+        _id: pending,
+        status: "success",
+        text: "first answer",
+      }),
+    ]);
+    const before = await snapshot();
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        pendingMessageId: pending,
+        messages: [
+          { message: { role: "assistant", content: "second answer" } },
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+        embeddings: {
+          model: "test",
+          dimension: 128,
+          vectors: [Array.from({ length: 128 }, () => 0.1), null],
+        },
+      }),
+    ).rejects.toThrow(NOT_PENDING);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  test("a repeated streamed fill throws and leaves its stream to the caller", async () => {
+    const { t, threadId, pending, snapshot } = await seeded();
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: pending,
+      messages: [{ message: { role: "assistant", content: "first answer" } }],
+    });
+    const { order, stepOrder } = (await snapshot()).messages.find(
+      (m) => m._id === pending,
+    )!;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order,
+      stepOrder,
+      format: "UIMessageChunk",
+    });
+    const before = await snapshot();
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        pendingMessageId: pending,
+        finishStreamId: streamId,
+        messages: [
+          { message: { role: "assistant", content: "second answer" } },
+        ],
+      }),
+    ).rejects.toThrow(NOT_PENDING);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  test("a repeated step save throws, and the first save's successor still takes the next step", async () => {
+    const { t, threadId, prompt, pending, snapshot } = await seeded();
+    const step = (text: string) => ({
+      threadId,
+      promptMessageId: prompt,
+      pendingMessageId: pending,
+      messages: toolStep(text),
+    });
+    const { messages: first } = await t.mutation(
+      api.messages.addMessages,
+      step("attempt 1"),
+    );
+    expect(first.map((m) => m.status)).toEqual([
+      "success",
+      "success",
+      "pending",
+    ]);
+    const before = await snapshot();
+
+    await expect(
+      t.mutation(api.messages.addMessages, step("attempt 2")),
+    ).rejects.toThrow(NOT_PENDING);
+    expect(await snapshot()).toEqual(before);
+
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: prompt,
+      pendingMessageId: first.at(-1)!._id as Id<"messages">,
+      messages: [{ message: { role: "assistant", content: "It is 72F" } }],
+    });
+    const assistants = (await snapshot()).messages
+      .filter((m) => m.message?.role === "assistant")
+      .map((m) => [m.status, m.text]);
+    expect(assistants).toEqual([
+      ["success", "attempt 1"],
+      ["success", "It is 72F"],
+    ]);
+  });
+
+  test("a repeated step save of a different length throws and writes nothing", async () => {
+    const { t, threadId, prompt, pending, snapshot } = await seeded();
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: prompt,
+      pendingMessageId: pending,
+      messages: toolStep("attempt 1"),
+    });
+    const before = await snapshot();
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId: prompt,
+        pendingMessageId: pending,
+        messages: [
+          { message: { role: "assistant", content: "attempt 2, no tool" } },
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+      }),
+    ).rejects.toThrow(NOT_PENDING);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  test("a repeated step save with failPendingSteps throws and leaves the successor pending", async () => {
+    const { t, threadId, prompt, pending, snapshot } = await seeded();
+    const { messages: first } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: prompt,
+      pendingMessageId: pending,
+      messages: toolStep("attempt 1"),
+    });
+    const before = await snapshot();
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId: prompt,
+        pendingMessageId: pending,
+        failPendingSteps: true,
+        messages: toolStep("attempt 2"),
+      }),
+    ).rejects.toThrow(NOT_PENDING);
+    const after = await snapshot();
+    expect(after).toEqual(before);
+    expect(
+      after.messages.find((m) => m._id === first.at(-1)!._id),
+    ).toMatchObject({ status: "pending" });
+  });
+});
+
 describe("deleting a message aborts generation writing to it (issue #300)", () => {
   test("a stream at the deleted order is aborted", async () => {
     const t = initConvexTest();
