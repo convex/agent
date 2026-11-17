@@ -1,0 +1,15 @@
+{
+ "bytesRead": 3001,
+ "bytesWritten": 1015,
+ "calls": [
+  "query threads/getThread: get threads#1",
+  "query messages/listMessagesByThreadId: q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false) desc;   end;   messages#1;   end",
+  "mutation messages/addMessages: get threads#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false) desc;   end;   end;   end;   messages#2;   messages#1;   end; insert messages#3; get messages#3; insert messages#4; get messages#4",
+  "mutation messages/addMessages: get threads#1; get messages#3; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false,order=0) desc;   end;   end;   end;   messages#4;   messages#3;   end; get messages#4; replace messages#4; get messages#4"
+ ],
+ "documentsRead": 14,
+ "documentsWritten": 3,
+ "indexRanges": 22,
+ "mutations": 2,
+ "queries": 2
+}

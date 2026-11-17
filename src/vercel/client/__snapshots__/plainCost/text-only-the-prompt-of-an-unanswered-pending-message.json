@@ -1,0 +1,15 @@
+{
+ "bytesRead": 4296,
+ "bytesWritten": 1129,
+ "calls": [
+  "query threads/getThread: get threads#1",
+  "query messages/listMessagesByThreadId: get messages#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order Lte 0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order Lte 0) desc;   end;   messages#1;   end",
+  "mutation messages/addMessages: get threads#1; get messages#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\") desc;   messages#2;   end; patch messages#2; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false,order=0) desc;   end;   end;   end;   end;   messages#1;   messages#2; insert messages#3; get messages#3",
+  "mutation messages/addMessages: get threads#1; get messages#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false,order=0) desc;   end;   end;   end;   messages#3;   messages#1;   messages#2; get messages#3; replace messages#3; get messages#3"
+ ],
+ "documentsRead": 18,
+ "documentsWritten": 3,
+ "indexRanges": 24,
+ "mutations": 2,
+ "queries": 2
+}

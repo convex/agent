@@ -1,0 +1,12 @@
+{
+ "bytesRead": 3854,
+ "bytesWritten": 0,
+ "calls": [
+  "action users/deleteAllForUserId: page userId [threads#1]; page threadId_status_tool_order_stepOrder [messages#1 messages#2 messages#3 messages#4]; delete messages#1; delete messages#2; delete messages#3; delete messages#4; q threadId(threadId=threads#1);   end; q threadId_state_order_stepOrder(threadId=threads#1,state.kind=\"streaming\",order Gte 0); q threadId_state_order_stepOrder(threadId=threads#1,state.kind=\"finished\",order Gte 0); q threadId_state_order_stepOrder(threadId=threads#1,state.kind=\"aborted\",order Gte 0);   end;   end;   end; delete threads#1; page userId []"
+ ],
+ "documentsRead": 10,
+ "documentsWritten": 5,
+ "indexRanges": 7,
+ "mutations": 0,
+ "queries": 0
+}

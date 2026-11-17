@@ -1,0 +1,26 @@
+{
+ "cloned": {
+  "bytesRead": 1799,
+  "bytesWritten": 1649,
+  "calls": [
+   "action messages/cloneThread: q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false) desc;   end;   messages#1;   end;   end;   messages#2;   end;   messages#3;   messages#4;   end;   end; q threadId_status_tool_order_stepOrder(threadId=threads#2,status=\"pending\",tool=true,order Gte 0,order Lte 0); q threadId_status_tool_order_stepOrder(threadId=threads#2,status=\"success\",tool=true,order Gte 0,order Lte 0); q threadId_status_tool_order_stepOrder(threadId=threads#2,status=\"failed\",tool=true,order Gte 0,order Lte 0); q threadId_status_tool_order_stepOrder(threadId=threads#2,status=\"pending\",tool=false,order Gte 0,order Lte 0); q threadId_status_tool_order_stepOrder(threadId=threads#2,status=\"success\",tool=false,order Gte 0,order Lte 0); q threadId_status_tool_order_stepOrder(threadId=threads#2,status=\"failed\",tool=false,order Gte 0,order Lte 0);   end;   end;   end;   end;   end;   end; insert messages#5; insert messages#6; insert messages#7; insert messages#8"
+  ],
+  "documentsRead": 4,
+  "documentsWritten": 4,
+  "indexRanges": 12,
+  "mutations": 0,
+  "queries": 0
+ },
+ "deleted": {
+  "bytesRead": 3454,
+  "bytesWritten": 0,
+  "calls": [
+   "action threads/deleteAllForThreadIdSync: page threadId_status_tool_order_stepOrder [messages#1 messages#2 messages#3 messages#4]; delete messages#1; delete messages#2; delete messages#3; delete messages#4; q threadId(threadId=threads#1);   end; get threads#1; delete threads#1; q threadId_state_order_stepOrder(threadId=threads#1,state.kind=\"streaming\",order Gte 0); q threadId_state_order_stepOrder(threadId=threads#1,state.kind=\"finished\",order Gte 0); q threadId_state_order_stepOrder(threadId=threads#1,state.kind=\"aborted\",order Gte 0);   end;   end;   end"
+  ],
+  "documentsRead": 10,
+  "documentsWritten": 5,
+  "indexRanges": 6,
+  "mutations": 0,
+  "queries": 0
+ }
+}

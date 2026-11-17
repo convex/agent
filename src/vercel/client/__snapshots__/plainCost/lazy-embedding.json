@@ -1,0 +1,16 @@
+{
+ "bytesRead": 3596,
+ "bytesWritten": 3900,
+ "calls": [
+  "query threads/getThread: get threads#1",
+  "query messages/listMessagesByThreadId: get messages#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order Lte 0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order Lte 0) desc;   end;   messages#1;   end",
+  "mutation index/insertBatch: insert \"000000000000010002embeddings_128\"; patch messages#1",
+  "mutation messages/addMessages: get threads#1; get messages#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\") desc;   end; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false,order=0) desc;   end;   end;   end;   end;   messages#1;   end; insert messages#2; get messages#2",
+  "mutation messages/addMessages: get threads#1; get messages#1; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=true,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"pending\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"success\",tool=false,order=0) desc; q threadId_status_tool_order_stepOrder(threadId=threads#1,status=\"failed\",tool=false,order=0) desc;   end;   end;   end;   messages#2;   messages#1;   end; insert \"000000000000010004embeddings_128\"; get messages#2; replace messages#2; get messages#2"
+ ],
+ "documentsRead": 15,
+ "documentsWritten": 5,
+ "indexRanges": 24,
+ "mutations": 3,
+ "queries": 2
+}
