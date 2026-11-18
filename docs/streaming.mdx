@@ -432,6 +432,7 @@ const convex = new ConvexClient(import.meta.env.VITE_CONVEX_URL);
 function watchStreams(
   threadId: string,
   onMessages: (messages: UIMessage[]) => void,
+  onError: (error: Error) => void,
 ) {
   let stopDeltas = () => {};
   const stopList = convex.onUpdate(
@@ -450,18 +451,18 @@ function watchStreams(
             cursors: messages.map(({ streamId }) => ({ streamId, cursor: 0 })),
           },
         },
-        async (result) => {
+        (result) => {
           if (result.streams?.kind !== "deltas") return;
-          onMessages(
-            await deriveUIMessagesFromDeltas(
-              threadId,
-              messages,
-              result.streams.deltas,
-            ),
-          );
+          deriveUIMessagesFromDeltas(
+            threadId,
+            messages,
+            result.streams.deltas,
+          ).then(onMessages, onError);
         },
+        onError,
       );
     },
+    onError,
   );
   return () => {
     stopList();
@@ -472,4 +473,5 @@ function watchStreams(
 
 To apply only the new deltas of a long stream, keep a cursor per stream and use
 `getParts` with `applyUIMessageChunksIncremental`, as `useStreamingUIMessages`
-does. `combineUIMessages` joins the messages that pagination split.
+does. `combineUIMessages` merges the assistant messages of one `order` into one,
+as `useUIMessages` does after it puts saved and streaming messages together.
