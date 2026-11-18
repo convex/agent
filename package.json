@@ -98,7 +98,7 @@
     "@assistant-ui/react": "0.15.25",
     "@assistant-ui/react-markdown": "0.14.19",
     "@changesets/cli": "3.0.3",
-    "@convex-dev/ai-sdk-provider": "^0.1.0",
+    "@convex-dev/ai-sdk-provider": "0.1.0",
     "@convex-dev/eslint-plugin": "5.0.0",
     "@convex-dev/rag": "0.7.6",
     "@convex-dev/rate-limiter": "0.3.2",
