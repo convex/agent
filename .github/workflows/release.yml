@@ -7,8 +7,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}
-  queue: max
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 permissions: {}
@@ -39,9 +38,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
       - id: release
-        uses: convex/npm-release-actions/validate-tag@6d8758603978f892ffbdcd1a170b8b0c121efefe # v0.2.0
+        uses: convex/npm-release-actions/validate-tag@3a142e21f421319890981579b8952267bc11fc53 # v0.3.0
       - run: npm ci
-      - uses: convex/npm-release-actions/check-release-notes@6d8758603978f892ffbdcd1a170b8b0c121efefe # v0.2.0
+      - uses: convex/npm-release-actions/check-release-notes@3a142e21f421319890981579b8952267bc11fc53 # v0.3.0
       - run: npm run build
       - run: npm run check
       - name: Run E2E tests and verify generated code
@@ -53,7 +52,7 @@ jobs:
           git diff --exit-code -- src/component/_generated
           test -z "$(git ls-files --others --exclude-standard src/component/_generated)"
       - id: pack
-        uses: convex/npm-release-actions/pack@6d8758603978f892ffbdcd1a170b8b0c121efefe # v0.2.0
+        uses: convex/npm-release-actions/pack@3a142e21f421319890981579b8952267bc11fc53 # v0.3.0
 
   stage:
     needs: build
@@ -63,7 +62,7 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: convex/npm-release-actions/stage@6d8758603978f892ffbdcd1a170b8b0c121efefe # v0.2.0
+      - uses: convex/npm-release-actions/stage@3a142e21f421319890981579b8952267bc11fc53 # v0.3.0
         with:
           artifact-id: ${{ needs.build.outputs.artifact_id }}
           sha256: ${{ needs.build.outputs.sha256 }}

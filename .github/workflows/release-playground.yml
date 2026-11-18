@@ -9,8 +9,7 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}
-  queue: max
+  group: ${{ github.workflow }}-${{ inputs.commit }}
   cancel-in-progress: false
 
 permissions: {}
