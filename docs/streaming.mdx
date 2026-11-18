@@ -415,3 +415,61 @@ const messages = useStreamingUIMessages(api.example.listStreams, { threadId });
 
 You can pass in another parameter to either skip certain `streamId`s or to start
 at some `order` to ignore previous streams.
+
+### Clients on other frameworks
+
+The hooks are built on functions that `@convex-dev/agent` exports, so a client
+on another framework can show the same streams. This one reads them with a
+[`ConvexClient`](https://docs.convex.dev/api/classes/browser.ConvexClient):
+
+```ts
+import { ConvexClient } from "convex/browser";
+import { deriveUIMessagesFromDeltas, type UIMessage } from "@convex-dev/agent";
+import { api } from "../convex/_generated/api";
+
+const convex = new ConvexClient(import.meta.env.VITE_CONVEX_URL);
+
+function watchStreams(
+  threadId: string,
+  onMessages: (messages: UIMessage[]) => void,
+) {
+  let stopDeltas = () => {};
+  const stopList = convex.onUpdate(
+    api.example.listStreams,
+    { threadId, streamArgs: { kind: "list" } },
+    ({ streams }) => {
+      if (streams?.kind !== "list") return;
+      const { messages } = streams;
+      stopDeltas();
+      stopDeltas = convex.onUpdate(
+        api.example.listStreams,
+        {
+          threadId,
+          streamArgs: {
+            kind: "deltas",
+            cursors: messages.map(({ streamId }) => ({ streamId, cursor: 0 })),
+          },
+        },
+        async (result) => {
+          if (result.streams?.kind !== "deltas") return;
+          onMessages(
+            await deriveUIMessagesFromDeltas(
+              threadId,
+              messages,
+              result.streams.deltas,
+            ),
+          );
+        },
+      );
+    },
+  );
+  return () => {
+    stopList();
+    stopDeltas();
+  };
+}
+```
+
+To apply only the new deltas of a long stream, keep a cursor per stream and use
+`getParts` with `applyUIMessageChunksIncremental`, as `useStreamingUIMessages`
+does. `combineUIMessages` joins the messages that pagination split.

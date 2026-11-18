@@ -201,7 +201,23 @@ export {
   updateThreadMetadata,
 } from "../client/threads.js";
 export type { ContextHandler } from "./client/types.js";
-export { toUIMessages, fromUIMessages, type UIMessage } from "./UIMessages.js";
+export {
+  toUIMessages,
+  fromUIMessages,
+  combineUIMessages,
+  type UIMessage,
+} from "./UIMessages.js";
+// What the React hooks turn stream deltas into UIMessages with, for clients on
+// other frameworks.
+export {
+  applyUIMessageChunksIncremental,
+  blankUIMessage,
+  deriveUIMessagesFromDeltas,
+  emptyIncrementalStreamState,
+  getParts,
+  statusFromStreamStatus,
+  type IncrementalStreamState,
+} from "./deltas.js";
 export type {
   AgentComponent,
   Config,
