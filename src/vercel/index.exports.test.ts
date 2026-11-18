@@ -22,3 +22,14 @@ test("the root entry exports the stream helpers without loading React", async ()
     expect(agent[name], name).toBeTypeOf("function");
   }
 });
+
+test("getParts reads deltas in order and leaves the caller's array as it was", async () => {
+  const { getParts } = await import("./index.js");
+  const deltas = [
+    { streamId: "s", start: 1, end: 2, parts: ["b"] },
+    { streamId: "s", start: 0, end: 1, parts: ["a"] },
+  ];
+
+  expect(getParts(deltas)).toEqual({ parts: ["a", "b"], cursor: 2 });
+  expect(deltas.map((delta) => delta.start)).toEqual([1, 0]);
+});

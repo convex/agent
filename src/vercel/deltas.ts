@@ -604,7 +604,7 @@ export function getParts<T extends StreamDelta["parts"][number]>(
 ): { parts: T[]; cursor: number } {
   const parts: T[] = [];
   let cursor = fromCursor ?? 0;
-  for (const delta of deltas.sort((a, b) => a.start - b.start)) {
+  for (const delta of [...deltas].sort((a, b) => a.start - b.start)) {
     if (delta.parts.length === 0) {
       console.debug(`Got delta with no parts: ${JSON.stringify(delta)}`);
       continue;
