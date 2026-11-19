@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { Agent, createThread } from "../index.js";
+import {
+  Agent,
+  PENDING_MESSAGE_NOT_PENDING,
+  createThread,
+  isPendingMessageNotPendingError,
+} from "../index.js";
 import { v } from "convex/values";
 import { APICallError, type LanguageModelV4Source } from "@ai-sdk/provider";
 import { app, components } from "./setup.test.js";
@@ -364,6 +369,47 @@ const streamTextWithSources = app.action({
   },
 });
 
+// Something else fills the pending message just before the deferred final
+// save, so that save throws PendingMessageNotPending.
+const streamTextFinalSaveRejected = app.action({
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) => {
+    const racingCtx = {
+      ...ctx,
+      runMutation: (async (reference, args) => {
+        if (
+          hasKeys(args, ["finishStreamId", "pendingMessageId"]) &&
+          typeof args.finishStreamId === "string" &&
+          typeof args.pendingMessageId === "string"
+        ) {
+          await ctx.runMutation(components.agent.messages.addMessages, {
+            threadId,
+            pendingMessageId: args.pendingMessageId,
+            messages: [
+              { message: { role: "assistant", content: "filled elsewhere" } },
+            ],
+          });
+        }
+        return ctx.runMutation(reference, args);
+      }) as typeof ctx.runMutation,
+    };
+    try {
+      await agent.streamText(
+        racingCtx,
+        { threadId },
+        { prompt: "Test" },
+        { saveStreamDeltas: { chunking: "word", throttleMs: 0 } },
+      );
+    } catch (error) {
+      return {
+        isNotPending: isPendingMessageNotPendingError(error),
+        data: isPendingMessageNotPendingError(error) ? error.data : undefined,
+      };
+    }
+    return { isNotPending: false, data: undefined };
+  },
+});
+
 const { api, createTest } = app.defineModules({
   streamText: {
     streamTextReturnImmediately,
@@ -378,6 +424,7 @@ const { api, createTest } = app.defineModules({
     streamTextAbortedMidStream,
     streamTextEmptyNoStorageAwaited,
     streamTextWithSources,
+    streamTextFinalSaveRejected,
   },
 });
 
@@ -860,5 +907,43 @@ describe("stream finish ownership without message storage", () => {
       }),
     );
     expect(streams.map((s) => s.status)).toEqual(["finished"]);
+  });
+});
+
+describe("the deferred final save fails", () => {
+  test("aborts the stream and rethrows the save error", async () => {
+    const t = createTest();
+    const threadId = await t.run(async (ctx) =>
+      createThread(ctx, components.agent, { userId: "u1" }),
+    );
+
+    const { isNotPending, data } = await t.action(
+      api.streamText.streamTextFinalSaveRejected,
+      { threadId },
+    );
+
+    expect(isNotPending).toBe(true);
+    expect(data).toMatchObject({
+      code: PENDING_MESSAGE_NOT_PENDING,
+      status: "success",
+    });
+    const streams = await t.run(async (ctx) =>
+      ctx.runQuery(components.agent.streams.list, {
+        threadId,
+        statuses: ["streaming", "finished", "aborted"],
+      }),
+    );
+    expect(streams.map((s) => s.status)).toEqual(["aborted"]);
+    const assistant = await t.run(async (ctx) =>
+      ctx.runQuery(components.agent.messages.listMessagesByThreadId, {
+        threadId,
+        order: "asc",
+      }),
+    );
+    expect(
+      assistant.page
+        .filter((m) => m.message?.role === "assistant")
+        .map((m) => [m.status, m.text]),
+    ).toEqual([["success", "filled elsewhere"]]);
   });
 });

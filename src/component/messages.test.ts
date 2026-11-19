@@ -12,6 +12,7 @@ import {
   timeoutStreamHandler,
 } from "./streams.js";
 import schema from "./schema.js";
+import { PENDING_MESSAGE_NOT_PENDING } from "../errors.js";
 import { initConvexTest, modules } from "./setup.test.js";
 
 describe("agent", () => {
@@ -1497,7 +1498,9 @@ describe("late saves racing a failed pending message (issue #320)", () => {
 });
 
 describe("saving into a pending message that already succeeded", () => {
-  const NOT_PENDING = /can't be filled: its status is "success"/;
+  const NOT_PENDING = {
+    data: { code: PENDING_MESSAGE_NOT_PENDING, status: "success" },
+  };
 
   async function seeded() {
     const t = initConvexTest();
@@ -1589,7 +1592,7 @@ describe("saving into a pending message that already succeeded", () => {
           vectors: [Array.from({ length: 128 }, () => 0.1), null],
         },
       }),
-    ).rejects.toThrow(NOT_PENDING);
+    ).rejects.toMatchObject(NOT_PENDING);
     expect(await snapshot()).toEqual(before);
   });
 
@@ -1620,7 +1623,7 @@ describe("saving into a pending message that already succeeded", () => {
           { message: { role: "assistant", content: "second answer" } },
         ],
       }),
-    ).rejects.toThrow(NOT_PENDING);
+    ).rejects.toMatchObject(NOT_PENDING);
     expect(await snapshot()).toEqual(before);
   });
 
@@ -1645,7 +1648,7 @@ describe("saving into a pending message that already succeeded", () => {
 
     await expect(
       t.mutation(api.messages.addMessages, step("attempt 2")),
-    ).rejects.toThrow(NOT_PENDING);
+    ).rejects.toMatchObject(NOT_PENDING);
     expect(await snapshot()).toEqual(before);
 
     await t.mutation(api.messages.addMessages, {
@@ -1683,7 +1686,7 @@ describe("saving into a pending message that already succeeded", () => {
           { message: { role: "assistant", content: [] }, status: "pending" },
         ],
       }),
-    ).rejects.toThrow(NOT_PENDING);
+    ).rejects.toMatchObject(NOT_PENDING);
     expect(await snapshot()).toEqual(before);
   });
 
@@ -1705,7 +1708,7 @@ describe("saving into a pending message that already succeeded", () => {
         failPendingSteps: true,
         messages: toolStep("attempt 2"),
       }),
-    ).rejects.toThrow(NOT_PENDING);
+    ).rejects.toMatchObject(NOT_PENDING);
     const after = await snapshot();
     expect(after).toEqual(before);
     expect(

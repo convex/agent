@@ -135,6 +135,11 @@ export {
 // a future version may put them all here or move these over there
 export { extractText, isTool, sorted } from "../shared.js";
 export {
+  PENDING_MESSAGE_NOT_PENDING,
+  isPendingMessageNotPendingError,
+  type PendingMessageNotPendingErrorData,
+} from "../errors.js";
+export {
   vAssistantMessage,
   vContent,
   vContextOptions,

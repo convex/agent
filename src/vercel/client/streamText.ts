@@ -325,7 +325,22 @@ export async function streamText<
       ifAborted: "returnUndefined",
     });
     if (finishStreamId) {
-      await call.save(pendingFinalStep, false, finishStreamId);
+      try {
+        await call.save(pendingFinalStep, false, finishStreamId);
+      } catch (saveError) {
+        // The save would have finished the stream row in the same mutation.
+        // It rolled back, so abort the row now instead of leaving it
+        // "streaming" until the stream timeout.
+        try {
+          await streamer.fail(errorToString(saveError));
+        } catch (cleanupError) {
+          console.error(
+            "Failed to abort stream after save failed:",
+            cleanupError,
+          );
+        }
+        throw saveError;
+      }
     }
   } else if (willAwaitStream && streamer) {
     // No final step was deferred (e.g. the generation produced none), so no

@@ -14,6 +14,10 @@ import {
   withDerivedReasoning,
 } from "../shared.js";
 import {
+  PENDING_MESSAGE_NOT_PENDING,
+  type PendingMessageNotPendingErrorData,
+} from "../errors.js";
+import {
   vMessageDoc,
   vMessageEmbeddingsWithDimension,
   vMessageStatus,
@@ -369,9 +373,12 @@ async function addMessagesHandler(
       const pendingMessage = await ctx.db.get("messages", pendingMessageId);
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
       if (pendingMessage.status === "success") {
-        throw new ConvexError(
-          `Message ${pendingMessageId} can't be filled: its status is "success", not "pending"`,
-        );
+        throw new ConvexError({
+          code: PENDING_MESSAGE_NOT_PENDING,
+          message: `Message ${pendingMessageId} can't be filled: its status is "${pendingMessage.status}", not "pending". Use updateMessage to change a filled message.`,
+          messageId: pendingMessageId,
+          status: pendingMessage.status,
+        } satisfies PendingMessageNotPendingErrorData);
       }
       if (pendingMessage.status === "failed") {
         fail = true;
