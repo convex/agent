@@ -184,6 +184,9 @@ const runArgs = {
   // Throws on the delta write that carries the first step's tool result.
   failToolResultDelta: v.optional(v.boolean()),
   abortInTool: v.optional(v.boolean()),
+  // Writes an assistant note to the prompt's order, from the first step's
+  // tool or from the caller's onStepEnd.
+  noteAt: v.optional(v.union(v.literal("tool"), v.literal("stepEnd"))),
   failFirst: v.optional(v.boolean()),
   failSecond: v.optional(v.boolean()),
   stopAfterError: v.optional(v.boolean()),
@@ -257,6 +260,13 @@ const run = app.action({
         ],
       });
     };
+    const writeNote = async () => {
+      await ctx.runMutation(components.agent.messages.addMessages, {
+        threadId: args.threadId,
+        promptMessageId: await firstMessageId(),
+        messages: [{ message: { role: "assistant", content: "Note" } }],
+      });
+    };
     const deletePrompt = async () => {
       await ctx.runMutation(components.agent.messages.deleteByIds, {
         messageIds: [await firstMessageId()],
@@ -282,6 +292,7 @@ const run = app.action({
             if (args.deletePromptAt === "duringFirstStep") await deletePrompt();
             if (args.scenario === "toolError") throw new Error("lookup failed");
             if (args.abortInTool) abort.abort("Stopped");
+            if (args.noteAt === "tool") await writeNote();
             return { ok: true };
           },
         }),
@@ -297,6 +308,7 @@ const run = app.action({
       }
       stopRequested = !!args.stopFromStepEnd;
       if (args.abortInStepEnd) abort.abort("Stopped");
+      if (args.noteAt === "stepEnd" && stepEnds === 1) await writeNote();
     };
     const onEnd = async () => {
       endCalls++;
@@ -624,8 +636,9 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
     expect(r.streams).toEqual(streamed ? ["aborted"] : []);
   });
 
-  // Its reply, with the id of the pending message it made, never arrived.
-  test("a step save that commits and then fails settles only the messages it knows", async () => {
+  // Its reply, with the id of the pending message it made, never arrived. The
+  // generation finds that message from the saved rows and fails it.
+  test("a step save that commits and then fails leaves nothing pending", async () => {
     const r = await go({
       runner,
       scenario: "toolCalls",
@@ -633,9 +646,25 @@ describe.each(runners)("$runner", ({ runner, streamed, awaited }) => {
       failSaveAfterCommit: true,
     });
     expect(r.modelCalls).toBe(1);
-    expect(r.saved).toEqual([USER, ...LOOKUP, PENDING]);
+    expect(r.saved).toEqual([
+      USER,
+      ...LOOKUP,
+      failed(EMPTY, "first save failed"),
+    ]);
     if (awaited) expect(r.error).toBe("first save failed");
     expect(r.streams).toEqual(streamed ? ["aborted"] : []);
+  });
+
+  test("a step save that commits and then fails finds its pending message past others in the order", async () => {
+    const r = await go({
+      runner,
+      scenario: "toolCalls",
+      failSave: "first",
+      failSaveAfterCommit: true,
+      noteAt: "tool",
+    });
+    expect(r.saved.filter((row) => row.status === "pending")).toEqual([]);
+    expect(r.saved.at(-1)).toEqual(failed(EMPTY, "first save failed"));
   });
 
   test("a final save that commits and then fails leaves nothing pending", async () => {

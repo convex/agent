@@ -249,6 +249,9 @@ export async function startGeneration<
   const order = pendingMessage?.order ?? context.order;
   const stepOrder = pendingMessage?.stepOrder ?? context.stepOrder;
   let pendingMessageId = pendingMessage?._id;
+  // A save that throws may have committed anyway, and then the pending message
+  // is the one it created, if it created one.
+  let unsure: { createdPending: boolean } | undefined;
 
   const model = args.model ?? opts.languageModel;
   assert(model, "model is required");
@@ -284,6 +287,38 @@ export async function startGeneration<
       });
     return saving;
   };
+  const pendingMessageNow = async () => {
+    if (!unsure || !threadId) return pendingMessageId;
+    const { page } = await ctx.runQuery(
+      component.messages.listMessagesByThreadId,
+      {
+        threadId,
+        order: "desc",
+        statuses: ["pending"],
+        upToAndIncludingMessageId: pendingMessageId,
+        paginationOpts: { cursor: null, numItems: 10 },
+      },
+    );
+    const pending = page.filter((m) => m.order === order);
+    // The save didn't commit.
+    if (pending.some((m) => m._id === pendingMessageId)) {
+      return pendingMessageId;
+    }
+    if (!unsure.createdPending || !pendingMessageId) return undefined;
+    const [replaced] = await ctx.runQuery(component.messages.getMessagesByIds, {
+      messageIds: [pendingMessageId],
+    });
+    // Only a committed save puts a successful step in the pending message's
+    // place. Anything else failed it, and the save made nothing pending.
+    if (replaced?.status !== "success") return undefined;
+    // The save placed the pending message it made after the step's messages,
+    // and anything else written to the order may sit between them, so its
+    // position can't be worked out. It is the first pending message after
+    // the one it replaced.
+    return pending
+      .filter((m) => m.stepOrder > replaced.stepOrder)
+      .sort((a, b) => a.stepOrder - b.stepOrder)[0]?._id;
+  };
   // The generation ends once, where the AI SDK ends it: what it finished is
   // saved, and if it failed, so does what is still pending.
   let ending: Promise<void> | undefined;
@@ -302,9 +337,10 @@ export async function startGeneration<
         // A step that ended keeps its messages, ahead of the failed one.
         if (held) await saveHeld(held.error === undefined);
       } finally {
-        if (pendingMessageId) {
+        const messageId = await pendingMessageNow();
+        if (messageId) {
           await ctx.runMutation(component.messages.finalizeMessage, {
-            messageId: pendingMessageId,
+            messageId,
             result: { status: "failed", error },
           });
         }
@@ -423,18 +459,27 @@ export async function startGeneration<
         });
         embeddings?.vectors.push(null);
       }
-      const saved = await ctx.runMutation(component.messages.addMessages, {
-        userId,
-        threadId,
-        agentName: opts.agentName,
-        promptMessageId,
-        abandonIfPromptMissing: true,
-        pendingMessageId,
-        messages: serialized.messages,
-        embeddings,
-        failPendingSteps: false,
-        finishStreamId,
-      });
+      let saved;
+      try {
+        saved = await ctx.runMutation(component.messages.addMessages, {
+          userId,
+          threadId,
+          agentName: opts.agentName,
+          promptMessageId,
+          abandonIfPromptMissing: true,
+          pendingMessageId,
+          messages: serialized.messages,
+          embeddings,
+          failPendingSteps: false,
+          finishStreamId,
+        });
+      } catch (error) {
+        if (pendingMessageId) {
+          unsure = { createdPending: !!createPendingMessage };
+        }
+        throw error;
+      }
+      unsure = undefined;
       const lastMessage = saved.messages.at(-1);
       if (createPendingMessage && lastMessage?.status === "pending") {
         pendingMessageId = lastMessage._id;
