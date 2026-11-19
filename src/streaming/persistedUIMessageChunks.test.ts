@@ -50,6 +50,35 @@ describe("reducePersistedUIMessageChunks", () => {
     expect(reduced.state.parts).toEqual([]);
   });
 
+  it("skips steering messages, which the saved message does not contain", () => {
+    const reduced = reducePersistedUIMessageChunks(
+      createPersistedUIMessageChunkState(),
+      [
+        { type: "start" },
+        { type: "start-step" },
+        { type: "text-start", id: "text-1" },
+        { type: "text-delta", id: "text-1", delta: "Checking" },
+        { type: "text-end", id: "text-1" },
+        { type: "finish-step" },
+        {
+          type: "steering-message",
+          id: "steer-1",
+          parts: [{ type: "text", text: "Use Paris, Texas instead." }],
+        },
+        { type: "start-step" },
+        { type: "text-start", id: "text-2" },
+        { type: "text-delta", id: "text-2", delta: "Paris, Texas" },
+      ],
+    );
+
+    expect(reduced.state.parts).toMatchObject([
+      { type: "step-start" },
+      { type: "text", text: "Checking", state: "done" },
+      { type: "step-start" },
+      { type: "text", text: "Paris, Texas", state: "streaming" },
+    ]);
+  });
+
   it("accepts the UIMessageChunk superset with replacement metadata", () => {
     const reduced = reducePersistedUIMessageChunks(
       createPersistedUIMessageChunkState(),

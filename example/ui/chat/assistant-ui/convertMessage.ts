@@ -82,10 +82,12 @@ function convertPart(part: UIMessage["parts"][number]): Part[] {
               filename: part.filename,
             },
       ];
-    // assistant-ui has no equivalent for these.
+    // assistant-ui has no equivalent for these. A steering message is a user
+    // turn, so rendering it here would show the user's words as the assistant's.
     case "step-start":
     case "custom":
     case "reasoning-file":
+    case "steering-message":
       return [];
     default:
       if (isToolUIPart(part)) return [convertToolPart(part)];

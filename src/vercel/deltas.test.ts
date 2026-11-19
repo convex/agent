@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   applyUIMessageChunksIncremental,
   blankUIMessage,
@@ -797,6 +797,45 @@ describe("mergeDeltas", () => {
     expect(filePart?.mediaType).toBe("image/png");
     expect(filePart?.url).toBe("https://example.com/a.png");
     expect(msg.metadata).toEqual({ foo: "bar" });
+  });
+
+  it("skips steering messages, which the saved message does not contain", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { message } = applyUIMessageChunksIncremental(
+      blankUIMessage(
+        {
+          streamId: "s-steer",
+          status: "streaming",
+          order: 0,
+          stepOrder: 0,
+          format: "UIMessageChunk",
+          agentName: "a",
+        },
+        "thread-steer",
+      ),
+      [
+        { type: "start" },
+        {
+          type: "steering-message",
+          id: "steer-1",
+          parts: [{ type: "text", text: "Use Paris, Texas instead." }],
+        },
+        { type: "start-step" },
+        { type: "text-start", id: "t0" },
+        { type: "text-delta", id: "t0", delta: "Paris, Texas" },
+        { type: "text-end", id: "t0" },
+        { type: "finish-step" },
+      ],
+      emptyIncrementalStreamState(),
+    );
+    const warnings = warn.mock.calls;
+    warn.mockRestore();
+
+    expect(message.parts).toEqual([
+      { type: "step-start" },
+      { type: "text", text: "Paris, Texas", state: "done" },
+    ]);
+    expect(warnings).toEqual([]);
   });
 
   it("tracks concurrent text parts by id across batches", async () => {
