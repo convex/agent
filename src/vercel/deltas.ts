@@ -515,6 +515,10 @@ export function applyUIMessageChunksIncremental<
         // The stream-level status (statusFromStreamStatus) is authoritative and
         // is applied by the caller; nothing to mutate on the message here.
         break;
+      case "steering-message":
+        // Unlike the SDK, skip it: saved messages don't include steering
+        // messages, so the streamed message would lose it on finish.
+        break;
       default: {
         if (typeof part.type === "string" && part.type.startsWith("data-")) {
           const dataPart = part as Extract<

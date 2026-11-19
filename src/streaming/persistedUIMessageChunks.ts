@@ -474,6 +474,10 @@ export function reducePersistedUIMessageChunks(
       case "error":
       case "abort":
         break;
+      case "steering-message":
+        // Saved messages don't include steering messages, so recovery skips
+        // them too.
+        break;
       default:
         if (chunk.type.startsWith("data-")) {
           if (chunk.transient === true) break;
@@ -606,6 +610,7 @@ const supportedChunkTypes = new Set([
   "finish",
   "abort",
   "message-metadata",
+  "steering-message",
 ]);
 
 function assertSupportedPersistedUIMessageChunk(
