@@ -271,6 +271,11 @@ describe("convertMessage", () => {
             mediaType: "image/png",
             url: "https://example.com/r.png",
           },
+          {
+            type: "steering-message",
+            id: "steer-1",
+            parts: [{ type: "text", text: "Use Paris, Texas instead." }],
+          },
         ],
       }).content,
     ).toEqual([
