@@ -14,17 +14,21 @@ export type ToolCallOutput = {
 };
 
 // The window a batch is resolved against. Approvals and client tool calls are
-// near the end of a thread, so one bounded page finds them.
+// near the end of a thread, so reading back at most this many messages finds
+// them.
 export const APPROVAL_LOOKUP_MESSAGES = 100;
 
-export function planToolCallResponses(
-  messages: MessageDoc[],
+export async function planToolCallResponses(
+  messages: AsyncIterable<MessageDoc>,
   {
     decisions,
     outputs,
   }: { decisions: ToolCallApprovalDecision[]; outputs: ToolCallOutput[] },
   threadId: string,
-): { requestMessageId: string; message: Extract<Message, { role: "tool" }> } {
+): Promise<{
+  requestMessageId: string;
+  message: Extract<Message, { role: "tool" }>;
+}> {
   if (decisions.length + outputs.length === 0) {
     throw new Error("A batch must contain at least one decision or output");
   }
@@ -53,7 +57,7 @@ export function planToolCallResponses(
   const continuedOrders = new Set<number>();
 
   // Newest first, so a call's answers are seen before the call itself.
-  for (const doc of messages) {
+  for await (const doc of messages) {
     const content = Array.isArray(doc.message?.content)
       ? doc.message.content
       : [];
