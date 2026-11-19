@@ -151,11 +151,18 @@ export async function streamText<
         )
       : undefined;
 
-  const failGeneration = (reason: string) =>
-    runStreamCleanup({
+  // Failing the streamer aborts the AI SDK, which then calls onAbort. That
+  // abort is the library's, for a provider error it already handles, so it
+  // isn't passed on to the caller's onAbort. A delta save that fails aborts
+  // the SDK itself, and that abort is still passed on.
+  let failedGeneration = false;
+  const failGeneration = (reason: string) => {
+    failedGeneration = true;
+    return runStreamCleanup({
       failCall: () => call.fail(reason),
       failStreamer: async () => streamer?.fail(reason),
     });
+  };
   const endGeneration = (options?: Parameters<typeof call.end>[0]) =>
     call.end(options).catch(async (error) => {
       await streamer?.fail(errorToString(error)).catch(() => {});
@@ -232,6 +239,13 @@ export async function streamText<
     abortSignal: streamer?.abortController.signal ?? args.abortSignal,
     experimental_transform: [...transforms, saveLastStep],
     onAbort: async (event) => {
+      if (
+        failedGeneration &&
+        deltasFailed === undefined &&
+        !args.abortSignal?.aborted
+      ) {
+        return;
+      }
       const reason =
         deltasFailed ??
         (args.abortSignal?.reason

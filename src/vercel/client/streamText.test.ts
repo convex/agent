@@ -397,6 +397,42 @@ const streamTextWithSources = app.action({
   },
 });
 
+
+// A provider that streams some text, then errors. The streamer aborts the AI
+// SDK to fail the generation; the caller didn't abort anything.
+const streamTextProviderError = app.action({
+  args: { threadId: v.string(), saveStreamDeltas: v.boolean() },
+  handler: async (ctx, { threadId, saveStreamDeltas }) => {
+    const providerErrors: string[] = [];
+    let aborts = 0;
+    let ends = 0;
+    const result = await failingAgent.streamText(
+      ctx,
+      { threadId },
+      {
+        prompt: "Test",
+        onError: ({ error }) => {
+          providerErrors.push(errorToString(error));
+        },
+        onAbort: () => {
+          aborts += 1;
+        },
+        onEnd: () => {
+          ends += 1;
+        },
+      },
+      {
+        saveStreamDeltas: saveStreamDeltas
+          ? { chunking: "word", throttleMs: 0 }
+          : false,
+      },
+    );
+    await result.consumeStream();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { providerErrors, aborts, ends };
+  },
+});
+
 const { api, createTest } = app.defineModules({
   streamText: {
     streamTextReturnImmediately,
@@ -407,6 +443,7 @@ const { api, createTest } = app.defineModules({
     streamTextNoStorage,
     streamTextNoStorageImmediate,
     streamTextCleanupFailure,
+    streamTextProviderError,
     streamTextFullStreamErrors,
     streamTextRejectedRequest,
     streamTextAbortedMidStream,
@@ -622,6 +659,31 @@ describe("provider errors reach fullStream and abort the stream", () => {
           ...args,
         }),
       ).toEqual({ errors: [PROVIDER_FAILURE_TEXT], streams: ["aborted"] });
+    },
+  );
+});
+
+
+describe("a provider error isn't reported as the caller's abort", () => {
+  test.each([{ saveStreamDeltas: true }, { saveStreamDeltas: false }])(
+    "saveStreamDeltas: $saveStreamDeltas",
+    async ({ saveStreamDeltas }) => {
+      // The abort races the stream's end, so run it a few times.
+      for (let i = 0; i < 3; i++) {
+        const t = createTest();
+        const threadId = await t.run(async (ctx) =>
+          createThread(ctx, components.agent, { userId: "u1" }),
+        );
+        const { providerErrors, aborts, ends } = await t.action(
+          api.streamText.streamTextProviderError,
+          { threadId, saveStreamDeltas },
+        );
+        expect(providerErrors).toEqual([PROVIDER_FAILURE_TEXT]);
+        expect(aborts).toBe(0);
+        // As before: the abort ends the stream without onEnd when deltas are
+        // saved, and the generation ends normally without them.
+        expect(ends).toBe(saveStreamDeltas ? 0 : 1);
+      }
     },
   );
 });
