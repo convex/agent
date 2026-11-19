@@ -869,10 +869,9 @@ export async function getStreamingMessagesWithMetadata(
   const streamsToRelease: Id<"streamingMessages">[] = [];
   for (const streamingMessage of streamingMessages) {
     try {
-      // Uses paginator, like listDeltas: it reads one page per stream, and
-      // built-in .paginate() is limited to once per transaction in queries.
-      // (This is called from the finalizeMessage mutation.)
-      const deltas = await paginator(ctx.db, schema)
+      // One built-in .paginate() per stream: only mutations allow several per
+      // transaction. A query would need paginator, as listDeltas uses.
+      const deltas = await ctx.db
         .query("streamDeltas")
         .withIndex("streamId_start_end", (q) =>
           q.eq("streamId", streamingMessage._id),
