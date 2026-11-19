@@ -11,6 +11,7 @@ import {
 } from "./streams.js";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
+import type { MutationCtx } from "./_generated/server.js";
 import schema from "./schema.js";
 import { initConvexTest, modules } from "./setup.test.js";
 
@@ -452,8 +453,13 @@ describe("getStreamingMessagesWithMetadata", () => {
     expect(padded.reduce((n, d) => n + getDocumentSize(d), 0)).toBe(bytes);
   }
 
-  async function materialize(s: Seeded, stepOrder = s.pending.stepOrder) {
-    return s.t.run(async (ctx) => {
+  async function materialize(
+    s: Seeded,
+    stepOrder = s.pending.stepOrder,
+    wrapDb?: (db: MutationCtx["db"]) => MutationCtx["db"],
+  ) {
+    return s.t.run(async (rawCtx) => {
+      const ctx = wrapDb ? { ...rawCtx, db: wrapDb(rawCtx.db) } : rawCtx;
       const before = await ctx.meta.getTransactionMetrics();
       const result = await getStreamingMessagesWithMetadata(
         ctx,
@@ -514,6 +520,69 @@ describe("getStreamingMessagesWithMetadata", () => {
       reads: { documents: 2213, bytes: 396213, queries: 7 },
       writes: { documents: 0, bytes: 0 },
     });
+  });
+
+  // Backends before 2026-10-16 allow one built-in .paginate() per mutation.
+  // This makes every built-in .paginate() after the first throw their error.
+  function onePaginatePerTransaction(
+    db: MutationCtx["db"],
+    message = "This query or mutation function ran multiple paginated queries. Convex only supports a single paginated query in each function.",
+  ) {
+    let calls = 0;
+    const wrap = <T extends object>(target: T): T =>
+      new Proxy(target, {
+        get(obj, prop) {
+          const value = Reflect.get(obj, prop, obj);
+          if (typeof value !== "function") return value;
+          if (prop === "paginate") {
+            return (...args: unknown[]) => {
+              if (++calls > 1) {
+                throw new Error(message);
+              }
+              return value.apply(obj, args);
+            };
+          }
+          return (...args: unknown[]) => {
+            const result = value.apply(obj, args);
+            return result && typeof result === "object" && "paginate" in result
+              ? wrap(result)
+              : result;
+          };
+        },
+      });
+    return { db: wrap(db), calls: () => calls };
+  }
+
+  test("falls back to paginator when a backend allows one built-in paginate", async () => {
+    const streams = [
+      { deltas: fill(1500) },
+      { deltas: fill(2, 10) },
+      { deltas: fill(700) },
+    ];
+    const expected = await materialize(await seed(streams));
+    const s = await seed(streams);
+    let limited: ReturnType<typeof onePaginatePerTransaction> | undefined;
+    const result = await materialize(s, s.pending.stepOrder, (db) => {
+      limited = onePaginatePerTransaction(db);
+      return limited.db;
+    });
+    expect(limited!.calls()).toBe(2);
+    expect(result.failures).toEqual([]);
+    expect(result.textLengths).toEqual([[700], [20], [1500]]);
+    expect(result.streamsToRelease).toEqual([...s.streamIds].reverse());
+    expect(result).toEqual(expected);
+  });
+
+  test("does not fall back on other paginate errors", async () => {
+    const s = await seed([{ deltas: fill(3) }, { deltas: fill(2) }]);
+    const result = await materialize(
+      s,
+      s.pending.stepOrder,
+      (db) => onePaginatePerTransaction(db, "boom").db,
+    );
+    expect(result.failures).toEqual([
+      { streamId: s.streamIds[0], reason: "boom" },
+    ]);
   });
 
   test("reads nothing past the streams when there are none", async () => {

@@ -20,7 +20,7 @@ import schema from "./schema.js";
 import { stream } from "convex-helpers/server/stream";
 import { mergedStream } from "convex-helpers/server/stream";
 import { paginator } from "convex-helpers/server/pagination";
-import type { WithoutSystemFields } from "convex/server";
+import type { PaginationResult, WithoutSystemFields } from "convex/server";
 import {
   getPersistedUIMessageChunkParts,
   projectPersistedUIMessageChunks,
@@ -688,6 +688,21 @@ export async function getStreamingMessages(
   ).take(MAX_MATERIALIZATION_STREAMS + 1);
 }
 
+/**
+ * True for the error a backend before 2026-10-16 throws on a second built-in
+ * `.paginate()` in one mutation. Its code is MultiplePaginatedDatabaseQueries,
+ * but only the message reaches JS: "This query or mutation function ran
+ * multiple paginated queries. ..." (newer backends say "This query function
+ * ran ..."). convex-test <= 0.0.63 throws "Only a single paginated query
+ * (`.paginate()`) is allowed per function execution. ...".
+ */
+export function isMultiplePaginateError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /MultiplePaginatedDatabaseQueries|multiple paginated queries|single paginated query/i.test(
+    message,
+  );
+}
+
 export async function getStreamingMessagesWithMetadata(
   ctx: MutationCtx,
   {
@@ -725,21 +740,39 @@ export async function getStreamingMessagesWithMetadata(
   let rowsRemaining = MAX_MATERIALIZATION_ROWS;
   const messages: MessageWithMetadataInternal[] = [];
   const streamsToRelease: Id<"streamingMessages">[] = [];
+  let builtinPaginate = true;
   for (const streamingMessage of streamingMessages) {
     try {
-      // One built-in .paginate() per stream: only mutations allow several per
-      // transaction. A query would need paginator, as listDeltas uses.
-      const deltas = await ctx.db
+      const opts = {
+        numItems: rowsRemaining,
+        maximumRowsRead: rowsRemaining,
+        maximumBytesRead: bytesRemaining,
+        cursor: null,
+      };
+      // One built-in .paginate() per stream. Mutations allow several per
+      // transaction only on backends from 2026-10-16 on; older ones (and
+      // convex-test <= 0.0.63) throw on the second, so we fall back to
+      // paginator for the rest of this mutation. Queries always need paginator.
+      let deltas: PaginationResult<Doc<"streamDeltas">> | undefined;
+      if (builtinPaginate) {
+        try {
+          deltas = await ctx.db
+            .query("streamDeltas")
+            .withIndex("streamId_start_end", (q) =>
+              q.eq("streamId", streamingMessage._id),
+            )
+            .paginate(opts);
+        } catch (error) {
+          if (!isMultiplePaginateError(error)) throw error;
+          builtinPaginate = false;
+        }
+      }
+      deltas ??= await paginator(ctx.db, schema)
         .query("streamDeltas")
         .withIndex("streamId_start_end", (q) =>
           q.eq("streamId", streamingMessage._id),
         )
-        .paginate({
-          numItems: rowsRemaining,
-          maximumRowsRead: rowsRemaining,
-          maximumBytesRead: bytesRemaining,
-          cursor: null,
-        });
+        .paginate(opts);
       if (!deltas.isDone) {
         throw new Error(
           `Delta logs for order ${order} exceed the ${MAX_MATERIALIZATION_BYTES} byte or ${MAX_MATERIALIZATION_ROWS} document recovery budget at stream ${streamingMessage._id}`,
