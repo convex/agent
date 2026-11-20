@@ -695,6 +695,22 @@ describe("streamText", () => {
     expect(r.error).toBe("first save failed");
   });
 
+  test("a step save that commits and then fails leaves nothing pending", async () => {
+    const r = await go({
+      runner: "streamText",
+      failSave: "first",
+      failSaveAfterCommit: true,
+    });
+    expect(r.modelCalls).toBe(1);
+    expect(r.error).toBe("first save failed");
+    expect(r.saved).toEqual([
+      USER,
+      ...LOOKUP,
+      failed(EMPTY, "first save failed"),
+    ]);
+    expect(r.streams).toEqual(["aborted"]);
+  });
+
   test("an abort during a step save fails the next step", async () => {
     const r = await go({ runner: "streamText", abortDuringSave: true });
     expect(r.saved).toEqual([USER, ...LOOKUP, failed(EMPTY, "Stopped")]);
