@@ -154,6 +154,100 @@ import { SmoothText } from "@convex-dev/agent/react";
 <SmoothText text={message.text} />;
 ```
 
+### Clients on other frameworks
+
+`deriveUIMessagesFromDeltas` from `@convex-dev/agent` turns stream deltas into
+UIMessages without React, so a client on another framework can show the same
+streams. This one reads them from the `listThreadMessages` query above with a
+[`ConvexClient`](https://docs.convex.dev/api/classes/browser.ConvexClient):
+
+```ts
+import { ConvexClient } from "convex/browser";
+import { deriveUIMessagesFromDeltas, type UIMessage } from "@convex-dev/agent";
+import type { StreamDelta, StreamMessage } from "@convex-dev/agent/validators";
+import { api } from "../convex/_generated/api";
+
+const convex = new ConvexClient(import.meta.env.VITE_CONVEX_URL);
+
+function watchStreams(
+  threadId: string,
+  onMessages: (messages: UIMessage[]) => void,
+  onError: (error: Error) => void,
+) {
+  // Only the streams are read here, so the query pages no saved messages.
+  const args = { threadId, paginationOpts: { cursor: null, numItems: 0 } };
+  let streams: StreamMessage[] = [];
+  // The deltas read so far, by stream.
+  let deltas: Record<string, StreamDelta[]> = {};
+  let stopDeltas = () => {};
+
+  function show() {
+    deriveUIMessagesFromDeltas(
+      threadId,
+      streams,
+      Object.values(deltas).flat(),
+    ).then(onMessages, onError);
+  }
+
+  // One result holds a limited number of deltas, so each result that brings
+  // some is followed by a subscription that starts where they end.
+  function readDeltas() {
+    stopDeltas();
+    stopDeltas = convex.onUpdate(
+      api.chat.streaming.listThreadMessages,
+      {
+        ...args,
+        streamArgs: {
+          kind: "deltas",
+          cursors: streams.map(({ streamId }) => ({
+            streamId,
+            cursor: deltas[streamId]?.at(-1)?.end ?? 0,
+          })),
+        },
+      },
+      (result) => {
+        if (result.streams?.kind !== "deltas") return;
+        if (result.streams.deltas.length === 0) return;
+        for (const delta of result.streams.deltas) {
+          deltas[delta.streamId]?.push(delta);
+        }
+        show();
+        readDeltas();
+      },
+      onError,
+    );
+  }
+
+  const stopList = convex.onUpdate(
+    api.chat.streaming.listThreadMessages,
+    { ...args, streamArgs: { kind: "list" } },
+    (result) => {
+      if (result.streams?.kind !== "list") return;
+      streams = result.streams.messages;
+      // Keep the deltas of the streams that are still listed.
+      deltas = Object.fromEntries(
+        streams.map(({ streamId }) => [streamId, deltas[streamId] ?? []]),
+      );
+      show();
+      readDeltas();
+    },
+    onError,
+  );
+  return () => {
+    stopList();
+    stopDeltas();
+  };
+}
+```
+
+The example shows the messages that are still streaming. A stream leaves the
+list when it finishes, and its message is then one of the saved messages, which
+the same query returns in `page`.
+
+The example keeps the deltas it has read and asks for the ones after them, as
+the hooks do, so a stream of any length arrives whole. It builds each message
+again from all of its deltas on every update.
+
 ## Consuming the stream yourself with the Agent
 
 You can consume the stream in all the ways you can with the underlying AI SDK -
