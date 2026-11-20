@@ -240,6 +240,10 @@ function watchStreams(
 }
 ```
 
+The example shows the messages that are still streaming. A stream leaves the
+list when it finishes, and its message is then one of the saved messages, which
+the same query returns in `page`.
+
 The example keeps the deltas it has read and asks for the ones after them, as
 the hooks do, so a stream of any length arrives whole. It builds each message
 again from all of its deltas on every update. To apply only the new deltas, keep
