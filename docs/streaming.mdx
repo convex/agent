@@ -156,9 +156,9 @@ import { SmoothText } from "@convex-dev/agent/react";
 
 ### Clients on other frameworks
 
-The hooks are built on functions that `@convex-dev/agent` exports, so a client
-on another framework can show the same streams. This one reads them from the
-`listThreadMessages` query above with a
+`deriveUIMessagesFromDeltas` from `@convex-dev/agent` turns stream deltas into
+UIMessages without React, so a client on another framework can show the same
+streams. This one reads them from the `listThreadMessages` query above with a
 [`ConvexClient`](https://docs.convex.dev/api/classes/browser.ConvexClient):
 
 ```ts
@@ -246,13 +246,7 @@ the same query returns in `page`.
 
 The example keeps the deltas it has read and asks for the ones after them, as
 the hooks do, so a stream of any length arrives whole. It builds each message
-again from all of its deltas on every update. To apply only the new deltas, keep
-each stream's message, cursor and state, and use `getParts` with
-`applyUIMessageChunksIncremental`, as `useStreamingUIMessages` does.
-`applyUIMessageChunksIncremental` copies the message with `structuredClone`, so
-pass it a plain object, not a reactive proxy. `combineUIMessages` merges the
-assistant messages of one `order` into one, as `useUIMessages` does after it
-puts saved and streaming messages together.
+again from all of its deltas on every update.
 
 ## Consuming the stream yourself with the Agent
 
