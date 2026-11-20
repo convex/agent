@@ -200,6 +200,16 @@ export type StreamingOptions = {
    */
   returnImmediately?: boolean;
 };
+
+// The component times a stream out 10 minutes after it last rescheduled the
+// timeout, which a write or heartbeat does at most every 2.5 minutes. So
+// heartbeating after 5 quiet minutes keeps a stream alive while its action
+// runs, through a long tool call or a slow model, and costs nothing while
+// deltas flow. A heartbeat lands at most 7.5 minutes after the last
+// reschedule; if it fails, the retries below still land by 9.25.
+const KEEPALIVE_MS = 5 * 60 * 1000;
+const KEEPALIVE_RETRY_MS = [15 * 1000, 30 * 1000, 60 * 1000];
+
 export const DEFAULT_STREAMING_OPTIONS = {
   sendSources: false,
   // This chunks by sentences / clauses. Punctuation followed by whitespace.
@@ -262,6 +272,8 @@ export class DeltaStreamer<T> {
   #latestWrite: number = 0;
   #ongoingWrite: Promise<void> | undefined;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
+  #keepAliveStopped: boolean;
   #abortPromise: Promise<void> | undefined;
   #cursor: number = 0;
   public abortController: AbortController;
@@ -312,6 +324,8 @@ export class DeltaStreamer<T> {
       materialize: config.materialize ?? null,
     };
     this.#finishHandledExternally = config.finishHandledExternally ?? false;
+    // Mutations can't set timers, and are over long before a timeout.
+    this.#keepAliveStopped = !("runAction" in ctx);
     this.#nextParts = [];
     this.abortController = new AbortController();
     if (config.abortSignal) {
@@ -414,18 +428,46 @@ export class DeltaStreamer<T> {
     }
   }
 
+  #keepAlive(failures = 0) {
+    const streamId = this.streamId;
+    if (this.#keepAliveStopped || !streamId) return;
+    clearTimeout(this.#keepAliveTimer);
+    const delay =
+      failures === 0
+        ? KEEPALIVE_MS
+        : (KEEPALIVE_RETRY_MS[failures - 1] ?? KEEPALIVE_MS);
+    this.#keepAliveTimer = setTimeout(async () => {
+      let failed = false;
+      try {
+        await this.ctx.runMutation(this.component.streams.heartbeat, {
+          streamId,
+        });
+      } catch {
+        failed = true;
+      }
+      this.#keepAlive(failed ? failures + 1 : 0);
+    }, delay);
+  }
+
+  #stopKeepAlive() {
+    this.#keepAliveStopped = true;
+    if (this.#keepAliveTimer) clearTimeout(this.#keepAliveTimer);
+  }
+
   public async consumeStream(stream: AsyncIterableStream<T>) {
     try {
       for await (const chunk of stream) {
         await this.addParts([chunk]);
       }
     } catch (error) {
+      this.#stopKeepAlive();
       // A provider can throw while responding to an abort. Join the durable
       // abort transition here, outside the active delta writer, before
       // preserving the provider error for the caller.
       await this.#abort(errorToString(error)).catch(() => {});
       throw error;
     }
+    this.#stopKeepAlive();
     // Abort cleanup owns the terminal component transition, so consumeStream
     // must wait for it instead of also trying to finish the stream.
     if (this.abortController.signal.aborted) {
@@ -488,6 +530,7 @@ export class DeltaStreamer<T> {
    * duration of the drain, which drops more of the tail than it saves.
    */
   public async flushAndStopAccepting(): Promise<void> {
+    this.#stopKeepAlive();
     this.#cancelScheduledFlush();
     await this.#flushPendingParts();
     this.#stoppedAccepting = true;
@@ -559,6 +602,7 @@ export class DeltaStreamer<T> {
       await this.#abortDelta("async abort");
       return;
     }
+    this.#keepAlive();
     // Now that we've sent the delta, check if we need to send another one.
     if (
       this.#nextParts.length > 0 &&
@@ -609,6 +653,7 @@ export class DeltaStreamer<T> {
   }
 
   public async finish() {
+    this.#stopKeepAlive();
     this.#cancelScheduledFlush();
     if (!this.streamId) {
       return;
@@ -654,6 +699,7 @@ export class DeltaStreamer<T> {
 
   #abort(reason: string, waitForOngoingWrite = true): Promise<void> {
     if (!this.#abortPromise) {
+      this.#stopKeepAlive();
       this.#cancelScheduledFlush();
       this.abortController.abort();
       this.#abortPromise = this.#abortCreatedStream(

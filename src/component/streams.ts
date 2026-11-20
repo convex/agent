@@ -381,8 +381,8 @@ export async function finishHandler(
   });
 }
 
-// TODO: use this heartbeat while streaming, every 30 seconds or so,
-// then reduce the timeout to 60 seconds.
+// DeltaStreamer heartbeats after 5 quiet minutes, so only a stream whose action
+// is gone times out.
 export const heartbeat = mutation({
   args: { streamId: v.id("streamingMessages") },
   returns: v.null(),
@@ -473,6 +473,56 @@ export async function timeoutStreamHandler(
   await ctx.db.patch("streamingMessages", args.streamId, {
     state: { kind: "aborted", reason: "timeout", cleanupFnId },
   });
+  // A live writer heartbeats through quiet stretches, so the action writing
+  // this stream is gone and nothing else will finalize its pending message.
+  const pending = await pendingMessageForStream(ctx, stream);
+  if (!pending) return;
+  try {
+    // Nested so a failure here still commits the abort.
+    await ctx.runMutation(api.messages.finalizeMessage, {
+      messageId: pending._id,
+      result: { status: "failed", error: "Stream timed out" },
+    });
+  } catch (error) {
+    console.error("Failed to finalize a timed out stream's message", error);
+  }
+}
+
+/**
+ * A generation fills its pending message with successful steps and a new
+ * pending message, starting at its stream's step, and stops at a failed one.
+ * So the stream's pending message is the first pending one at or after that
+ * step, unless a failed one comes before it (a retry failed the stream's
+ * message and saved its own after it) or a later stream at the order is
+ * filling it.
+ */
+async function pendingMessageForStream(
+  ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
+) {
+  const first = (status: "pending" | "failed", tool: boolean) =>
+    ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+        q
+          .eq("threadId", stream.threadId)
+          .eq("status", status)
+          .eq("tool", tool)
+          .eq("order", stream.order)
+          .gte("stepOrder", stream.stepOrder),
+      )
+      .first();
+  const pending = await first("pending", false);
+  if (!pending) return null;
+  const failed = [await first("failed", false), await first("failed", true)];
+  if (failed.some((m) => m && m.stepOrder < pending.stepOrder)) return null;
+  const [owner] = await getStreamingMessages(
+    ctx,
+    stream.threadId,
+    stream.order,
+    pending.stepOrder,
+  );
+  return owner?._id === stream._id ? pending : null;
 }
 
 async function deletePageForStreamId(
