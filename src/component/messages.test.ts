@@ -1747,6 +1747,70 @@ describe("saving into a pending message that already succeeded", () => {
   });
 });
 
+test("a streamed attempt's stream is created with its pending message, which each of its rows links to, one pending at a time", async () => {
+  const t = initConvexTest();
+  const thread = await t.mutation(api.threads.createThread, {});
+  const threadId = thread._id as Id<"threads">;
+  const pending = {
+    message: { role: "assistant" as const, content: [] },
+    status: "pending" as const,
+  };
+  const started = await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [{ message: { role: "user", content: "hi" } }, pending],
+    createStream: { format: "UIMessageChunk" },
+  });
+  const streamId = started.streamId as Id<"streamingMessages">;
+  expect(
+    await t.run((ctx) => ctx.db.get("streamingMessages", streamId)),
+  ).toMatchObject({
+    stepOrder: started.messages[1].stepOrder,
+    state: { kind: "streaming" },
+  });
+  await t.mutation(api.messages.addMessages, {
+    threadId,
+    pendingMessageId: started.messages[1]._id as Id<"messages">,
+    messages: [{ message: { role: "assistant", content: "step" } }, pending],
+  });
+  expect(
+    await t.run(async (ctx) =>
+      (await ctx.db.query("messages").collect()).map((m) => [
+        m.status,
+        m.streamId ?? null,
+      ]),
+    ),
+  ).toEqual([
+    ["success", null],
+    ["success", streamId],
+    ["pending", streamId],
+  ]);
+});
+
+test("a pending message can't be filled from another thread", async () => {
+  const t = initConvexTest();
+  const [a, b] = await Promise.all(
+    [0, 1].map(async () => {
+      const thread = await t.mutation(api.threads.createThread, {});
+      return thread._id as Id<"threads">;
+    }),
+  );
+  const started = await t.mutation(api.messages.addMessages, {
+    threadId: a,
+    messages: [
+      { message: { role: "user", content: "hi" } },
+      { message: { role: "assistant", content: [] }, status: "pending" },
+    ],
+    createStream: { format: "UIMessageChunk" },
+  });
+  await expect(
+    t.mutation(api.messages.addMessages, {
+      threadId: b,
+      pendingMessageId: started.messages[1]._id as Id<"messages">,
+      messages: [{ message: { role: "assistant", content: "elsewhere" } }],
+    }),
+  ).rejects.toThrow("is in another thread");
+});
+
 describe("deleting a message aborts generation writing to it (issue #300)", () => {
   test("a stream at the deleted order is aborted", async () => {
     const t = initConvexTest();

@@ -19,9 +19,13 @@ afterEach(() => {
 
 async function recordedStreamer(
   ctx: ActionCtx | MutationCtx,
-  { failedHeartbeats = 0 } = {},
+  { failedHeartbeats = 0, created = false } = {},
 ) {
   const threadId = await createThread(ctx, components.agent, {});
+  const metadata = { threadId, order: 0, stepOrder: 0, format: undefined };
+  const streamId = created
+    ? await ctx.runMutation(components.agent.streams.create, metadata)
+    : undefined;
   const calls: string[] = [];
   const heartbeats: number[] = [];
   const runMutation = (async (reference, args) => {
@@ -45,8 +49,9 @@ async function recordedStreamer(
       compress: null,
       onAsyncAbort,
       finishHandledExternally: true,
+      streamId,
     },
-    { threadId, order: 0, stepOrder: 0, format: undefined },
+    metadata,
   );
   return { streamer, calls, heartbeats, onAsyncAbort };
 }
@@ -67,6 +72,19 @@ test("a quiet stream heartbeats every 5 minutes and outlives the stream timeout"
       "addDelta",
       "finish",
     ]);
+  });
+});
+
+test("a stream created with its message heartbeats before its first part", async () => {
+  await initConvexTest().action(async (ctx) => {
+    const { streamer, calls, onAsyncAbort } = await recordedStreamer(ctx, {
+      created: true,
+    });
+    await vi.advanceTimersByTimeAsync(12 * MINUTE);
+    await streamer.addParts(["after a long first step"]);
+    await streamer.finish();
+    expect(onAsyncAbort).not.toHaveBeenCalled();
+    expect(calls).toEqual(["heartbeat", "heartbeat", "addDelta", "finish"]);
   });
 });
 

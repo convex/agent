@@ -374,9 +374,10 @@ const run = app.action({
         }
         const result = await ctx.runMutation(reference, mutationArgs);
         if (failsSave) throw new Error(`${args.failSave} save failed`);
-        const { pendingMessageId, format } = mutationArgs as {
+        const { pendingMessageId, format, createStream } = mutationArgs as {
           pendingMessageId?: string;
           format?: string;
+          createStream?: object;
         };
         // Aborts once a step save has committed, before its reply arrives.
         if (args.abortDuringSave && pendingMessageId) {
@@ -385,9 +386,11 @@ const run = app.action({
         }
         // Someone else aborts the stream as soon as it is created, before
         // the creation's reply arrives.
-        if (args.abortOnCreate && format !== undefined) {
+        if (args.abortOnCreate && (format ?? createStream) !== undefined) {
           await ctx.runMutation(components.agent.streams.abort, {
-            streamId: result as string,
+            streamId: createStream
+              ? (result as { streamId: string }).streamId
+              : (result as string),
             reason: "Stopped elsewhere",
           });
           await sleep(50);
@@ -727,12 +730,24 @@ describe("streamText", () => {
     ).toHaveLength(1);
   });
 
-  test("a retry during the answer fails the attempt it replaced", async () => {
+  test("a retry between steps keeps the step it replaced once", async () => {
+    const r = await go({ runner: "streamText", restartAt: "afterFirstStep" });
+    expect(r.error).toBe("Restarting");
+    expect(r.saved).toEqual([
+      USER,
+      ...LOOKUP.map((row) => failed(row, "Restarting")),
+      PENDING,
+    ]);
+  });
+
+  test("a retry during the answer stops the attempt it replaced at its first delta", async () => {
     const r = await go({ runner: "streamText", restartAt: "beforeAnswer" });
     expect(r.error).toBe("Restarting");
-    expect(r.saved.filter((row) => row.parts.includes("text"))).toEqual([
+    expect(r.saved).toEqual([
       USER,
-      failed(ANSWER, "Restarting"),
+      ...LOOKUP,
+      failed(EMPTY, "Restarting"),
+      PENDING,
     ]);
     expect(r.streams).toEqual(["aborted"]);
   });
