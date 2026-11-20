@@ -152,6 +152,8 @@ export const humanResponseAsToolCall = internalMutation({
       tool: "askHuman",
       toolCallId: args.toolCallId,
       output: { humanName: args.humanName, response: args.response },
+      // askHuman was passed to the generation, not set on the agent.
+      tools: { askHuman },
     });
     // Continue generating a response from the LLM
     await ctx.scheduler.runAfter(0, internal.example.continueThread, {

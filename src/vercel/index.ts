@@ -1214,7 +1214,8 @@ export class Agent<
    * leaves the calls without outputs out of the step, and rejects their
    * outputs afterwards.
    *
-   * Rejects a call to another tool, a call that is not found or awaits
+   * Rejects a tool that is not a client tool of the agent (or of `tools`, when
+   * passed), a call to another tool, a call that is not found or awaits
    * approval, a call that was already handled, and a call whose step already
    * continued.
    *
@@ -1224,6 +1225,9 @@ export class Agent<
    * @param args.toolCallId The ID of the tool call to answer.
    * @param args.output The tool's output. Or pass `state: "output-error"` and
    * `errorText` to save an error result.
+   * @param args.tools The tools the generation was given, when they were
+   * passed to it instead of set on the agent. Like a generation's `tools`,
+   * they replace the agent's tools.
    * @returns The messageId of the saved tool result message.
    */
   async addToolOutput(
@@ -1232,12 +1236,27 @@ export class Agent<
       threadId,
       tool,
       toolCallId,
+      tools,
       ...result
-    }: { threadId: string; tool: string; toolCallId: string } & (
+    }: {
+      threadId: string;
+      tool: string;
+      toolCallId: string;
+      tools?: ToolSet;
+    } & (
       | { state?: "output-available"; output: unknown; errorText?: never }
       | { state: "output-error"; errorText: string; output?: never }
     ),
   ): Promise<{ messageId: string }> {
+    const toolSet: ToolSet | undefined = tools ?? this.options.tools;
+    if (!toolSet || !Object.hasOwn(toolSet, tool)) {
+      throw new Error(
+        `Tool ${tool} is not in ${tools ? "the tools passed" : "the agent's tools"}`,
+      );
+    }
+    if (toolSet[tool].execute) {
+      throw new Error(`Tool ${tool} is not a client tool: it has execute`);
+    }
     return ctx.runMutation(this.component.messages.respondToToolCallApprovals, {
       threadId,
       agentName: this.options.name,

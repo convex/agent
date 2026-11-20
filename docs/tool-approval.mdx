@@ -66,11 +66,13 @@ The typical approval flow involves four server functions:
 
 ```ts
 import { approvalAgent } from "../agents/approval";
+import { authorizeThreadAccess } from "../threads";
 
 // 1. Save message and schedule generation
 export const sendMessage = mutation({
   args: { prompt: v.string(), threadId: v.string() },
   handler: async (ctx, { prompt, threadId }) => {
+    await authorizeThreadAccess(ctx, threadId);
     const { messageId } = await approvalAgent.saveMessage(ctx, {
       threadId,
       prompt,
@@ -106,6 +108,7 @@ export const submitApproval = mutation({
   },
   returns: v.object({ messageId: v.string() }),
   handler: async (ctx, { threadId, approvalId, approved, reason }) => {
+    await authorizeThreadAccess(ctx, threadId);
     const { messageId } = approved
       ? await approvalAgent.approveToolCall(ctx, {
           threadId,
@@ -224,11 +227,16 @@ A tool without `execute` runs in the browser. Generation stops at its call, and
 the tool part waits in the `input-available` state until the client answers it
 with `addToolOutput`. Like an approval, the output is saved next to its call,
 and a second answer is rejected. Naming the tool keeps a client from answering a
-call to any other tool. A client tool cannot set `needsApproval`: ask the user
-in the client before answering.
+call to any other tool. The tool must be a client tool in the tools that apply:
+the agent's tools, or the `tools` you pass to `addToolOutput`, which replace the
+agent's as a generation's `tools` do. An output for a tool that isn't in them,
+or for one with `execute`, is rejected. So if the generation was given `tools`
+instead of the agent's, pass the same `tools` to `addToolOutput`. A client tool
+cannot set `needsApproval`: ask the user in the client before answering.
 
 ```ts
 import { approvalAgent } from "../agents/approval";
+import { authorizeThreadAccess } from "../threads";
 
 // Add to approvalAgent's tools.
 const getLocation = createTool({
@@ -243,8 +251,9 @@ export const submitToolOutput = mutation({
     output: v.optional(v.any()),
     errorText: v.optional(v.string()),
   },
+  returns: v.object({ messageId: v.string() }),
   handler: async (ctx, { threadId, toolCallId, output, errorText }) => {
-    // Check the user can access the thread.
+    await authorizeThreadAccess(ctx, threadId);
     const { messageId } = await approvalAgent.addToolOutput(ctx, {
       threadId,
       tool: "getLocation",
@@ -253,9 +262,11 @@ export const submitToolOutput = mutation({
         ? { output }
         : { state: "output-error" as const, errorText }),
     });
-    // Once every client call in this step has an output, schedule
-    // generateResponse with promptMessageId: messageId, as submitApproval
-    // does in the example files below.
+    // Once every client call in this step has an output and every approval
+    // request in it has a decision, schedule generateResponse with
+    // promptMessageId: messageId. Your app checks this; the example files
+    // below show the check for approvals in submitApproval.
+    return { messageId };
   },
 });
 ```
@@ -290,6 +301,8 @@ useEffect(() => {
       if (part.state !== "input-available") continue;
       const { toolCallId } = part;
       if (answered.current.has(toolCallId)) continue;
+      // Not cleared on failure: the Convex client resends a mutation across
+      // reconnects, so a rejection is final and retrying cannot succeed.
       answered.current.add(toolCallId);
       readLocation(part.input)
         .then(
@@ -301,7 +314,7 @@ useEffect(() => {
               errorText: String(error),
             }),
         )
-        .catch(() => answered.current.delete(toolCallId));
+        .catch((error) => console.error(error));
     }
   }
 }, [messages, threadId, submitToolOutput]);
