@@ -7,6 +7,7 @@ import {
   type MessageWithMetadata,
 } from "../../validators.js";
 import { serializeMessage } from "../mapping.js";
+import { hasToolJson } from "../../streaming/toolJson.js";
 import {
   encodeUIMessageToolJson,
   toUIMessages,
@@ -27,8 +28,10 @@ import type {
 export { listMessages } from "../../client/messages.js";
 
 /**
- * List UI messages for a Convex query. useUIMessages decodes tool payloads;
- * other clients can call decodeUIMessageToolJson on each returned message.
+ * List UI messages for a Convex query. A tool input or output that Convex
+ * can't hold, such as JSON with a `$ref` key, is returned as its JSON text and
+ * flagged in the part's `toolJson`; `useUIMessages` parses it back. For the
+ * parsed values elsewhere, use `listMessages` with `toUIMessages`.
  */
 export async function listUIMessages(
   ctx: QueryCtx | MutationCtx | ActionCtx,
@@ -39,10 +42,25 @@ export async function listUIMessages(
   },
 ): Promise<PaginationResult<UIMessage>> {
   const result = await listMessages(ctx, component, args);
+  const page = toUIMessages(result.page);
+  // Values read without a flag came out of Convex, so they fit back in.
   return {
     ...result,
-    page: toUIMessages(result.page).map(encodeUIMessageToolJson),
+    page: result.page.some(hasStoredToolJson)
+      ? page.map(encodeUIMessageToolJson)
+      : page,
   };
+}
+
+function hasStoredToolJson({ message }: MessageDoc): boolean {
+  return (
+    Array.isArray(message?.content) &&
+    message.content.some((part) =>
+      part.type === "tool-result" && part.output
+        ? hasToolJson(part.output)
+        : hasToolJson(part),
+    )
+  );
 }
 
 export type SaveMessagesArgs = {

@@ -35,12 +35,14 @@ import type { Agent } from "../index.js";
 import { assert, omit } from "convex-helpers";
 import { saveInputMessages } from "./saveInputMessages.js";
 import { errorToString } from "./utils.js";
+import {
+  encodeToolJsonInMessages,
+  sendToolJson,
+} from "../../streaming/toolJson.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
-  toSave:
-    | { step: { model?: ModelOrMetadata } }
-    | { object: unknown },
+  toSave: { step: { model?: ModelOrMetadata } } | { object: unknown },
   activeModel: ModelOrMetadata,
 ): ModelOrMetadata {
   return "step" in toSave ? (toSave.step.model ?? activeModel) : activeModel;
@@ -74,7 +76,7 @@ function rawRequestResponseInclude(
   return {
     ...requested,
     requestBody: requested.requestBody ?? true,
-    ...((operation === "generateText" || operation === "generateObject")
+    ...(operation === "generateText" || operation === "generateObject"
       ? { responseBody: requested.responseBody ?? true }
       : {}),
   };
@@ -441,18 +443,23 @@ export async function startGeneration<
         });
         embeddings?.vectors.push(null);
       }
-      const saved = await ctx.runMutation(component.messages.addMessages, {
-        userId,
-        threadId,
-        agentName: opts.agentName,
-        promptMessageId,
-        abandonIfPromptMissing: true,
-        pendingMessageId,
-        messages: serialized.messages,
-        embeddings,
-        failPendingSteps: false,
-        finishStreamId,
-      });
+      const saved = await sendToolJson(
+        serialized.messages,
+        encodeToolJsonInMessages,
+        (messages) =>
+          ctx.runMutation(component.messages.addMessages, {
+            userId,
+            threadId,
+            agentName: opts.agentName,
+            promptMessageId,
+            abandonIfPromptMissing: true,
+            pendingMessageId,
+            messages,
+            embeddings,
+            failPendingSteps: false,
+            finishStreamId,
+          }),
+      );
       const lastMessage = saved.messages.at(-1);
       if (createPendingMessage && lastMessage?.status === "pending") {
         pendingMessageId = lastMessage._id;

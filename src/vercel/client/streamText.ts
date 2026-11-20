@@ -4,7 +4,6 @@ import type {
   TextStreamPart,
   ToolSet,
   UIMessage as AIUIMessage,
-  UIMessageChunk,
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
 import { streamText as streamTextAi } from "ai";
@@ -28,10 +27,6 @@ import type { Agent } from "../index.js";
 import { getModelName, getProviderName } from "../../shared.js";
 import { errorToString } from "./utils.js";
 import { materializeUIMessageChunkFiles } from "../fileMaterialization.js";
-import {
-  encodeToolJsonFields,
-  toolChunkJsonFields,
-} from "../../streaming/toolJson.js";
 
 export async function runStreamCleanup(cleanup: {
   failCall: () => Promise<void>;
@@ -134,7 +129,7 @@ export async function streamText<
   const deltasStopped = new AbortController();
   const streamer =
     threadId && options.saveStreamDeltas
-      ? new DeltaStreamer<UIMessageChunk>(
+      ? new DeltaStreamer(
           component,
           ctx,
           {
@@ -146,10 +141,7 @@ export async function streamText<
               deltasFailed ??= reason;
               deltasStopped.abort();
             },
-            compress: (parts) =>
-              compressUIMessageChunks(parts).map((part) =>
-                encodeToolJsonFields(part, ...toolChunkJsonFields(part.type)),
-              ),
+            compress: compressUIMessageChunks,
             materialize: (parts) =>
               materializeUIMessageChunkFiles(ctx, component, parts),
             abortSignal: args.abortSignal,

@@ -126,11 +126,11 @@ export function applyUIMessageChunksIncremental<
     } as typeof message.metadata;
   };
 
-  for (const rawPart of newParts) {
-    const fields = toolChunkJsonFields(rawPart.type);
-    const part = fields.length
-      ? decodeToolJsonFields(rawPart, ...fields)
-      : rawPart;
+  for (const chunk of newParts) {
+    const part = decodeToolJsonFields(
+      chunk,
+      toolChunkJsonFields(chunk.type),
+    );
     switch (part.type) {
       case "text-start": {
         const newPart: TextUIPart = {

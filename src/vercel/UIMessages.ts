@@ -75,11 +75,11 @@ export function decodeUIMessageToolJson<M extends UIMessageWithParts>(
 
 function mapUIToolJson<M extends UIMessageWithParts>(
   message: M,
-  transform: <T extends object>(part: T, ...keys: string[]) => T,
+  transform: <T extends object>(part: T, keys: readonly string[]) => T,
 ): M {
   const parts = message.parts.map((part) =>
     part.type.startsWith("tool-") || part.type === "dynamic-tool"
-      ? transform(part, "input", "rawInput", "output")
+      ? transform(part, ["input", "rawInput", "output"])
       : part,
   );
   return parts.some((part, i) => part !== message.parts[i])

@@ -1,6 +1,5 @@
 import type { AssistantModelMessage, ModelMessage, ToolModelMessage } from "ai";
 import { convexToJson, type Value } from "convex/values";
-import { encodeToolJsonFields } from "../../streaming/toolJson.js";
 
 type AssistantPart = Exclude<AssistantModelMessage["content"], string>[number];
 type Request = Extract<AssistantPart, { type: "tool-approval-request" }>;
@@ -508,18 +507,13 @@ function approvalPartSignature(part: ApprovalPart): string {
         signature: part.signature,
       });
     case "tool-call":
-      return signature(
-        encodeToolJsonFields(
-          {
-            type: part.type,
-            toolCallId: part.toolCallId,
-            toolName: part.toolName,
-            input: part.input,
-            providerExecuted: part.providerExecuted ?? false,
-          },
-          "input",
-        ),
-      );
+      return signature({
+        type: part.type,
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        input: inputSignature(part.input),
+        providerExecuted: part.providerExecuted ?? false,
+      });
     case "tool-approval-response":
       return signature({
         type: part.type,
@@ -539,4 +533,23 @@ function approvalPartSignature(part: ApprovalPart): string {
 
 function signature(value: unknown): string {
   return JSON.stringify(convexToJson((value ?? null) as Value));
+}
+
+// convexToJson keeps value types and ignores key order, but refuses keys Convex
+// can't store, such as `$ref`, so objects go in as sorted entries.
+function inputSignature(value: unknown): unknown {
+  if (Array.isArray(value)) return { array: value.map(inputSignature) };
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    value instanceof ArrayBuffer
+  ) {
+    return value;
+  }
+  return {
+    object: Object.entries(value)
+      .filter(([, field]) => field !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([key, field]) => [key, inputSignature(field)]),
+  };
 }

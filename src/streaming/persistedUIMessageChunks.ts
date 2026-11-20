@@ -588,10 +588,10 @@ function chunkRecord(value: unknown): PersistedUIMessageChunkRecord {
   if (typeof record.type !== "string") {
     throw new Error("Persisted UIMessageChunk is missing a type");
   }
-  const fields = toolChunkJsonFields(record.type);
-  return (
-    fields.length ? decodeToolJsonFields(record, ...fields) : record
-  ) as PersistedUIMessageChunkRecord;
+  return decodeToolJsonFields(
+    record as PersistedUIMessageChunkRecord,
+    toolChunkJsonFields(record.type),
+  );
 }
 
 const supportedChunkTypes = new Set([

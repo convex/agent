@@ -19,6 +19,7 @@ import {
   vMessageStatus,
   vMessageWithMetadataInternal,
   vPaginationResult,
+  vProviderOptions,
   type MessageDoc,
 } from "../validators.js";
 import { api, internal } from "./_generated/api.js";
@@ -640,7 +641,11 @@ export const respondToToolCallApprovals = mutation({
           toolName: v.string(),
           output: v.union(
             v.object({ type: v.literal("text"), value: v.string() }),
-            v.object({ type: v.literal("json"), value: v.any() }),
+            v.object({
+              type: v.literal("json"),
+              value: v.any(),
+              providerOptions: v.optional(vProviderOptions),
+            }),
             v.object({ type: v.literal("error-text"), value: v.string() }),
           ),
         }),

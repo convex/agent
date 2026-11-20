@@ -1,11 +1,12 @@
 import {
-  isRawToolResultOutput,
+  vToolResultOutput,
   type Message,
   type MessageContentParts,
   type MessageWithMetadataInternal,
   type StreamDelta,
   type StreamMessage,
 } from "../validators.js";
+import { validate } from "convex-helpers/validators";
 import { encodeToolJsonFields } from "./toolJson.js";
 import {
   collectContiguousStreamParts,
@@ -178,20 +179,23 @@ export function projectPersistedUIMessageChunkParts(
           part.state === "output-error"
             ? (part.input ?? part.rawInput ?? {})
             : (part.input ?? {});
-        const stored = encodeToolJsonFields({ input }, "input");
-        assistantContent.push({
-          type: "tool-call",
-          toolCallId: part.toolCallId,
-          toolName: getToolName(part),
-          ...stored,
-          args: stored.input,
-          providerExecuted: part.providerExecuted,
-          ...(part.title ? { title: part.title } : {}),
-          ...(part.toolMetadata ? { toolMetadata: part.toolMetadata } : {}),
-          ...(part.callProviderMetadata
-            ? { providerOptions: part.callProviderMetadata }
-            : {}),
-        });
+        const call = encodeToolJsonFields(
+          {
+            type: "tool-call" as const,
+            toolCallId: part.toolCallId,
+            toolName: getToolName(part),
+            input,
+            providerExecuted: part.providerExecuted,
+            ...(part.title ? { title: part.title } : {}),
+            ...(part.toolMetadata ? { toolMetadata: part.toolMetadata } : {}),
+            ...(part.callProviderMetadata
+              ? { providerOptions: part.callProviderMetadata }
+              : {}),
+          },
+          ["input"],
+          "providerOptions",
+        );
+        assistantContent.push({ ...call, args: call.input });
         if (part.approval) {
           assistantContent.push({
             type: "tool-approval-request",
@@ -369,8 +373,11 @@ function toolResult(
         ? { type: "error-text" as const, value: String(raw) }
         : mode === "error-json"
           ? { type: "error-json" as const, value: raw ?? null }
-          : isRawToolResultOutput(raw)
-            ? raw
+          : validate(vToolResultOutput, raw)
+            ? (raw as Extract<
+                MessageContentParts,
+                { type: "tool-result" }
+              >["output"])
             : typeof raw === "string"
               ? { type: "text" as const, value: raw }
               : { type: "json" as const, value: raw ?? null };
@@ -382,7 +389,7 @@ function toolResult(
     toolName: getToolName(part),
     output:
       output?.type === "json" || output?.type === "error-json"
-        ? encodeToolJsonFields(output, "value")
+        ? encodeToolJsonFields(output, ["value"], "providerOptions")
         : output,
     ...(providerOptions ? { providerOptions } : {}),
   };
