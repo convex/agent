@@ -1,4 +1,8 @@
-import type { PaginationOptions, PaginationResult } from "convex/server";
+import type {
+  FunctionArgs,
+  PaginationOptions,
+  PaginationResult,
+} from "convex/server";
 import type { MessageDoc } from "../validators.js";
 import { validateVectorDimension } from "../component/vector/tables.js";
 import {
@@ -121,6 +125,20 @@ export async function saveMessages(
     agentName?: string;
   },
 ): Promise<{ messages: MessageDoc[] }> {
+  const { messages } = await addMessages(ctx, component, args);
+  return { messages };
+}
+
+export type CreateStream = FunctionArgs<
+  AgentComponent["messages"]["addMessages"]
+>["createStream"];
+
+/** {@link saveMessages}, which can start a stream with its pending message. */
+export async function addMessages(
+  ctx: MutationCtx | ActionCtx,
+  component: AgentComponent,
+  args: Parameters<typeof saveMessages>[2] & { createStream?: CreateStream },
+): Promise<{ messages: MessageDoc[]; streamId?: string }> {
   let embeddings: MessageEmbeddingsWithDimension | undefined;
   if (args.embeddings) {
     const dimension = args.embeddings.vectors.find((v) => v !== null)?.length;
@@ -152,7 +170,8 @@ export async function saveMessages(
         embeddings,
         messages,
         failPendingSteps: args.failPendingSteps ?? false,
+        createStream: args.createStream,
       }),
   );
-  return { messages: result.messages };
+  return result;
 }
