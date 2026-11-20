@@ -1,5 +1,5 @@
 ---
-"@convex-dev/agent": patch
+"@convex-dev/agent": minor
 ---
 
 Add `agent.addToolOutput` to save the output of a client tool (one without
