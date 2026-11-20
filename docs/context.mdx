@@ -251,8 +251,7 @@ Say each request should tell the model the user's open cart. If you append the
 cart to `instructions`, the start of the prompt changes on every call, and the
 provider can't reuse its prompt cache: every call pays for the full prompt and
 waits for it to be read again. Put the changing state in `contextMessage`
-instead. The Agent sends it after the history and prompt, on every step of the
-generation, and never saves it:
+instead. The Agent sends it after the history and prompt and never saves it:
 
 ```ts
 const agent = new Agent(components.agent, {
@@ -263,15 +262,27 @@ const agent = new Agent(components.agent, {
     const cart = await ctx.runQuery(internal.carts.forUser, { userId });
     return `Current cart: ${JSON.stringify(cart)}`;
   },
+  promptCache: true,
 });
 ```
 
 A string becomes a user message. You can also return `ModelMessage`s, or pass
-`contextMessage` per call to override the Agent's. The instructions, history and
-prompt stay the same from one call to the next, so the provider caches them. For
-providers that need explicit cache markers, such as Anthropic, return the
-instructions as a system message with `providerOptions` (for example
-`{ anthropic: { cacheControl: { type: "ephemeral" } } }`).
+`contextMessage` per call to override the Agent's. When a generation has several
+steps, the function runs again before each step (it also receives `stepNumber`),
+and the message goes after the tool calls and results of the earlier steps. The
+model then reads the state as current. If the state sat before a tool call the
+model just made, the model could take that call's effect for something done
+earlier, such as an item it added a moment ago.
+
+OpenAI caches the start of a prompt on its own. Anthropic caches only up to a
+`cacheControl` breakpoint in the request, so a fixed prompt is never read from
+the cache without one. `promptCache: true` adds two breakpoints: one on the
+instructions, and one on the last message before the context message, which
+moves forward to the newest tool result on each step. The instructions, history
+and earlier steps are then read from the cache, and only the new message and the
+context message are paid in full. Providers other than Anthropic ignore the
+markers. Anthropic allows four breakpoints per request, so an app that sets its
+own can add two more.
 
 `instructions` can also be a function of the call:
 `(ctx, { threadId, userId }) => string`, set on the Agent or per call. Keep its

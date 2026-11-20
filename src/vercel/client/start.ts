@@ -52,6 +52,43 @@ function toContextMessages(
   return Array.isArray(value) ? value : [value];
 }
 
+const CACHE_MARKER = { type: "ephemeral" } as const;
+
+/** A copy of the message with an Anthropic cache breakpoint, keeping any set. */
+function withCacheMarker<M extends ModelMessage>(message: M): M {
+  const anthropic = (message.providerOptions?.anthropic ?? {}) as Record<
+    string,
+    unknown
+  >;
+  return {
+    ...message,
+    providerOptions: {
+      ...message.providerOptions,
+      anthropic: {
+        ...anthropic,
+        cacheControl: anthropic.cacheControl ?? CACHE_MARKER,
+      },
+    },
+  };
+}
+
+function cachedInstructions(
+  instructions: Instructions | undefined,
+): Instructions | undefined {
+  if (instructions === undefined || instructions === "") return instructions;
+  if (typeof instructions === "string") {
+    return withCacheMarker({ role: "system", content: instructions });
+  }
+  if (Array.isArray(instructions)) {
+    if (!instructions.length) return instructions;
+    return [
+      ...instructions.slice(0, -1),
+      withCacheMarker(instructions[instructions.length - 1]),
+    ];
+  }
+  return withCacheMarker(instructions);
+}
+
 export function resolveUsageModel(
   toSave: { step: { model?: ModelOrMetadata } } | { object: unknown },
   activeModel: ModelOrMetadata,
@@ -224,8 +261,8 @@ export async function startGeneration<
   getSavedMessages: () => MessageDoc[];
   /**
    * For generateText and streamText: the step's messages with the context
-   * message rebuilt and placed last. Undefined when there is no
-   * contextMessage.
+   * message rebuilt and placed last, and the cache breakpoint on the message
+   * before it when promptCache is on. Undefined when neither applies.
    */
   withContext: (
     stepNumber: number,
@@ -499,21 +536,37 @@ export async function startGeneration<
     }
     return messages;
   };
-  const contextMessages = perStep ? [] : await resolveContext(0);
-  // The AI SDK carries one step's messages into the next, so the context
-  // added for the previous step is removed (by reference) before adding the
-  // new one.
+  const promptCache = opts.promptCache ?? false;
+  // The AI SDK carries one step's messages into the next. Before each step,
+  // the context added for the previous step is removed and the previous
+  // cache breakpoint is undone (both by reference), then the breakpoint goes
+  // on the last message and the fresh context after it.
   let addedContext = new Set<ModelMessage>();
-  const withContext = async (
+  let markedCopies = new Map<ModelMessage, ModelMessage>();
+  const prepareMessages = async (
     stepNumber: number,
     messages: ModelMessage[],
   ): Promise<ModelMessage[] | undefined> => {
-    if (args.contextMessage === undefined) return undefined;
-    const fresh = await resolveContext(stepNumber);
-    const previous = addedContext;
+    if (args.contextMessage === undefined && !promptCache) return undefined;
+    let base = messages
+      .filter((m) => !addedContext.has(m))
+      .map((m) => markedCopies.get(m) ?? m);
+    const fresh =
+      args.contextMessage === undefined ? [] : await resolveContext(stepNumber);
     addedContext = new Set(fresh);
-    return [...messages.filter((m) => !previous.has(m)), ...fresh];
+    markedCopies = new Map();
+    if (promptCache && base.length) {
+      const last = base[base.length - 1];
+      const marked = withCacheMarker(last);
+      markedCopies.set(marked, last);
+      base = [...base.slice(0, -1), marked];
+    }
+    return [...base, ...fresh];
   };
+  // Other calls make one model call, so their messages are prepared once.
+  const initialMessages = perStep
+    ? context.messages
+    : ((await prepareMessages(0, context.messages)) ?? context.messages);
   const include = rawRequestResponseInclude(
     aiCallArgs as {
       experimental_include?: RawRequestResponseInclude;
@@ -527,10 +580,8 @@ export async function startGeneration<
     providerOptions: opts.providerOptions,
     ...aiCallArgs,
     model,
-    messages: contextMessages.length
-      ? [...context.messages, ...contextMessages]
-      : context.messages,
-    instructions,
+    messages: initialMessages,
+    instructions: promptCache ? cachedInstructions(instructions) : instructions,
     allowSystemInMessages,
     // A step that streamed an error is not continued past.
     stopWhen: [
@@ -744,7 +795,7 @@ export async function startGeneration<
     // Where the AI SDK finished: throws if a save failed.
     end: ({ finishStreamId } = {}) => settle(undefined, finishStreamId),
     wrapModel,
-    withContext,
+    withContext: prepareMessages,
     save: async <TOOLS extends ToolSet>(
       toSave: ToSave<TOOLS>,
       createPendingMessage?: boolean,

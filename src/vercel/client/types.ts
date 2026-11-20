@@ -252,6 +252,16 @@ export type Config = {
    */
   callSettings?: AgentCallSettings;
   /**
+   * Mark the prompt for Anthropic's prompt cache. The Agent adds a
+   * `cacheControl` breakpoint to the instructions and to the last message
+   * before the `contextMessage` (the end of the history and earlier steps),
+   * and moves the second one forward on each step. Anthropic caches only up
+   * to a breakpoint, so without this a fixed prompt is never read from the
+   * cache. Other providers ignore the marker. Anthropic allows four
+   * breakpoints per request and this uses two. Default: false.
+   */
+  promptCache?: boolean;
+  /**
    * The maximum number of steps to allow for a single generation.
    *
    * For example, if an agent wants to call a tool, that call and tool response
