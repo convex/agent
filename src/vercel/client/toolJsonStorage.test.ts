@@ -1,258 +1,239 @@
 import { expect, test } from "vitest";
-import { convexToJson, v, type Value } from "convex/values";
+import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
+import { tool } from "ai";
 import { z } from "zod/v4";
 import {
   Agent,
   createThread,
   createTool,
-  decodeUIMessageToolJson,
+  deriveUIMessagesFromDeltas,
+  listMessages,
   listUIMessages,
+  toUIMessages,
 } from "../index.js";
-import { saveMessages as saveCanonicalMessages } from "../../client/messages.js";
-import { projectPersistedUIMessageChunks } from "../../streaming/materializePersistedUIMessageChunks.js";
-import { mergeUIMessages } from "../react/useUIMessages.js";
-import { deriveUIMessagesFromDeltas } from "../deltas.js";
-import { serializeOrThrow, toModelMessage } from "../mapping.js";
+import { toModelMessage } from "../mapping.js";
 import { app, components } from "./setup.test.js";
 import { mockModel } from "./mockModel.js";
 
 const schema = { $ref: "#/$defs/item" };
-const plain = { ref: "#/definitions/item" };
-
 const paginationOpts = { cursor: null, numItems: 20 };
+const callTool = (toolName: string) =>
+  mockModel({
+    contentSteps: [
+      [
+        {
+          type: "tool-call",
+          toolCallId: "call",
+          toolName,
+          input: JSON.stringify(schema),
+        },
+      ],
+    ],
+  });
 
 const { createTest, api } = app.defineModules({
-  toolJsonStorage: {
+  toolJson: {
     list: app.query({
       args: { threadId: v.string(), paginationOpts: paginationOptsValidator },
       handler: (ctx, args) => listUIMessages(ctx, components.agent, args),
     }),
     generate: app.action({
-      args: {
-        threadId: v.string(),
-        saveStreamDeltas: v.boolean(),
-        reservedInput: v.boolean(),
-        reservedOutput: v.boolean(),
-      },
-      handler: async (ctx, args) => {
+      args: { threadId: v.string(), saveStreamDeltas: v.boolean() },
+      handler: async (ctx, { threadId, saveStreamDeltas }) => {
         const agent = new Agent(components.agent, {
-          name: "tool-json-storage",
-          languageModel: mockModel({
-            contentSteps: [
-              [
-                {
-                  type: "tool-call",
-                  toolCallId: "schema-call",
-                  toolName: "schema",
-                  input: JSON.stringify(args.reservedInput ? schema : plain),
-                },
-              ],
-            ],
-          }),
+          name: "tool-json",
+          languageModel: callTool("schema"),
           tools: {
             schema: createTool({
               inputSchema: z.record(z.string(), z.string()),
-              execute: async () => (args.reservedOutput ? schema : plain),
+              execute: async () => schema,
             }),
           },
         });
-
         const result = await agent.streamText(
           ctx,
-          { threadId: args.threadId },
+          { threadId },
           { prompt: "Read this schema" },
-          { saveStreamDeltas: args.saveStreamDeltas },
+          { saveStreamDeltas },
         );
-        if (!args.saveStreamDeltas) await result.consumeStream();
+        await result.consumeStream();
+      },
+    }),
+    clientTool: app.action({
+      args: { threadId: v.string() },
+      handler: async (ctx, { threadId }) => {
+        const agent = new Agent(components.agent, {
+          name: "client-tool-json",
+          languageModel: callTool("pick"),
+          tools: {
+            pick: tool({ inputSchema: z.record(z.string(), z.string()) }),
+          },
+        });
+        await agent.generateText(ctx, { threadId }, { prompt: "Pick one" });
+        await ctx.runMutation(api.toolJson.addOutput, { threadId });
+      },
+    }),
+    addOutput: app.mutation({
+      args: { threadId: v.string() },
+      handler: async (ctx, { threadId }) => {
+        const agent = new Agent(components.agent, {
+          name: "client-tool-json",
+          languageModel: mockModel({}),
+          tools: {
+            pick: tool({ inputSchema: z.record(z.string(), z.string()) }),
+          },
+        });
+        await agent.addToolOutput(ctx, {
+          threadId,
+          tool: "pick",
+          toolCallId: "call",
+          output: schema,
+        });
       },
     }),
   },
 });
 
-test.each([
-  {
-    name: "ordinary JSON",
-    saveStreamDeltas: true,
-    reservedInput: false,
-    reservedOutput: false,
-  },
-  {
-    name: "JSON Schema result",
-    saveStreamDeltas: false,
-    reservedInput: false,
-    reservedOutput: true,
-  },
-  {
-    name: "streamed JSON Schema result",
-    saveStreamDeltas: true,
-    reservedInput: false,
-    reservedOutput: true,
-  },
-  {
-    name: "streamed JSON Schema input",
-    saveStreamDeltas: true,
-    reservedInput: true,
-    reservedOutput: false,
-  },
-])("round trips $name", async ({ name: _name, ...args }) => {
-  const t = createTest();
-  const threadId = await t.run((ctx) =>
-    createThread(ctx, components.agent, {}),
-  );
-  await t.action(api.toolJsonStorage.generate, { threadId, ...args });
-
-  const input = args.reservedInput ? schema : plain;
-  const output = args.reservedOutput ? schema : plain;
-  const { page } = await t.query(
-    components.agent.messages.listMessagesByThreadId,
-    {
+async function storedToolParts(
+  t: ReturnType<typeof createTest>,
+  threadId: string,
+) {
+  const { page } = await t.run((ctx) =>
+    listMessages(ctx, components.agent, {
       threadId,
-      order: "asc",
       paginationOpts,
-    },
+      excludeToolMessages: false,
+    }),
   );
-  const parts = page.flatMap(({ message }) => {
-    const model = message && toModelMessage(message);
-    return model && Array.isArray(model.content) ? [...model.content] : [];
-  });
-  expect.soft(parts).toEqual(
-    expect.arrayContaining([
-      expect.objectContaining({ type: "tool-call", input }),
-      expect.objectContaining({
-        type: "tool-result",
-        output: { type: "json", value: output },
-      }),
-    ]),
-  );
+  return {
+    page,
+    parts: page.flatMap((doc): unknown[] => {
+      const { content } = toModelMessage(doc.message!);
+      return typeof content === "string" ? [] : content;
+    }),
+  };
+}
 
-  const ui = await t.query(api.toolJsonStorage.list, {
-    threadId,
-    paginationOpts,
-  });
-  const uiTool = expect.objectContaining({
-    type: "tool-schema",
-    state: "output-available",
-    input,
-    output,
-  });
-  expect(
-    ui.page.map(decodeUIMessageToolJson).flatMap(({ parts }) => parts),
-  ).toContainEqual(uiTool);
-  expect(
-    mergeUIMessages(ui.page, []).flatMap(({ parts }) => parts),
-  ).toContainEqual(uiTool);
-  if (!args.reservedInput && !args.reservedOutput) {
-    const raw = ui.page
-      .flatMap(({ parts }) => parts)
-      .find(({ type }) => type === "tool-schema");
-    expect(raw).toMatchObject({ input: plain, output: plain });
-    expect(raw).not.toHaveProperty("toolJson");
-  }
-
-  if (args.saveStreamDeltas) {
-    const streams = await t.query(components.agent.streams.list, {
-      threadId,
-      statuses: ["streaming", "finished", "aborted"],
-    });
-    expect(streams).toEqual([expect.objectContaining({ status: "finished" })]);
-    const deltas = await t.query(components.agent.streams.listDeltas, {
-      threadId,
-      cursors: streams.map(({ streamId }) => ({ streamId, cursor: 0 })),
-    });
-    const messages = await deriveUIMessagesFromDeltas(
-      threadId,
-      streams,
-      deltas,
-    );
-    expect(messages.flatMap((message) => message.parts)).toContainEqual(uiTool);
-    const projected = projectPersistedUIMessageChunks(
-      streams[0],
-      deltas.flatMap(({ parts }) => parts),
-      { status: "success" },
-    );
-    const modelParts = projected.flatMap(({ message }) => {
-      const model = toModelMessage(message);
-      return Array.isArray(model.content) ? [...model.content] : [];
-    });
-    expect(modelParts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ type: "tool-call", input }),
-        expect.objectContaining({
-          type: "tool-result",
-          output: { type: "json", value: output },
-        }),
-      ]),
-    );
-    expect(() => convexToJson(projected as Value)).not.toThrow();
-  }
+const call = expect.objectContaining({ type: "tool-call", input: schema });
+const result = expect.objectContaining({
+  type: "tool-result",
+  output: { type: "json", value: schema },
 });
 
-test("reads historical args and a string result without interpreting it as encoded JSON", async () => {
+test.each([
+  ["input", call],
+  ["result", result],
+])("saves a tool %s with a $ref key", async (_name, part) => {
   const t = createTest();
   const threadId = await t.run((ctx) =>
     createThread(ctx, components.agent, {}),
   );
-  const payload = JSON.stringify(schema);
-  await t.run((ctx) =>
-    saveCanonicalMessages(ctx, components.agent, {
-      threadId,
-      messages: [
-        {
+  await t.action(api.toolJson.generate, { threadId, saveStreamDeltas: false });
+  const { parts } = await storedToolParts(t, threadId);
+  expect(parts).toContainEqual(part);
+});
+
+test("streams a tool result with a $ref key through deltas", async () => {
+  const t = createTest();
+  const threadId = await t.run((ctx) =>
+    createThread(ctx, components.agent, {}),
+  );
+  await t.action(api.toolJson.generate, { threadId, saveStreamDeltas: true });
+  const streams = await t.query(components.agent.streams.list, {
+    threadId,
+    statuses: ["finished"],
+  });
+  const deltas = await t.query(components.agent.streams.listDeltas, {
+    threadId,
+    cursors: streams.map(({ streamId }) => ({ streamId, cursor: 0 })),
+  });
+  const messages = await deriveUIMessagesFromDeltas(threadId, streams, deltas);
+  expect(messages.flatMap(({ parts }) => parts)).toContainEqual(
+    expect.objectContaining({
+      type: "tool-schema",
+      input: schema,
+      output: schema,
+    }),
+  );
+});
+
+test("saves a client tool output with a $ref key", async () => {
+  const t = createTest();
+  const threadId = await t.run((ctx) =>
+    createThread(ctx, components.agent, {}),
+  );
+  await t.action(api.toolJson.clientTool, { threadId });
+  const { parts } = await storedToolParts(t, threadId);
+  expect(parts).toEqual(expect.arrayContaining([call, result]));
+});
+
+test("reads tool JSON back parsed from toUIMessages and as text from listUIMessages", async () => {
+  const t = createTest();
+  const threadId = await t.run((ctx) =>
+    createThread(ctx, components.agent, {}),
+  );
+  await t.action(api.toolJson.generate, { threadId, saveStreamDeltas: false });
+  const { page } = await storedToolParts(t, threadId);
+  const tool = { type: "tool-schema", input: schema, output: schema };
+  expect(toUIMessages(page).flatMap(({ parts }) => parts)).toContainEqual(
+    expect.objectContaining(tool),
+  );
+  // A query can't return `$` keys, so it returns the text; useUIMessages
+  // parses it.
+  const ui = await t.query(api.toolJson.list, { threadId, paginationOpts });
+  expect(ui.page.flatMap(({ parts }) => parts)).toContainEqual(
+    expect.objectContaining({
+      input: JSON.stringify(schema),
+      output: JSON.stringify(schema),
+      toolJson: { input: true, output: true },
+    }),
+  );
+});
+
+test("reads a row saved before encoding as it is", async () => {
+  const t = createTest();
+  const threadId = await t.run((ctx) =>
+    createThread(ctx, components.agent, {}),
+  );
+  const text = JSON.stringify(schema);
+  await t.mutation(components.agent.messages.addMessages, {
+    threadId,
+    messages: [
+      {
+        message: {
           role: "assistant",
           content: [
             {
               type: "tool-call",
-              toolName: "schema",
-              toolCallId: "legacy",
-              args: payload,
+              toolName: "t",
+              toolCallId: "c",
+              input: text,
+              args: text,
             },
           ],
         },
-        {
+      },
+      {
+        message: {
           role: "tool",
           content: [
             {
               type: "tool-result",
-              toolName: "schema",
-              toolCallId: "legacy",
-              result: payload,
+              toolName: "t",
+              toolCallId: "c",
+              output: { type: "json", value: text },
             },
           ],
         },
-      ],
-    }),
-  );
-  const { page } = await t.query(api.toolJsonStorage.list, {
-    threadId,
-    paginationOpts,
-  });
-  const raw = page
-    .flatMap(({ parts }) => parts)
-    .find(({ type }) => type === "tool-schema");
-  expect(raw).toMatchObject({ input: payload, output: payload });
-  expect(raw).not.toHaveProperty("toolJson");
-  expect(page.map(decodeUIMessageToolJson)).toEqual(page);
-});
-
-test("round trips error JSON without changing provider options or negative zero", async () => {
-  const message = {
-    role: "tool" as const,
-    content: [
-      {
-        type: "tool-result" as const,
-        toolName: "schema",
-        toolCallId: "schema-error",
-        output: {
-          type: "error-json" as const,
-          value: { nested: [schema, { offset: -0 }] },
-          providerOptions: { test: { retryable: true } },
-        },
       },
     ],
-  };
-  const stored = await serializeOrThrow(message);
-  expect(() => convexToJson(stored as Value)).not.toThrow();
-  expect(toModelMessage(stored)).toMatchObject(message);
-  expect(await serializeOrThrow(stored)).toEqual(stored);
+  });
+  const { parts } = await storedToolParts(t, threadId);
+  expect(parts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ type: "tool-call", input: text }),
+      expect.objectContaining({ output: { type: "json", value: text } }),
+    ]),
+  );
 });
