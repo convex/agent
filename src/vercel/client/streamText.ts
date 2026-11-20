@@ -267,6 +267,9 @@ export async function streamText<
         (args.abortSignal?.reason
           ? errorToString(args.abortSignal.reason)
           : "streamText aborted");
+      // An abort or a failed delta write fails the generation, so `saved`
+      // rejects.
+      generationFailure ??= { error: reason };
       await runStreamCleanup({
         failCall: () => call.fail(reason),
         failStreamer: async () => streamer?.fail(reason),
