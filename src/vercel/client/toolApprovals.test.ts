@@ -9,6 +9,7 @@ import {
   type ContextHandler,
   type ContextOptions,
 } from "../index.js";
+import { MockEmbeddingModelV4 } from "ai/test";
 import { MockLanguageModel, mockModel } from "./mockModel.js";
 import { components, initConvexTest } from "./setup.test.js";
 
@@ -1263,6 +1264,109 @@ describe("approval continuation with excludeToolMessages", () => {
 
       expect(ran).toEqual(["x"]);
       expect(text).toBe("Done");
+    },
+  );
+});
+
+describe("approval continuation with context search", () => {
+  const vector = Array.from({ length: 128 }, (_, i) => (i === 0 ? 1 : 0));
+  function setup(searchOptions: ContextOptions["searchOptions"]) {
+    const ran: string[] = [];
+    const embedded: string[] = [];
+    const model = mockModel({
+      contentSteps: [
+        [
+          {
+            type: "tool-call",
+            toolCallId: "call-x",
+            toolName: "echo",
+            input: JSON.stringify({ tag: "x" }),
+          },
+        ],
+        [{ type: "text", text: "Done" }],
+      ],
+    }) as MockLanguageModel;
+    const searchingAgent = new Agent(components.agent, {
+      name: "search-approval",
+      contextOptions: { recentMessages: 3, searchOptions },
+      stopWhen: stepCountIs(5),
+      embeddingModel: new MockEmbeddingModelV4({
+        modelId: "test-embedding",
+        doEmbed: async ({ values }) => {
+          embedded.push(...values);
+          return { embeddings: values.map(() => vector), warnings: [] };
+        },
+      }),
+      tools: {
+        echo: createTool({
+          inputSchema: z.object({ tag: z.string() }),
+          needsApproval: true,
+          execute: async (_ctx, { tag }) => {
+            ran.push(tag);
+            return tag;
+          },
+        }),
+      },
+      languageModel: model,
+    });
+    return { ran, embedded, model, searchingAgent, t: initConvexTest() };
+  }
+
+  test.each(["textSearch", "vectorSearch"] as const)(
+    "%s searches with the order's user prompt",
+    async (kind) => {
+      const { ran, embedded, model, searchingAgent, t } = setup({
+        [kind]: true,
+        limit: 5,
+        messageRange: { before: 0, after: 0 },
+      });
+      const { threadId, approvalId } = await t.action(async (ctx) => {
+        const { threadId } = await searchingAgent.createThread(ctx);
+        const { messageId } = await searchingAgent.saveMessage(ctx, {
+          threadId,
+          prompt: "Tell me about Paris",
+        });
+        await searchingAgent.saveMessage(ctx, {
+          threadId,
+          promptMessageId: messageId,
+          message: { role: "assistant", content: "Paris is in France." },
+        });
+        const first = await searchingAgent.generateText(
+          ctx,
+          { threadId },
+          { prompt: "Echo Paris" },
+        );
+        const approvalId = first.steps
+          .flatMap((step) => step.content)
+          .flatMap((part) =>
+            part.type === "tool-approval-request" ? [part.approvalId] : [],
+          )[0];
+        return { threadId, approvalId };
+      });
+      const { messageId } = await t.run((ctx) =>
+        searchingAgent.approveToolCall(ctx, { threadId, approvalId }),
+      );
+      embedded.length = 0;
+
+      const text = await t.action(
+        async (ctx) =>
+          (
+            await searchingAgent.generateText(
+              ctx,
+              { threadId },
+              { promptMessageId: messageId },
+            )
+          ).text,
+      );
+
+      expect(text).toBe("Done");
+      expect(ran).toEqual(["x"]);
+      expect(JSON.stringify(model.doGenerateCalls.at(-1)!.prompt)).toContain(
+        "Paris is in France.",
+      );
+      if (kind === "vectorSearch") {
+        expect(embedded).toContain("Echo Paris");
+      }
     },
   );
 });
