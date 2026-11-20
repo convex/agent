@@ -31,6 +31,71 @@ const supportAgent = new Agent(components.agent, {
 Tip: Define the `usageHandler` within a function where you have more variables
 available to attribute the usage to a different user, team, project, etc.
 
+The handler also gets `promptMessageId`, `order`, `stepOrder` (of the last
+message the step saved) and `stepNumber`, so you can tie usage to a turn.
+
+If the provider reports a cost, it is in `providerMetadata`, and where depends
+on the model wrapper. The Convex gateway model puts it in
+`providerMetadata.convexGateway.cost`. The Anthropic Messages model through the
+gateway puts it in `providerMetadata.anthropic.usage.cost`. Check which one your
+model sets before you charge from it.
+
+## Refusing a call before it runs
+
+`usageHandler` runs after a call, so it can't stop one. To check a budget first,
+pass `languageModelMiddleware`. It takes AI SDK language model middleware, or a
+function that builds it for each call from the ctx and the call's `userId`,
+`threadId`, `agentName`, `promptMessageId`, `order` and `stepNumber`. With
+`generateText` and `streamText` the function runs once per step.
+
+To refuse a call, throw `ModelCallRefusedError` from the middleware:
+
+```ts
+import { Agent, ModelCallRefusedError } from "@convex-dev/agent";
+
+const agent = new Agent(components.agent, {
+  name: "support",
+  languageModel,
+  languageModelMiddleware: (ctx, call) => ({
+    specificationVersion: "v4",
+    wrapGenerate: async ({ doGenerate }) => {
+      const reservation = await ctx.runMutation(internal.budget.reserve, {
+        userId: call.userId,
+      });
+      if (!reservation) {
+        throw new ModelCallRefusedError("Daily limit reached");
+      }
+      const result = await doGenerate();
+      await ctx.runMutation(internal.budget.settle, {
+        reservation,
+        usage: result.usage,
+      });
+      return result;
+    },
+  }),
+});
+```
+
+A refused step saves nothing: the agent deletes the pending placeholder message,
+and steps that already finished stay in the thread. The generation method
+rethrows the error, so catch it to save your own reply:
+
+```ts
+try {
+  await agent.generateText(ctx, { threadId }, { promptMessageId });
+} catch (error) {
+  if (!ModelCallRefusedError.isInstance(error)) throw error;
+  await agent.saveMessage(ctx, {
+    threadId,
+    promptMessageId,
+    message: { role: "assistant", content: "You've hit today's limit." },
+  });
+}
+```
+
+For `streamText`, also wrap `wrapStream`. When `saveStreamDeltas` makes
+`streamText` wait for the stream, it throws the refusal itself.
+
 ## Storing usage in a table
 
 To track usage for e.g. billing, you can define a table in your schema and

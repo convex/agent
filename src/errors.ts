@@ -111,3 +111,38 @@ function truncateError(error: string): string {
   if (last >= 0xd800 && last <= 0xdbff) truncated = truncated.slice(0, -1);
   return `${truncated}…`;
 }
+
+const refusedMarker = Symbol.for("@convex-dev/agent/ModelCallRefusedError");
+
+/**
+ * Throw this from language model middleware (see `languageModelMiddleware`)
+ * to refuse a model call, for example when a user is over budget.
+ *
+ * The generation saves nothing for the refused step: the pending placeholder
+ * message is deleted, and steps that already finished stay saved. The error
+ * is rethrown from `generateText` and the other generation methods, so the
+ * caller can catch it and save its own reply.
+ */
+export class ModelCallRefusedError extends Error {
+  readonly [refusedMarker] = true;
+  /** App-defined details, e.g. which limit was hit. */
+  readonly data?: unknown;
+
+  constructor(
+    message = "Model call refused",
+    options?: { data?: unknown; cause?: unknown },
+  ) {
+    super(message, { cause: options?.cause });
+    this.name = "ModelCallRefusedError";
+    this.data = options?.data;
+  }
+
+  /** Works across copies of this package, unlike `instanceof`. */
+  static isInstance(error: unknown): error is ModelCallRefusedError {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      (error as Record<symbol, unknown>)[refusedMarker] === true
+    );
+  }
+}

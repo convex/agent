@@ -95,6 +95,8 @@ import type {
   GenerateObjectArgs,
   GenerationOutputMetadata,
   MaybeCustomCtx,
+  LanguageModelMiddlewareOption,
+  ModelCallInfo,
   ObjectMode,
   Options,
   RawRequestResponseHandler,
@@ -113,9 +115,10 @@ import type {
   WithoutModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
-import { errorToString, hasSuccessfulToolCall } from "./client/utils.js";
+import { hasSuccessfulToolCall } from "./client/utils.js";
 
 export { isStepCount, stepCountIs } from "ai";
+export { ModelCallRefusedError } from "../errors.js";
 export { hasSuccessfulToolCall };
 export {
   docsToModelMessages,
@@ -202,6 +205,8 @@ export type {
   AgentComponent,
   Config,
   ContextOptions,
+  LanguageModelMiddlewareOption,
+  ModelCallInfo,
   ProviderMetadata,
   RawRequestResponseHandler,
   StorageOptions,
@@ -473,7 +478,19 @@ export class Agent<
         | { object: GenerateObjectResult<unknown> },
       createPendingMessage?: boolean,
     ) => Promise<void>;
-    fail: (reason: string) => Promise<void>;
+    /**
+     * Fail the generation. Pass the error itself: a
+     * {@link ModelCallRefusedError} deletes the pending message instead of
+     * failing it.
+     */
+    fail: (reason: unknown) => Promise<void>;
+    /**
+     * Wrap a model with the configured `languageModelMiddleware` for a step.
+     */
+    wrapModel: (
+      model: AgentLanguageModel,
+      stepNumber: number,
+    ) => Promise<AgentLanguageModel>;
     getSavedMessages: () => MessageDoc[];
   }> {
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
@@ -567,8 +584,13 @@ export class Agent<
         prepareStep: async (options) => {
           await call.beforeStep(options);
           const result = await generateTextArgs.prepareStep?.(options);
-          call.updateModel(result?.model ?? options.model);
-          return result;
+          const stepModel = result?.model ?? options.model;
+          call.updateModel(stepModel);
+          const model = await call.wrapModel(
+            stepModel as AgentLanguageModel,
+            options.stepNumber,
+          );
+          return model === stepModel ? result : { ...result, model };
         },
         onStepEnd: async (step) => {
           await call.endStep(step);
@@ -590,7 +612,7 @@ export class Agent<
       };
       return Object.assign(result, metadata);
     } catch (error) {
-      await call.fail(errorToString(error));
+      await call.fail(error);
       throw error;
     }
   }
@@ -723,7 +745,7 @@ export class Agent<
       };
       return Object.assign(result, metadata);
     } catch (error) {
-      await fail(errorToString(error));
+      await fail(error);
       throw error;
     }
   }
@@ -774,7 +796,7 @@ export class Agent<
         console.error(" streamObject onError", error);
         // TODO: content that we have so far
         // content: stream.fullStream.
-        await fail(errorToString(error.error));
+        await fail(error.error);
         return args.onError?.(error);
       },
       onFinish: async (result) => {
@@ -801,7 +823,7 @@ export class Agent<
           // the save above still reports usage; with it, the save throws.
           // The AI SDK drops what onFinish throws, so a failed save is only
           // seen through the message it fails.
-          if (failure !== undefined) await fail(errorToString(failure));
+          if (failure !== undefined) await fail(failure);
         }
         return args.onFinish?.(result);
       },

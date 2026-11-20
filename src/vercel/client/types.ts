@@ -15,6 +15,7 @@ import type {
   LanguageModelCallOptions,
   LanguageModelRequestMetadata,
   LanguageModelResponseMetadata,
+  LanguageModelMiddleware,
   LanguageModelUsage,
   LanguageModel,
   Output as AISDKOutput,
@@ -160,6 +161,21 @@ export type Config = {
    */
   usageHandler?: UsageHandler;
   /**
+   * AI SDK language model middleware to wrap every model call with, for
+   * example to reserve budget before a call and settle the real cost after.
+   * Pass a function to build the middleware per call: it gets the ctx and
+   * the {@link ModelCallInfo} (user, thread, prompt message and step).
+   *
+   * To refuse a call, throw a {@link ModelCallRefusedError} from the
+   * middleware. See its docs for what is saved.
+   *
+   * With `generateText` and `streamText` the function runs once per step,
+   * and also wraps a model returned from `prepareStep`. With
+   * `generateObject`, `streamObject` and `start`, it runs once per call with
+   * `stepNumber: 0`.
+   */
+  languageModelMiddleware?: LanguageModelMiddlewareOption;
+  /**
    * By default, messages are ordered with context in `fetchContextWithPrompt`,
    * but you can override this by providing a context handler. Here you can
    * filter, modify, or enrich the context messages. If provided, the default
@@ -302,6 +318,35 @@ export type GenerationOutputMetadata = {
   messageId?: string;
 };
 
+/**
+ * Who a model call is for, passed to a `languageModelMiddleware` function.
+ */
+export type ModelCallInfo = {
+  userId: string | undefined;
+  threadId: string | undefined;
+  agentName: string | undefined;
+  /** The prompt message the generation responds to, if it is saved. */
+  promptMessageId: string | undefined;
+  /** The order of the prompt message and its responses. */
+  order: number | undefined;
+  /** Zero-based step within the generation. */
+  stepNumber: number;
+};
+
+type LanguageModelMiddlewares =
+  | LanguageModelMiddleware
+  | LanguageModelMiddleware[];
+
+export type LanguageModelMiddlewareOption =
+  | LanguageModelMiddlewares
+  | ((
+      ctx: ActionCtx,
+      call: ModelCallInfo,
+    ) =>
+      | LanguageModelMiddlewares
+      | undefined
+      | Promise<LanguageModelMiddlewares | undefined>);
+
 export type UsageHandler = (
   ctx: ActionCtx,
   args: {
@@ -309,10 +354,29 @@ export type UsageHandler = (
     threadId: string | undefined;
     agentName: string | undefined;
     usage: LanguageModelUsage;
-    // Often has more information, like cached token usage in the case of openai.
+    /**
+     * Often has more information, like cached token usage in the case of
+     * openai. The cost of the call, when the provider reports one, is here
+     * too. Where depends on the model wrapper: the Convex gateway model puts
+     * it in `providerMetadata.convexGateway.cost`, and the Anthropic Messages
+     * model through the gateway in `providerMetadata.anthropic.usage.cost`.
+     * Check which one your model sets before charging from it.
+     */
     providerMetadata: ProviderMetadata | undefined;
     model: string;
     provider: string;
+    /** The prompt message of the generation, if it was saved. */
+    promptMessageId?: string;
+    /** The order of the generation's messages. */
+    order?: number;
+    /**
+     * The stepOrder of the last message saved for this call. Set for objects
+     * only: a text step is reported before it is saved, so stopWhen can see
+     * its usage.
+     */
+    stepOrder?: number;
+    /** Zero-based step within the generation. Unset for objects. */
+    stepNumber?: number;
   },
 ) => void | Promise<void>;
 
@@ -554,11 +618,11 @@ export interface Thread<DefaultTools extends ToolSet> {
     RUNTIME_CONTEXT extends Context = Context,
   >(
     generateTextArgs: TextArgs<
-        TOOLS extends undefined ? DefaultTools : TOOLS,
-        TOOLS,
-        OUTPUT,
-        RUNTIME_CONTEXT
-      >,
+      TOOLS extends undefined ? DefaultTools : TOOLS,
+      TOOLS,
+      OUTPUT,
+      RUNTIME_CONTEXT
+    >,
     options?: Options,
   ): Promise<
     GenerateTextResult<
@@ -589,11 +653,11 @@ export interface Thread<DefaultTools extends ToolSet> {
     RUNTIME_CONTEXT extends Context = Context,
   >(
     streamTextArgs: StreamingTextArgs<
-        TOOLS extends undefined ? DefaultTools : TOOLS,
-        TOOLS,
-        OUTPUT,
-        RUNTIME_CONTEXT
-      >,
+      TOOLS extends undefined ? DefaultTools : TOOLS,
+      TOOLS,
+      OUTPUT,
+      RUNTIME_CONTEXT
+    >,
     options?: Options & {
       /**
        * Whether to save incremental data (deltas) from streaming responses.
@@ -681,6 +745,11 @@ export type Options = {
    * set in the agent constructor.
    */
   usageHandler?: UsageHandler;
+  /**
+   * Language model middleware for this call. Overrides the one set in the
+   * agent constructor. See {@link Config.languageModelMiddleware}.
+   */
+  languageModelMiddleware?: LanguageModelMiddlewareOption;
   /**
    * By default, messages are ordered with context in `fetchContextWithPrompt`,
    * but you can override this by providing a context handler. Here you can

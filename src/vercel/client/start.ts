@@ -1,5 +1,6 @@
 import {
   isStepCount,
+  wrapLanguageModel,
   type GenerateObjectResult,
   type IdGenerator,
   type Instructions,
@@ -9,6 +10,9 @@ import {
   type ToolSet,
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
+// The AI SDK's own string-to-model resolution, so a gateway model id can be
+// wrapped with middleware the same way generateText would resolve it.
+import { resolveLanguageModel } from "ai/internal";
 import {
   serializeResponseMessages,
   serializeObjectResult,
@@ -35,6 +39,7 @@ import type { Agent } from "../index.js";
 import { assert, omit } from "convex-helpers";
 import { saveInputMessages } from "./saveInputMessages.js";
 import { errorToString } from "./utils.js";
+import { ModelCallRefusedError } from "../../errors.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
@@ -192,6 +197,14 @@ export async function startGeneration<
     responseMessages: ModelMessage[];
   }) => Promise<void>;
   end: (options?: { finishStreamId?: string }) => Promise<void>;
+  /**
+   * Wrap a model with the configured languageModelMiddleware for one step.
+   * Returns the model unchanged when there is none.
+   */
+  wrapModel: (
+    model: AgentLanguageModel,
+    stepNumber: number,
+  ) => Promise<AgentLanguageModel>;
   getSavedMessages: () => MessageDoc[];
 }> {
   const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
@@ -251,9 +264,41 @@ export async function startGeneration<
   // is the one it created, if it created one.
   let unsure: { createdPending: boolean } | undefined;
 
-  const model = args.model ?? opts.languageModel;
-  assert(model, "model is required");
-  let activeModel: ModelOrMetadata = model;
+  const rawModel = args.model ?? opts.languageModel;
+  assert(rawModel, "model is required");
+  let activeModel: ModelOrMetadata = rawModel;
+
+  const wrapModel = async (
+    stepModel: AgentLanguageModel,
+    stepNumber: number,
+  ): Promise<AgentLanguageModel> => {
+    const option = opts.languageModelMiddleware;
+    if (!option) return stepModel;
+    const middleware =
+      typeof option === "function"
+        ? await option(ctx, {
+            userId,
+            threadId,
+            agentName: opts.agentName,
+            promptMessageId,
+            order,
+            stepNumber,
+          })
+        : option;
+    if (!middleware || (Array.isArray(middleware) && !middleware.length)) {
+      return stepModel;
+    }
+    return wrapLanguageModel({
+      model: resolveLanguageModel(stepModel),
+      middleware,
+    }) as AgentLanguageModel;
+  };
+  // generateText and streamText wrap each step's model in prepareStep, so the
+  // middleware sees the step number. Other calls are one model call.
+  const model =
+    _operation === "generateText" || _operation === "streamText"
+      ? rawModel
+      : await wrapModel(rawModel, 0);
 
   let initialResponseMessages: ModelMessage[] = [];
   let held:
@@ -276,7 +321,7 @@ export async function startGeneration<
       finishStreamId,
       error: toSave.error,
     })
-      .then((stoppedBy) => {
+      .then(({ stoppedBy }) => {
         if (stoppedBy) throw new Error(stoppedBy);
       })
       .catch((error: unknown) => {
@@ -330,13 +375,19 @@ export async function startGeneration<
           // Failed below.
         }
       }
-      const error = errorToString((failed ?? saveFailure)!.error);
+      const cause = (failed ?? saveFailure)!.error;
+      const error = errorToString(cause);
       try {
         // A step that ended keeps its messages, ahead of the failed one.
         if (held) await saveHeld(held.error === undefined);
       } finally {
         const messageId = await pendingMessageNow();
-        if (messageId) {
+        if (messageId && ModelCallRefusedError.isInstance(cause)) {
+          // A refused call saves nothing for its step.
+          await ctx.runMutation(component.messages.deleteByIds, {
+            messageIds: [messageId],
+          });
+        } else if (messageId) {
           await ctx.runMutation(component.messages.finalizeMessage, {
             messageId,
             result: { status: "failed", error },
@@ -425,7 +476,7 @@ export async function startGeneration<
     toSave: ToSave<TOOLS>,
     createPendingMessage: boolean | undefined,
     { finishStreamId, error }: { finishStreamId?: string; error?: string },
-  ): Promise<string | undefined> => {
+  ): Promise<{ stoppedBy?: string; stepSaved: MessageDoc[] }> => {
     if (threadId && saveMessages !== "none") {
       let serialized;
       if ("object" in toSave) {
@@ -492,28 +543,37 @@ export async function startGeneration<
       }
       unsure = undefined;
       const lastMessage = saved.messages.at(-1);
+      // The messages this step saved, without the next step's pending one.
+      let stepSaved: MessageDoc[];
       if (createPendingMessage && lastMessage?.status === "pending") {
         pendingMessageId = lastMessage._id;
-        savedMessages.push(...saved.messages.slice(0, -1));
+        stepSaved = saved.messages.slice(0, -1);
       } else {
         pendingMessageId = undefined;
-        savedMessages.push(...saved.messages);
+        stepSaved = saved.messages;
       }
+      savedMessages.push(...stepSaved);
       // A retry or an abort elsewhere failed what this save replaced.
       if (lastMessage?.status === "failed" && error === undefined) {
-        return (
-          lastMessage.error ??
-          "Aborting - the pending message was marked as failed"
-        );
+        return {
+          stoppedBy:
+            lastMessage.error ??
+            "Aborting - the pending message was marked as failed",
+          stepSaved,
+        };
       }
       // The prompt message was deleted, so the save was abandoned (#300).
       if (!lastMessage && createPendingMessage) {
-        return "The prompt message was deleted";
+        return { stoppedBy: "The prompt message was deleted", stepSaved };
       }
+      return { stepSaved };
     }
-    return undefined;
+    return { stepSaved: [] };
   };
-  const report = async <TOOLS extends ToolSet>(toSave: ToSave<TOOLS>) => {
+  const report = async <TOOLS extends ToolSet>(
+    toSave: ToSave<TOOLS>,
+    stepSaved: MessageDoc[] = [],
+  ) => {
     const output = "object" in toSave ? toSave.object : toSave.step;
     if (opts.rawRequestResponseHandler) {
       await opts.rawRequestResponseHandler(ctx, {
@@ -534,6 +594,10 @@ export async function startGeneration<
         provider: getProviderName(usageModel),
         usage: output.usage,
         providerMetadata: output.providerMetadata,
+        promptMessageId,
+        order: stepSaved.at(-1)?.order ?? order,
+        stepOrder: stepSaved.at(-1)?.stepOrder,
+        stepNumber: "step" in toSave ? toSave.step.stepNumber : undefined,
       });
     }
   };
@@ -563,6 +627,7 @@ export async function startGeneration<
         };
       }
       initialResponseMessages = [];
+      // Reported before it is saved, so stopWhen sees its usage.
       await report({ step });
     },
     beforeStep: async ({ stepNumber, responseMessages }) => {
@@ -580,6 +645,7 @@ export async function startGeneration<
     },
     // Where the AI SDK finished: throws if a save failed.
     end: ({ finishStreamId } = {}) => settle(undefined, finishStreamId),
+    wrapModel,
     save: async <TOOLS extends ToolSet>(
       toSave: ToSave<TOOLS>,
       createPendingMessage?: boolean,
@@ -589,8 +655,10 @@ export async function startGeneration<
        */
       finishStreamId?: string,
     ) => {
-      await persist(toSave, createPendingMessage, { finishStreamId });
-      await report(toSave);
+      const { stepSaved } = await persist(toSave, createPendingMessage, {
+        finishStreamId,
+      });
+      await report(toSave, stepSaved);
     },
   };
 }

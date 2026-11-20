@@ -26,6 +26,7 @@ import { startGeneration } from "./start.js";
 import type { Agent } from "../index.js";
 import { getModelName, getProviderName } from "../../shared.js";
 import { errorToString } from "./utils.js";
+import { ModelCallRefusedError } from "../../errors.js";
 import { materializeUIMessageChunkFiles } from "../fileMaterialization.js";
 
 export async function runStreamCleanup(cleanup: {
@@ -156,10 +157,15 @@ export async function streamText<
   // isn't passed on to the caller's onAbort. A delta save that fails aborts
   // the SDK itself, and that abort is still passed on.
   let failedGeneration = false;
-  const failGeneration = (reason: string) => {
+  // A ModelCallRefusedError from middleware, rethrown when streamText awaits
+  // the stream, so the caller can tell a refusal from a failure.
+  let refusal: { error: unknown } | undefined;
+  const failGeneration = (cause: unknown) => {
     failedGeneration = true;
+    if (ModelCallRefusedError.isInstance(cause)) refusal ??= { error: cause };
+    const reason = errorToString(cause);
     return runStreamCleanup({
-      failCall: () => call.fail(reason),
+      failCall: () => call.fail(cause),
       failStreamer: async () => streamer?.fail(reason),
     });
   };
@@ -169,6 +175,8 @@ export async function streamText<
       throw error;
     });
   let stepError: string | undefined;
+  // The error a step streamed, as thrown, for failGeneration.
+  let stepCause: unknown;
   let finished = false;
   let stopped = false;
   let stepEnds = 0;
@@ -207,10 +215,11 @@ export async function streamText<
             (part.finishReason === "error"
               ? "The generation failed"
               : undefined);
+          stepCause = errorPart ? errorPart.error : stepError;
         }
         if (part.type === "finish") {
           finished = true;
-          if (stepError !== undefined) await failGeneration(stepError);
+          if (stepError !== undefined) await failGeneration(stepCause);
           else {
             await endGeneration({
               finishStreamId: savesMessages
@@ -224,7 +233,9 @@ export async function streamText<
       flush: async () => {
         if (!finished && (error !== undefined || stopped)) {
           await failGeneration(
-            error ?? "The generation stopped before its step ended",
+            errorPart
+              ? errorPart.error
+              : "The generation stopped before its step ended",
           ).catch((cleanupError) => {
             // An error the stream has already carried isn't thrown again.
             if (cleanupError !== errorPart?.error) throw cleanupError;
@@ -260,12 +271,13 @@ export async function streamText<
     prepareStep: async (options) => {
       await call.beforeStep(options);
       const result = await streamTextArgs.prepareStep?.(options);
-      if (result) {
-        const model = result.model ?? options.model;
-        call.updateModel(model);
-        return result;
-      }
-      return undefined;
+      const stepModel = result?.model ?? options.model;
+      if (result) call.updateModel(stepModel);
+      const model = await call.wrapModel(
+        stepModel as typeof args.model,
+        options.stepNumber,
+      );
+      return model === stepModel ? result : { ...result, model };
     },
     onStepEnd: async (step) => {
       await call.endStep(step, stepError);
@@ -296,7 +308,7 @@ export async function streamText<
       },
     }),
   ).then(async () => {
-    if (streamError) await failGeneration(errorToString(streamError.error));
+    if (streamError) await failGeneration(streamError.error);
     await endGeneration();
   });
   void ended.catch(() => {});
@@ -304,10 +316,11 @@ export async function streamText<
     try {
       await stream;
     } catch (e) {
-      await failGeneration(errorToString(e)).catch(() => {});
-      throw e;
+      await failGeneration(e).catch(() => {});
+      throw refusal ? refusal.error : e;
     }
     await ended;
+    if (refusal) throw refusal.error;
   } else {
     // The caller consumes the provider stream, but this separate background
     // consumer can still reject (e.g. if durable abort cleanup fails, or the
