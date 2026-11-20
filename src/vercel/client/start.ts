@@ -298,6 +298,10 @@ export async function startGeneration<
     );
   }
 
+  const rawModel = args.model ?? opts.languageModel;
+  assert(rawModel, "model is required");
+  let activeModel: ModelOrMetadata = rawModel;
+
   const { promptMessageId, pendingMessage, savedMessages } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
@@ -323,10 +327,6 @@ export async function startGeneration<
   // A save that throws may have committed anyway, and then the pending message
   // is the one it created, if it created one.
   let unsure: { createdPending: boolean } | undefined;
-
-  const rawModel = args.model ?? opts.languageModel;
-  assert(rawModel, "model is required");
-  let activeModel: ModelOrMetadata = rawModel;
 
   // When the current step's model call began, for rawRequestResponseHandler.
   // wrapModel runs right before each call, so it marks the start.
@@ -363,13 +363,6 @@ export async function startGeneration<
       middleware,
     }) as AgentLanguageModel;
   };
-  // generateText and streamText wrap each step's model in prepareStep, so the
-  // middleware sees the step number. Other calls are one model call.
-  const model =
-    _operation === "generateText" || _operation === "streamText"
-      ? rawModel
-      : await wrapModel(rawModel, 0);
-
   let initialResponseMessages: ModelMessage[] = [];
   let held:
     | {
@@ -511,11 +504,6 @@ export async function startGeneration<
   } = argsWithoutSystem as typeof argsWithoutSystem & {
     onStepFinish?: unknown;
   };
-  const instructionsOption = args.instructions ?? args.system;
-  const instructions =
-    typeof instructionsOption === "function"
-      ? await instructionsOption(ctx, { threadId, userId })
-      : instructionsOption;
   // generateText and streamText rebuild the context message before each step
   // and keep it last, after the previous steps' tool calls and results.
   // Other calls make one model call and get it once.
@@ -568,10 +556,28 @@ export async function startGeneration<
     }
     return [...base, ...fresh];
   };
-  // Other calls make one model call, so their messages are prepared once.
-  const initialMessages = perStep
-    ? context.messages
-    : ((await prepareMessages(0, context.messages)) ?? context.messages);
+  // The pending message exists, so setup that throws fails it, and a
+  // refusal deletes it.
+  let model: AgentLanguageModel;
+  let instructions: Instructions | undefined;
+  let initialMessages: ModelMessage[];
+  try {
+    const instructionsOption = args.instructions ?? args.system;
+    instructions =
+      typeof instructionsOption === "function"
+        ? await instructionsOption(ctx, { threadId, userId })
+        : instructionsOption;
+    // generateText and streamText wrap each step's model in prepareStep, so
+    // the middleware sees the step number, and rebuild the context message
+    // there. Other calls make one model call, set up once here.
+    model = perStep ? rawModel : await wrapModel(rawModel, 0);
+    initialMessages = perStep
+      ? context.messages
+      : ((await prepareMessages(0, context.messages)) ?? context.messages);
+  } catch (error) {
+    await settle({ error }).catch(() => {});
+    throw error;
+  }
   const include = rawRequestResponseInclude(
     aiCallArgs as {
       experimental_include?: RawRequestResponseInclude;

@@ -31,8 +31,12 @@ const supportAgent = new Agent(components.agent, {
 Tip: Define the `usageHandler` within a function where you have more variables
 available to attribute the usage to a different user, team, project, etc.
 
-The handler also gets `promptMessageId`, `order`, `stepOrder` (of the last
-message the step saved) and `stepNumber`, so you can tie usage to a turn.
+The handler also gets `promptMessageId`, `order` and `stepNumber`, so you can
+tie usage to a turn. For generateText and streamText, the handler runs before
+the step is saved, so `stepOrder` is unset. For generateObject and streamObject,
+`stepOrder` is the saved object message's. To find where a text step was saved,
+use `rawRequestResponseHandler` (see [Debugging](./debugging.mdx)), which runs
+after the save and gets `stepOrder` and `savedMessageIds`.
 
 If the provider reports a cost, it is in `providerMetadata`, and where depends
 on the model wrapper. The Convex gateway model puts it in
