@@ -171,7 +171,9 @@ export const schema = defineSchema({
   ]),
 });
 
-export const vv = typedV(schema);
+// Named so the emitted .d.ts doesn't inline the build's `v`, which can hold
+// validators missing from the oldest convex in peerDependencies.
+export const vv: ReturnType<typeof typedV<typeof schema>> = typedV(schema);
 export { vv as v };
 
 export default schema;

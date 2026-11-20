@@ -51,6 +51,8 @@ jobs:
           fi
       - name: Test
         run: npm run check
+      - name: Typecheck the build against the oldest supported convex
+        run: npm run test:floor
       - name: Build playground
         run: |
           npm run build -w playground
