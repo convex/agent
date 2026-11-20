@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
+import type { FunctionArgs } from "convex/server";
 import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -1928,5 +1929,67 @@ describe("cloneThread", () => {
       upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
     });
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
+  });
+});
+
+describe("respondToToolCallApprovals", () => {
+  type Respond = Omit<
+    FunctionArgs<typeof api.messages.respondToToolCallApprovals>,
+    "threadId"
+  >;
+  type Content = Extract<
+    FunctionArgs<
+      typeof api.messages.addMessages
+    >["messages"][number]["message"],
+    { role: "assistant" }
+  >["content"];
+
+  async function readsOf(content: Content, respond: Respond) {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "Prompt" } },
+        { message: { role: "assistant", content } },
+      ],
+    });
+    return t.run(async (ctx) => {
+      const before = await ctx.meta.getTransactionMetrics();
+      await ctx.runMutation(api.messages.respondToToolCallApprovals, {
+        threadId,
+        ...respond,
+      });
+      const after = await ctx.meta.getTransactionMetrics();
+      return after.documentsRead.used - before.documentsRead.used;
+    });
+  }
+
+  test("a client tool output reads as much as an approval decision", async () => {
+    const call = {
+      type: "tool-call" as const,
+      toolCallId: "a",
+      toolName: "lookup",
+      input: {},
+    };
+    const output = await readsOf([call], {
+      decisions: [],
+      outputs: [
+        {
+          toolCallId: "a",
+          toolName: "lookup",
+          output: { type: "text", value: "found" },
+        },
+      ],
+    });
+    const approval = await readsOf(
+      [
+        call,
+        { type: "tool-approval-request", toolCallId: "a", approvalId: "ap" },
+      ],
+      { decisions: [{ approvalId: "ap", approved: true }] },
+    );
+    expect(output).toBe(approval);
   });
 });
