@@ -3,6 +3,7 @@ import type {
   ProviderMetadata,
   StreamDelta,
 } from "../validators.js";
+import { decodeToolJsonFields, toolChunkJsonFields } from "./toolJson.js";
 
 export type PersistedUIMessageChunkRecord = Record<string, unknown> & {
   type: string;
@@ -587,7 +588,10 @@ function chunkRecord(value: unknown): PersistedUIMessageChunkRecord {
   if (typeof record.type !== "string") {
     throw new Error("Persisted UIMessageChunk is missing a type");
   }
-  return record as PersistedUIMessageChunkRecord;
+  return decodeToolJsonFields(
+    record as PersistedUIMessageChunkRecord,
+    toolChunkJsonFields(record.type),
+  );
 }
 
 const supportedChunkTypes = new Set([

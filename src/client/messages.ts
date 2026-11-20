@@ -17,6 +17,10 @@ import type {
 } from "./types.js";
 import { parse } from "convex-helpers/validators";
 import { runMutation, runQuery } from "./run.js";
+import {
+  encodeToolJsonInMessages,
+  sendToolJson,
+} from "../streaming/toolJson.js";
 
 /**
  * List messages from a thread.
@@ -129,21 +133,26 @@ export async function saveMessages(
       };
     }
   }
-  const result = await runMutation(ctx, component.messages.addMessages, {
-    threadId: args.threadId,
-    userId: args.userId ?? undefined,
-    agentName: args.agentName,
-    promptMessageId: args.promptMessageId,
-    order: args.order,
-    pendingMessageId: args.pendingMessageId,
-    embeddings,
-    messages: args.messages.map((message, i) =>
+  const result = await sendToolJson(
+    args.messages.map((message, i) =>
       parse(vMessageWithMetadata, {
         ...args.metadata?.[i],
         message,
       }),
     ),
-    failPendingSteps: args.failPendingSteps ?? false,
-  });
+    encodeToolJsonInMessages,
+    (messages) =>
+      runMutation(ctx, component.messages.addMessages, {
+        threadId: args.threadId,
+        userId: args.userId ?? undefined,
+        agentName: args.agentName,
+        promptMessageId: args.promptMessageId,
+        order: args.order,
+        pendingMessageId: args.pendingMessageId,
+        embeddings,
+        messages,
+        failPendingSteps: args.failPendingSteps ?? false,
+      }),
+  );
   return { messages: result.messages };
 }

@@ -3260,7 +3260,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           outputs?: Array<{
             output:
               | { type: "text"; value: string }
-              | { type: "json"; value: any }
+              | {
+                  providerOptions?: Record<string, Record<string, any>>;
+                  type: "json";
+                  value: any;
+                }
               | { type: "error-text"; value: string };
             toolCallId: string;
             toolName: string;

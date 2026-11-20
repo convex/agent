@@ -59,6 +59,11 @@ import {
 } from "./mapping.js";
 import { getModelName, getProviderName } from "../shared.js";
 import {
+  encodeToolJsonFields,
+  encodeToolJsonInMessages,
+  sendToolJson,
+} from "../streaming/toolJson.js";
+import {
   vMessageEmbeddings,
   vMessageWithMetadata,
   vSafeObjectArgs,
@@ -1280,7 +1285,11 @@ export class Agent<
               ? { type: "error-text", value: result.errorText }
               : typeof result.output === "string"
                 ? { type: "text", value: result.output }
-                : { type: "json", value: result.output ?? null },
+                : encodeToolJsonFields(
+                    { type: "json" as const, value: result.output ?? null },
+                    ["value"],
+                    "providerOptions",
+                  ),
         },
       ],
     });
@@ -1336,15 +1345,17 @@ export class Agent<
       { userId: args.userId, threadId: args.threadId },
       messages.map((m) => m.message),
     );
-    return ctx.runMutation(this.component.messages.addMessages, {
-      userId: args.userId,
-      threadId: args.threadId,
-      agentName: this.options.name,
-      promptMessageId: args.promptMessageId,
-      messages,
-      embeddings,
-      failPendingSteps: false,
-    });
+    return sendToolJson(messages, encodeToolJsonInMessages, (messages) =>
+      ctx.runMutation(this.component.messages.addMessages, {
+        userId: args.userId,
+        threadId: args.threadId,
+        agentName: this.options.name,
+        promptMessageId: args.promptMessageId,
+        messages,
+        embeddings,
+        failPendingSteps: false,
+      }),
+    );
   }
 
   /**
@@ -1462,19 +1473,21 @@ export class Agent<
       this.component,
       args.patch.message,
     );
-    await runMutation(ctx, this.component.messages.updateMessage, {
-      messageId: args.messageId,
-      patch: {
-        message,
-        fileIds: args.patch.fileIds
-          ? [...args.patch.fileIds, ...(fileIds ?? [])]
-          : fileIds,
-        status: args.patch.status === "success" ? "success" : "failed",
-        error: args.patch.error,
-        reasoning: args.patch.reasoning,
-        reasoningDetails: args.patch.reasoningDetails,
-      },
-    });
+    await sendToolJson([{ message }], encodeToolJsonInMessages, ([encoded]) =>
+      runMutation(ctx, this.component.messages.updateMessage, {
+        messageId: args.messageId,
+        patch: {
+          message: encoded.message,
+          fileIds: args.patch.fileIds
+            ? [...args.patch.fileIds, ...(fileIds ?? [])]
+            : fileIds,
+          status: args.patch.status === "success" ? "success" : "failed",
+          error: args.patch.error,
+          reasoning: args.patch.reasoning,
+          reasoningDetails: args.patch.reasoningDetails,
+        },
+      }),
+    );
   }
 
   /**

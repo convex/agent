@@ -48,6 +48,7 @@ import type { MutationCtx } from "./client/types.js";
 import { MAX_FILE_SIZE, storeFile } from "./client/files.js";
 import { materializeCanonicalToolResultContentFiles } from "./fileMaterialization.js";
 import type { Infer } from "convex/values";
+import { decodeToolJsonFields } from "../streaming/toolJson.js";
 import {
   convertUint8ArrayToBase64,
   type FileData,
@@ -832,11 +833,10 @@ export function toModelMessageContent(
           const input = part.input ?? (part as any)?.args ?? {};
           return {
             type: part.type,
-            input,
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             providerExecuted: part.providerExecuted,
-            ...metadata,
+            ...decodeToolJsonFields({ input, ...metadata }, ["input"]),
           } satisfies ToolCallPart;
         }
         case "tool-result": {
@@ -1058,6 +1058,9 @@ function deserializeToolResultOutput(output: unknown): ToolResultOutput {
     return normalizeToolOutput(output as JSONValue);
   }
   const stored = output as Infer<typeof vToolResultOutput>;
+  if (stored.type === "json" || stored.type === "error-json") {
+    return decodeToolJsonFields(stored, ["value"]);
+  }
   if (stored.type !== "content") return stored as unknown as ToolResultOutput;
   return {
     type: "content",

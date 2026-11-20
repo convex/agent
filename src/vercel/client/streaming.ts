@@ -11,6 +11,10 @@ import type { PaginationResult } from "convex/server";
 import { v, type VObject } from "convex/values";
 import { errorToString } from "../../errors.js";
 import {
+  encodeToolJsonChunks,
+  sendToolJson,
+} from "../../streaming/toolJson.js";
+import {
   vMessageDoc,
   vMessageStatus,
   vPaginationResult,
@@ -605,9 +609,14 @@ export class DeltaStreamer<T> {
         return;
       }
       this.#latestWrite = Date.now();
-      success = await this.ctx.runMutation(
-        this.component.streams.addDelta,
+      success = await sendToolJson(
         delta,
+        (sent) => {
+          if (this.metadata.format !== "UIMessageChunk") return sent;
+          const parts = encodeToolJsonChunks(sent.parts as UIMessageChunk[]);
+          return parts === sent.parts ? sent : { ...sent, parts };
+        },
+        (sent) => this.ctx.runMutation(this.component.streams.addDelta, sent),
       );
     } catch (e) {
       await this.#abortDelta(errorToString(e));
