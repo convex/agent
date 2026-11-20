@@ -162,10 +162,15 @@ whatever your app defines as activity.
 Asynchronously (from a mutation or action):
 
 ```ts
-await ctx.runMutation(components.agent.users.deleteAllForUserIdAsync, {
+await agent.deleteAllForUser(ctx, {
   userId,
+  // Optional: a mutation scheduled with { userId } once everything is deleted.
+  onComplete: internal.users.finishDeletingUser,
 });
 ```
+
+This calls `components.agent.users.deleteAllForUserIdAsync`, which you can also
+call directly. It deletes in batches of scheduled mutations.
 
 Synchronously (from an action):
 

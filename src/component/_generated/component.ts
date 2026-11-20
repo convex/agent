@@ -5806,7 +5806,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       deleteAllForUserIdAsync: FunctionReference<
         "mutation",
         "internal",
-        { userId: string },
+        { onComplete?: string; userId: string },
         boolean,
         Name
       >;

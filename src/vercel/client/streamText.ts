@@ -20,6 +20,7 @@ import type {
   GenerationOutputMetadata,
   Options,
   StreamingTextArgs,
+  StreamTextSaved,
 } from "./types.js";
 import type { Output as AISDKOutput } from "ai";
 import { startGeneration } from "./start.js";
@@ -98,7 +99,8 @@ export async function streamText<
     RUNTIME_CONTEXT,
     OUTPUT
   > &
-    GenerationOutputMetadata
+    GenerationOutputMetadata &
+    StreamTextSaved
 > {
   type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
   const { threadId } = options ?? {};
@@ -160,8 +162,11 @@ export async function streamText<
   // A ModelCallRefusedError from middleware, rethrown when streamText awaits
   // the stream, so the caller can tell a refusal from a failure.
   let refusal: { error: unknown } | undefined;
+  // The first error that failed the generation, for `saved`.
+  let generationFailure: { error: unknown } | undefined;
   const failGeneration = (cause: unknown) => {
     failedGeneration = true;
+    generationFailure ??= { error: cause };
     if (ModelCallRefusedError.isInstance(cause)) refusal ??= { error: cause };
     const reason = errorToString(cause);
     return runStreamCleanup({
@@ -337,5 +342,17 @@ export async function streamText<
     savedMessages: call.getSavedMessages(),
     messageId: promptMessageId,
   };
-  return Object.assign(result, metadata);
+  // `ended` settles once the generation has ended and its last save is done.
+  // Reading the stream isn't needed: the generation runs to its end anyway.
+  const saved = ended.then(() => {
+    if (refusal) throw refusal.error;
+    if (generationFailure) {
+      const { error } = generationFailure;
+      throw error instanceof Error ? error : new Error(errorToString(error));
+    }
+  });
+  // Rejections surface only to a caller that reads `saved`.
+  saved.catch(() => {});
+  Object.defineProperty(result, "saved", { enumerable: false, value: saved });
+  return Object.assign(result as typeof result & StreamTextSaved, metadata);
 }

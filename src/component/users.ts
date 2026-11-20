@@ -1,6 +1,6 @@
 import { stream } from "convex-helpers/server/stream";
 import { nullable } from "convex-helpers/validators";
-import { paginationOptsValidator } from "convex/server";
+import { paginationOptsValidator, type FunctionHandle } from "convex/server";
 import type { ObjectType } from "convex/values";
 import { vPaginationResult } from "../validators.js";
 import { internal } from "./_generated/api.js";
@@ -74,10 +74,16 @@ export const deleteAllForUserId = action({
 export const deleteAllForUserIdAsync = mutation({
   args: {
     userId: v.string(),
+    /**
+     * A mutation function handle, scheduled with `{ userId }` once
+     * everything for the user is deleted.
+     */
+    onComplete: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const isDone = await deleteAllForUserIdAsyncHandler(ctx, {
       userId: args.userId,
+      onComplete: args.onComplete,
       messagesCursor: null,
       threadsCursor: null,
       threadInProgress: null,
@@ -92,6 +98,7 @@ export const deleteAllForUserIdAsync = mutation({
 
 const deleteAllArgs = {
   userId: v.string(),
+  onComplete: v.optional(v.string()),
   messagesCursor: nullable(v.string()),
   threadsCursor: nullable(v.string()),
   threadInProgress: nullable(v.id("threads")),
@@ -122,9 +129,17 @@ async function deleteAllForUserIdAsyncHandler(
   args: DeleteAllArgs,
 ): Promise<boolean> {
   const result = await deletePageForUserId(ctx, args);
+  if (result.isDone && args.onComplete) {
+    await ctx.scheduler.runAfter(
+      0,
+      args.onComplete as FunctionHandle<"mutation", { userId: string }>,
+      { userId: args.userId },
+    );
+  }
   if (!result.isDone) {
     await ctx.scheduler.runAfter(0, internal.users._deleteAllForUserIdAsync, {
       userId: args.userId,
+      onComplete: args.onComplete,
       messagesCursor: result.messagesCursor,
       threadsCursor: result.threadsCursor,
       threadInProgress: result.threadInProgress,

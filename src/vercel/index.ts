@@ -40,8 +40,10 @@ function warnDeprecation(key: string, message: string) {
 }
 import { assert, omit, pick } from "convex-helpers";
 import {
+  createFunctionHandle,
   internalActionGeneric,
   internalMutationGeneric,
+  type FunctionReference,
   type GenericActionCtx,
   type GenericDataModel,
   type PaginationOptions,
@@ -106,6 +108,7 @@ import type {
   StorageOptions,
   StreamingTextArgs,
   StreamObjectArgs,
+  StreamTextSaved,
   SyncStreamsReturnValue,
   TextArgs,
   Thread,
@@ -121,6 +124,7 @@ import { hasSuccessfulToolCall } from "./client/utils.js";
 
 export { isStepCount, stepCountIs } from "ai";
 export { ModelCallRefusedError } from "../errors.js";
+export type { StreamTextSaved } from "./client/types.js";
 export { hasSuccessfulToolCall };
 export {
   docsToModelMessages,
@@ -686,7 +690,8 @@ export class Agent<
       RUNTIME_CONTEXT,
       OUTPUT
     > &
-      GenerationOutputMetadata
+      GenerationOutputMetadata &
+      StreamTextSaved
   > {
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
     return streamText<AgentTools, TOOLS, OUTPUT, RUNTIME_CONTEXT>(
@@ -1552,6 +1557,34 @@ export class Agent<
     await ctx.runAction(this.component.threads.deleteAllForThreadIdSync, {
       threadId: args.threadId,
       limit: args.pageSize,
+    });
+  }
+
+  /**
+   * Delete all threads, messages and streams for a user, in batches of
+   * scheduled mutations.
+   * @param ctx The ctx argument to your mutation or action.
+   * @param args.userId The user whose data to delete.
+   * @param args.onComplete A mutation to schedule with `{ userId }` once
+   *   everything is deleted, e.g. to delete the user's own records.
+   * @returns true if everything was deleted in this first batch.
+   */
+  async deleteAllForUser(
+    ctx: MutationCtx | ActionCtx,
+    args: {
+      userId: string;
+      onComplete?: FunctionReference<
+        "mutation",
+        "public" | "internal",
+        { userId: string }
+      >;
+    },
+  ): Promise<boolean> {
+    return ctx.runMutation(this.component.users.deleteAllForUserIdAsync, {
+      userId: args.userId,
+      onComplete: args.onComplete
+        ? await createFunctionHandle(args.onComplete)
+        : undefined,
     });
   }
 

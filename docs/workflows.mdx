@@ -195,6 +195,10 @@ export const supportAgentWorkflow = workflow.define({
 });
 ```
 
+If a step uses `agent.streamText`, `await result.saved` before the action
+returns. Without it, the action can return before the last step is saved, and
+the next workflow step reads a thread without the reply.
+
 ### Exposing Agent functions as Convex Actions
 
 You can expose the agent's capabilities as Convex functions to be used as steps

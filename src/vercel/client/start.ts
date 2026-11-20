@@ -284,10 +284,14 @@ export async function startGeneration<
   assert(rawModel, "model is required");
   let activeModel: ModelOrMetadata = rawModel;
 
+  // When the current step's model call began, for rawRequestResponseHandler.
+  // wrapModel runs right before each call, so it marks the start.
+  let stepStartedAt = Date.now();
   const wrapModel = async (
     stepModel: AgentLanguageModel,
     stepNumber: number,
   ): Promise<AgentLanguageModel> => {
+    stepStartedAt = Date.now();
     const option = opts.languageModelMiddleware;
     if (!option) return stepModel;
     const middleware =
@@ -337,9 +341,17 @@ export async function startGeneration<
       finishStreamId,
       error: toSave.error,
     })
-      .then(({ stoppedBy }) => {
-        if (stoppedBy) throw new Error(stoppedBy);
-      })
+      .then(
+        async ({ stoppedBy, stepSaved }) => {
+          await reportRaw(toSave, stepSaved);
+          if (stoppedBy) throw new Error(stoppedBy);
+        },
+        async (error: unknown) => {
+          // The raw request is still worth seeing when its save failed.
+          await reportRaw(toSave, []).catch(() => {});
+          throw error;
+        },
+      )
       .catch((error: unknown) => {
         saveFailure ??= { error };
         throw error;
@@ -607,20 +619,32 @@ export async function startGeneration<
     }
     return { stepSaved: [] };
   };
-  const report = async <TOOLS extends ToolSet>(
+  // After the step's save, so it can say where the step was saved.
+  const reportRaw = async <TOOLS extends ToolSet>(
+    toSave: ToSave<TOOLS>,
+    stepSaved: MessageDoc[],
+  ) => {
+    if (!opts.rawRequestResponseHandler) return;
+    const output = "object" in toSave ? toSave.object : toSave.step;
+    await opts.rawRequestResponseHandler(ctx, {
+      userId,
+      threadId,
+      agentName: opts.agentName,
+      request: output.request,
+      response: output.response,
+      promptMessageId,
+      order: stepSaved.at(-1)?.order ?? order,
+      stepOrder: stepSaved.at(-1)?.stepOrder,
+      stepNumber: "step" in toSave ? toSave.step.stepNumber : undefined,
+      savedMessageIds: stepSaved.map((m) => m._id),
+      durationMs: Date.now() - stepStartedAt,
+    });
+  };
+  const reportUsage = async <TOOLS extends ToolSet>(
     toSave: ToSave<TOOLS>,
     stepSaved: MessageDoc[] = [],
   ) => {
     const output = "object" in toSave ? toSave.object : toSave.step;
-    if (opts.rawRequestResponseHandler) {
-      await opts.rawRequestResponseHandler(ctx, {
-        userId,
-        threadId,
-        agentName: opts.agentName,
-        request: output.request,
-        response: output.response,
-      });
-    }
     if (opts.usageHandler && output.usage) {
       const usageModel = resolveUsageModel(toSave, activeModel);
       await opts.usageHandler(ctx, {
@@ -653,7 +677,8 @@ export async function startGeneration<
     fail: (reason) => settle({ error: reason }),
     endStep: async (step, error) => {
       // A step that ends after the generation did is only reported.
-      if (!ending) {
+      if (ending) await reportRaw({ step }, []);
+      else {
         held = {
           step,
           responseMessages: [
@@ -664,8 +689,8 @@ export async function startGeneration<
         };
       }
       initialResponseMessages = [];
-      // Reported before it is saved, so stopWhen sees its usage.
-      await report({ step });
+      // Its usage is reported before it is saved, so stopWhen sees it.
+      await reportUsage({ step });
     },
     beforeStep: async ({ stepNumber, responseMessages }) => {
       if (stepNumber === 0) {
@@ -695,7 +720,8 @@ export async function startGeneration<
       const { stepSaved } = await persist(toSave, createPendingMessage, {
         finishStreamId,
       });
-      await report(toSave, stepSaved);
+      await reportUsage(toSave, stepSaved);
+      await reportRaw(toSave, stepSaved);
     },
   };
 }

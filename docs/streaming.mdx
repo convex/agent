@@ -191,6 +191,27 @@ const result = await agent.streamText(
 return result.toUIMessageStreamResponse();
 ```
 
+The steps are saved as the generation runs, whether or not anything reads the
+stream. To wait until every step is saved, `await result.saved`. It rejects if
+the generation failed. Inside a workflow step, await it before the action
+returns, so the next step reads the full reply from the thread:
+
+```ts
+export const reply = internalAction({
+  args: { threadId: v.string(), promptMessageId: v.string() },
+  handler: async (ctx, { threadId, promptMessageId }) => {
+    const result = await agent.streamText(
+      ctx,
+      { threadId },
+      { promptMessageId },
+      { saveStreamDeltas: { returnImmediately: true } },
+    );
+    // e.g. forward result.textStream to a speech or push service here
+    await result.saved;
+  },
+});
+```
+
 If you don't want to have the Agent involved at all, the next section will show
 you how to save the deltas yourself.
 

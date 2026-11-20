@@ -485,6 +485,21 @@ export type RawRequestResponseHandler = (
     response:
       | LanguageModelResponseMetadata
       | Omit<LanguageModelResponseMetadata, "messages">;
+    /** The prompt message of the generation, if it was saved. */
+    promptMessageId?: string;
+    /** The order of the generation's messages. */
+    order?: number;
+    /** The stepOrder of the last message saved for this step, if saved. */
+    stepOrder?: number;
+    /** Zero-based step within the generation. Unset for objects. */
+    stepNumber?: number;
+    /** The ids of the messages saved for this step. Empty if none were. */
+    savedMessageIds?: string[];
+    /**
+     * Milliseconds from just before the step's model call until its messages
+     * were saved, including any tool calls the step ran.
+     */
+    durationMs?: number;
   },
 ) => void | Promise<void>;
 
@@ -724,7 +739,8 @@ export interface Thread<DefaultTools extends ToolSet> {
       RUNTIME_CONTEXT,
       OUTPUT
     > &
-      ThreadOutputMetadata
+      ThreadOutputMetadata &
+      StreamTextSaved
   >;
   /**
    * This behaves like {@link generateObject} from the "ai" package except that
@@ -804,6 +820,19 @@ export type Options = {
    * ordering will not apply. This excludes the system message / instructions.
    */
   contextHandler?: ContextHandler;
+};
+
+export type StreamTextSaved = {
+  /**
+   * Resolves once every step of the generation is saved to the thread, and
+   * rejects if the generation failed. The generation runs to its end whether
+   * or not the stream is read, so this works when nothing reads it.
+   *
+   * In a workflow step (or any action whose caller reads the thread after it
+   * returns), `await result.saved` before returning, so the next step sees
+   * the reply.
+   */
+  saved: Promise<void>;
 };
 
 export type SyncStreamsReturnValue =
