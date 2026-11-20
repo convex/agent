@@ -1,4 +1,8 @@
-import type { ProviderMetadata, StreamDelta } from "../validators.js";
+import type {
+  Citation,
+  ProviderMetadata,
+  StreamDelta,
+} from "../validators.js";
 
 export type PersistedUIMessageChunkRecord = Record<string, unknown> & {
   type: string;
@@ -20,6 +24,7 @@ export type PersistedTextPart = {
   type: "text";
   text: string;
   state: "streaming" | "done";
+  citations?: Citation[];
   providerMetadata?: ProviderMetadata;
 };
 
@@ -197,6 +202,9 @@ export function reducePersistedUIMessageChunks(
         }
         const part = parts[index] as PersistedTextPart;
         part.state = "done";
+        if (Array.isArray(chunk.citations)) {
+          part.citations = chunk.citations as Citation[];
+        }
         part.providerMetadata =
           providerMetadata(chunk.providerMetadata) ?? part.providerMetadata;
         activeText.delete(id);
