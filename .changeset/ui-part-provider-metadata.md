@@ -2,8 +2,4 @@
 "@convex-dev/agent": patch
 ---
 
-Give UI text, reasoning and tool parts their own provider metadata, as the AI
-SDK's UI message stream does, so signatures and citations survive a
-`toUIMessages` and `fromUIMessages` round trip.
-Tool results saved with message-level `providerMetadata` now list it as the tool
-part's `resultProviderMetadata` instead of `callProviderMetadata`.
+Give UI text, reasoning and tool parts their own provider metadata, so signatures and citations survive `toUIMessages` and `fromUIMessages`; a tool result's message-level `providerMetadata` now shows as `resultProviderMetadata` instead of `callProviderMetadata`.
