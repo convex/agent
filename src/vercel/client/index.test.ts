@@ -486,6 +486,48 @@ describe("Agent message operations", () => {
       text: "Operator reply",
     });
   });
+
+  test("updateMessage clears stored reasoning", async () => {
+    const t = createTest();
+    const threadId = await t.run(async (ctx) =>
+      createThread(ctx, components.agent, { userId: "reasoning-test" }),
+    );
+    const { messageId } = await t.run(async (ctx) =>
+      agent.saveMessage(ctx, {
+        threadId,
+        message: { role: "assistant", content: "hello" },
+        metadata: {
+          reasoning: "private chain of thought",
+          reasoningDetails: [
+            { type: "reasoning", text: "private chain of thought" },
+          ],
+        },
+      }),
+    );
+
+    await t.run(async (ctx) =>
+      agent.updateMessage(ctx, {
+        messageId,
+        patch: {
+          message: { role: "assistant", content: "redacted" },
+          status: "success",
+          reasoning: "",
+          reasoningDetails: [],
+        },
+      }),
+    );
+
+    const [message] = await t.run(async (ctx) =>
+      ctx.runQuery(components.agent.messages.getMessagesByIds, {
+        messageIds: [messageId],
+      }),
+    );
+    expect(message).toMatchObject({
+      text: "redacted",
+      reasoning: "",
+      reasoningDetails: [],
+    });
+  });
 });
 
 describe("Agent text/object generation", () => {
