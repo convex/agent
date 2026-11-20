@@ -220,7 +220,14 @@ export async function fetchRecentAndSearchMessages(
           (m) => m._id === targetMessageId,
         );
         if (targetMessage) {
-          text = targetMessage.text;
+          // A tool message continuing its order, like an approval decision,
+          // has no text of its own (#474).
+          text =
+            targetMessage.text ||
+            recentMessages.find(
+              (m) =>
+                m.order === targetMessage.order && m.message?.role === "user",
+            )?.text;
         } else {
           const targetSearchFields = await ctx.runQuery(
             component.messages.getMessageSearchFields,
