@@ -369,7 +369,6 @@ export async function startGeneration<
         step: StepResult<ToolSet, RUNTIME_CONTEXT>;
         responseMessages: ModelMessage[];
         error?: string;
-        durationMs: number;
       }
     | undefined;
   // The last step save. The end waits for it, to know which message is
@@ -385,17 +384,9 @@ export async function startGeneration<
       finishStreamId,
       error: toSave.error,
     })
-      .then(
-        async ({ stoppedBy, stepSaved }) => {
-          await reportRaw(toSave, stepSaved, toSave.durationMs);
-          if (stoppedBy) throw new Error(stoppedBy);
-        },
-        async (error: unknown) => {
-          // The raw request is still worth seeing when its save failed.
-          await reportRaw(toSave, [], toSave.durationMs).catch(() => {});
-          throw error;
-        },
-      )
+      .then(({ stoppedBy }) => {
+        if (stoppedBy) throw new Error(stoppedBy);
+      })
       .catch((error: unknown) => {
         saveFailure ??= { error };
         throw error;
@@ -717,7 +708,6 @@ export async function startGeneration<
     }
     return { stepSaved: [] };
   };
-  // After the step's save, so it can say where the step was saved.
   const reportRaw = async <TOOLS extends ToolSet>(
     toSave: ToSave<TOOLS>,
     stepSaved: MessageDoc[],
@@ -735,7 +725,6 @@ export async function startGeneration<
       order: stepSaved.at(-1)?.order ?? order,
       stepOrder: stepSaved.at(-1)?.stepOrder,
       stepNumber: "step" in toSave ? toSave.step.stepNumber : undefined,
-      savedMessageIds: stepSaved.map((m) => m._id),
       durationMs,
     });
   };
@@ -778,10 +767,8 @@ export async function startGeneration<
       // The model call's time, without the save that follows.
       const durationMs = Date.now() - stepStartedAt;
       // A step that ends after the generation did is only reported.
-      if (ending) await reportRaw({ step }, [], durationMs);
-      else {
+      if (!ending) {
         held = {
-          durationMs,
           step,
           responseMessages: [
             ...initialResponseMessages,
@@ -793,6 +780,7 @@ export async function startGeneration<
       initialResponseMessages = [];
       // Its usage is reported before it is saved, so stopWhen sees it.
       await reportUsage({ step });
+      await reportRaw({ step }, [], durationMs);
     },
     beforeStep: async ({ stepNumber, responseMessages }) => {
       if (stepNumber === 0) {

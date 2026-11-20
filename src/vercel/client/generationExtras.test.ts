@@ -116,15 +116,14 @@ afterEach(() => {
 });
 
 describe("rawRequestResponseHandler", () => {
-  test("gets the prompt, order, stepOrder, step, saved message ids and duration", async () => {
+  test("gets the prompt, order, step and duration, before the step is saved", async () => {
     const t = createTest();
     const threadId = await t.run((ctx) =>
       createThread(ctx, components.agent, { userId: "raw" }),
     );
-    const { rawEvents, promptMessageId, saved } = await t.action(
-      api.extras.generate,
-      { threadId },
-    );
+    const { rawEvents, promptMessageId } = await t.action(api.extras.generate, {
+      threadId,
+    });
     expect(rawEvents).toHaveLength(2);
     for (const event of rawEvents) {
       expect(event.durationMs).toBeTypeOf("number");
@@ -137,9 +136,7 @@ describe("rawRequestResponseHandler", () => {
         agentName: "extras-test",
         promptMessageId,
         order: 0,
-        stepOrder: 2,
         stepNumber: 0,
-        savedMessageIds: [saved[1], saved[2]],
       },
       {
         userId: "raw",
@@ -147,9 +144,7 @@ describe("rawRequestResponseHandler", () => {
         agentName: "extras-test",
         promptMessageId,
         order: 0,
-        stepOrder: 3,
         stepNumber: 1,
-        savedMessageIds: [saved[3]],
       },
     ]);
   });

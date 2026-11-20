@@ -503,12 +503,14 @@ export type RawRequestResponseHandler = (
     promptMessageId?: string;
     /** The order of the generation's messages. */
     order?: number;
-    /** The stepOrder of the last message saved for this step, if saved. */
+    /**
+     * The stepOrder of the saved object message, for generateObject and
+     * streamObject. Unset for text steps, which are reported before they are
+     * saved.
+     */
     stepOrder?: number;
     /** Zero-based step within the generation. Unset for objects. */
     stepNumber?: number;
-    /** The ids of the messages saved for this step. Empty if none were. */
-    savedMessageIds?: string[];
     /**
      * Milliseconds from just before the step's model call until the step
      * ended, including any tool calls the step ran. Saving it isn't counted.

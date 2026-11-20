@@ -31,10 +31,11 @@ const supportAgent = new Agent(components.agent, {
 ```
 
 To tie a request to a turn, the handler also gets `promptMessageId`, `order`,
-`stepOrder` and `stepNumber`, the ids of the messages the step saved
-(`savedMessageIds`), and `durationMs`: the time from just before the model call
-until the step ended, including any tools the step ran. Saving the step isn't
-counted.
+`stepNumber` and `durationMs`: the time from just before the model call until
+the step ended, including any tools the step ran. Like `usageHandler`, it runs
+before a text step is saved, so `stepOrder` is set only for generateObject and
+streamObject. To find a step's saved messages, await `saved` on a streamText
+result or use `savedMessages` on a generateText result.
 
 ## Logging the context messages via the contextHandler
 
