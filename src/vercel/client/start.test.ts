@@ -155,7 +155,7 @@ describe("a generation takes its userId from the thread it saves to", () => {
     expect(r.calls.slice(0, 3)).toEqual([
       "query messages:listMessagesByThreadId",
       "mutation messages:addMessages",
-      "mutation streams:create",
+      "mutation streams:addDelta",
     ]);
     expect(r.calls).not.toContain("query threads:getThread");
     expect(r.seen.tool).toEqual(["u1"]);
