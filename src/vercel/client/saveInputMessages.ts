@@ -7,7 +7,8 @@ import type {
   Config,
   MutationCtx,
 } from "./types.js";
-import { saveMessages } from "./messages.js";
+import { addMessages } from "./messages.js";
+import type { CreateStream } from "../../client/messages.js";
 import type { Message } from "../../validators.js";
 import { assert } from "convex-helpers";
 import type { VectorDimension } from "../../component/vector/tables.js";
@@ -31,6 +32,7 @@ export async function saveInputMessages(
     storageOptions?: {
       saveMessages?: "all" | "promptAndOutput";
     };
+    createStream?: CreateStream;
   } & Pick<
     Config,
     "usageHandler" | "textEmbeddingModel" | "embeddingModel" | "callSettings"
@@ -39,6 +41,7 @@ export async function saveInputMessages(
   promptMessageId: string | undefined;
   pendingMessage: MessageDoc;
   savedMessages: MessageDoc[];
+  streamId: string | undefined;
 }> {
   const shouldSave = args.storageOptions?.saveMessages ?? "promptAndOutput";
   // If only a promptMessageId is provided, this will be empty.
@@ -82,7 +85,7 @@ export async function saveInputMessages(
       embeddings.vectors.push(null);
     }
   }
-  const saved = await saveMessages(ctx, component, {
+  const saved = await addMessages(ctx, component, {
     threadId,
     userId,
     messages: [...toSave, { role: "assistant", content: [] }],
@@ -93,6 +96,7 @@ export async function saveInputMessages(
     failPendingSteps: !!args.promptMessageId,
     promptMessageId: args.promptMessageId,
     embeddings,
+    createStream: args.createStream,
   });
   return {
     promptMessageId: toSave.length
@@ -100,5 +104,6 @@ export async function saveInputMessages(
       : args.promptMessageId,
     pendingMessage: saved.messages.at(-1)!,
     savedMessages: saved.messages.slice(0, -1),
+    streamId: saved.streamId,
   };
 }

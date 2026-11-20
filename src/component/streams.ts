@@ -1,5 +1,5 @@
 import { omit, pick } from "convex-helpers";
-import { v } from "convex/values";
+import { type ObjectType, v } from "convex/values";
 import {
   type MessageWithMetadataInternal,
   type StreamDelta,
@@ -253,30 +253,37 @@ export const listDeltas = query({
   },
 });
 
+const createArgs = omit(schema.tables.streamingMessages.validator.fields, [
+  "state",
+  "fileRefs",
+]);
+
 export const create = mutation({
-  args: omit(schema.tables.streamingMessages.validator.fields, [
-    "state",
-    "fileRefs",
-  ]),
+  args: createArgs,
   returns: v.id("streamingMessages"),
-  handler: async (ctx, args) => {
-    const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
-    // TODO: enforce order/stepOrder uniqueness?
-    const streamId = await ctx.db.insert("streamingMessages", {
-      ...args,
-      state,
-    });
-    const timeoutFnId = await ctx.scheduler.runAfter(
-      TIMEOUT_INTERVAL,
-      internal.streams.timeoutStream,
-      { streamId },
-    );
-    await ctx.db.patch("streamingMessages", streamId, {
-      state: { ...state, timeoutFnId },
-    });
-    return streamId;
-  },
+  handler: createStream,
 });
+
+export async function createStream(
+  ctx: MutationCtx,
+  args: ObjectType<typeof createArgs>,
+) {
+  const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
+  // TODO: enforce order/stepOrder uniqueness?
+  const streamId = await ctx.db.insert("streamingMessages", {
+    ...args,
+    state,
+  });
+  const timeoutFnId = await ctx.scheduler.runAfter(
+    TIMEOUT_INTERVAL,
+    internal.streams.timeoutStream,
+    { streamId },
+  );
+  await ctx.db.patch("streamingMessages", streamId, {
+    state: { ...state, timeoutFnId },
+  });
+  return streamId;
+}
 
 export const list = query({
   args: {
@@ -350,6 +357,19 @@ export async function abortStreamsAtOrder(
   return streams.length > 0;
 }
 
+// A message can outlive its stream, which is deleted a while after it ends.
+export async function abortLiveStreams(
+  ctx: MutationCtx,
+  streamIds: Id<"streamingMessages">[],
+  reason: string,
+) {
+  for (const streamId of new Set(streamIds)) {
+    if (await ctx.db.get("streamingMessages", streamId)) {
+      await abortById(ctx, { streamId, reason });
+    }
+  }
+}
+
 export const abortByOrder = mutation({
   args: { threadId: v.id("threads"), order: v.number(), reason: v.string() },
   returns: v.boolean(),
@@ -372,10 +392,12 @@ export async function abortById(
     streamId: Id<"streamingMessages">;
     reason: string;
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
+    /** The thread the caller saves to, which the stream must be in. */
+    threadId?: Id<"threads">;
   },
 ) {
   const stream = await ctx.db.get("streamingMessages", args.streamId);
-  if (!stream) {
+  if (!stream || (args.threadId && stream.threadId !== args.threadId)) {
     throw new Error(`Stream not found: ${args.streamId}`);
   }
   if (args.finalDelta) {
@@ -422,13 +444,15 @@ export async function finishHandler(
   args: {
     streamId: Id<"streamingMessages">;
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
+    /** The thread the caller saves to, which the stream must be in. */
+    threadId?: Id<"threads">;
   },
 ) {
   if (args.finalDelta) {
     await ctx.db.insert("streamDeltas", args.finalDelta);
   }
   const stream = await ctx.db.get("streamingMessages", args.streamId);
-  if (!stream) {
+  if (!stream || (args.threadId && stream.threadId !== args.threadId)) {
     throw new Error(`Stream not found: ${args.streamId}`);
   }
   if (stream.state.kind !== "streaming") {
@@ -812,7 +836,15 @@ export async function getStreamingMessages(
   threadId: Id<"threads">,
   order: number,
   stepOrder: number,
+  streamId: Id<"streamingMessages"> | undefined,
 ): Promise<Doc<"streamingMessages">[]> {
+  if (streamId) {
+    const stream = await ctx.db.get("streamingMessages", streamId);
+    return stream?.threadId === threadId && stream.order === order
+      ? [stream]
+      : [];
+  }
+  // Messages saved before they were linked to their stream.
   return mergedStream(
     (["aborted", "streaming", "finished"] as const).map((state) =>
       stream(ctx.db, schema)
@@ -836,7 +868,13 @@ export async function getStreamingMessagesWithMetadata(
     threadId,
     order,
     stepOrder,
-  }: { threadId: Id<"threads">; order: number; stepOrder: number },
+    streamId,
+  }: {
+    threadId: Id<"threads">;
+    order: number;
+    stepOrder: number;
+    streamId?: Id<"streamingMessages">;
+  },
   metadata: { status: "success" | "failed"; error?: string },
 ): Promise<{
   messages: MessageWithMetadataInternal[];
@@ -851,6 +889,7 @@ export async function getStreamingMessagesWithMetadata(
     threadId,
     order,
     stepOrder,
+    streamId,
   );
   const failure = (streamId: Id<"streamingMessages">, reason: string) => ({
     messages: [],

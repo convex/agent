@@ -8,7 +8,7 @@ import {
   type StopCondition,
   type ToolSet,
 } from "ai";
-import type { Context } from "@ai-sdk/provider-utils";
+import type { Context, ProviderOptions } from "@ai-sdk/provider-utils";
 import {
   serializeResponseMessages,
   serializeObjectResult,
@@ -150,6 +150,7 @@ export async function startGeneration<
   {
     threadId,
     endsFromHooks,
+    streamsDeltas,
     ...opts
   }: Options &
     Config & {
@@ -162,6 +163,8 @@ export async function startGeneration<
        * AI SDK's hooks, after the steps it finishes.
        */
       endsFromHooks?: boolean;
+      /** Set by streamText, whose stream is created with its pending message. */
+      streamsDeltas?: boolean;
     },
   _operation?:
     | "generateText"
@@ -181,6 +184,7 @@ export async function startGeneration<
   stepOrder: number;
   userId: string | undefined;
   promptMessageId: string | undefined;
+  streamId: string | undefined;
   updateModel: (model: ModelOrMetadata | undefined) => void;
   save: <TOOLS extends ToolSet>(
     toSave:
@@ -239,7 +243,11 @@ export async function startGeneration<
   assert(model, "model is required");
   let activeModel: ModelOrMetadata = model;
 
-  const { promptMessageId, pendingMessage, savedMessages } =
+  const { providerOptions } = {
+    providerOptions: opts.providerOptions,
+    ...args,
+  } as { providerOptions?: ProviderOptions };
+  const { promptMessageId, pendingMessage, savedMessages, streamId } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
@@ -249,11 +257,21 @@ export async function startGeneration<
           messages: args.messages,
           promptMessageId: args.promptMessageId,
           storageOptions: { saveMessages },
+          createStream: streamsDeltas
+            ? {
+                agentName: opts.agentName,
+                format: "UIMessageChunk",
+                model: getModelName(model),
+                provider: getProviderName(model),
+                providerOptions,
+              }
+            : undefined,
         })
       : {
           promptMessageId: args.promptMessageId,
           pendingMessage: undefined,
           savedMessages: [] as MessageDoc[],
+          streamId: undefined,
         };
 
   userId ??= pendingMessage?.userId;
@@ -307,18 +325,23 @@ export async function startGeneration<
         }
       }
       const error = errorToString((failed ?? saveFailure)!.error);
+      let failedElsewhere: string | null = null;
       try {
         // A step that ended keeps its messages, ahead of the failed one.
         if (held) await saveHeld(held.error === undefined);
       } finally {
         if (pendingMessageId) {
-          await ctx.runMutation(component.messages.finalizeMessage, {
-            messageId: pendingMessageId,
-            result: { status: "failed", error },
-          });
+          failedElsewhere = await ctx.runMutation(
+            component.messages.finalizeMessage,
+            {
+              messageId: pendingMessageId,
+              result: { status: "failed", error },
+            },
+          );
         }
       }
       if (saveFailure) throw saveFailure.error;
+      if (failedElsewhere !== null) throw new Error(failedElsewhere);
     })());
   // Unless the AI SDK's hooks end the generation, an abort ends it here.
   const abortSignal = args.abortSignal;
@@ -512,6 +535,7 @@ export async function startGeneration<
     stepOrder: stepOrder ?? 0,
     userId,
     promptMessageId,
+    streamId,
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {

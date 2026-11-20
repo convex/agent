@@ -302,6 +302,8 @@ export class DeltaStreamer<T> {
       compress: ((parts: T[]) => T[]) | null;
       /** Defaults to false, meaning `consumeStream` finishes the stream. */
       finishHandledExternally?: boolean;
+      /** A stream already created, instead of one created on the first part. */
+      streamId?: string;
       materialize?: (parts: T[]) => Promise<{
         parts: T[];
         fileRefs: Array<{ url: string; fileId: string }>;
@@ -328,6 +330,8 @@ export class DeltaStreamer<T> {
     this.#finishHandledExternally = config.finishHandledExternally ?? false;
     // Mutations can't use timers, and end long before a stream times out.
     this.#keepAliveStopped = !("runAction" in ctx);
+    this.streamId = config.streamId;
+    this.#keepAlive();
     this.#nextParts = [];
     this.abortController = new AbortController();
     this.abortController.signal.addEventListener("abort", () =>
@@ -364,6 +368,7 @@ export class DeltaStreamer<T> {
         );
       }
       this.streamId = await this.#creatingStreamIdPromise;
+      this.#keepAlive();
     }
     return this.streamId;
   }

@@ -64,6 +64,8 @@ export const schema = defineSchema({
     parentMessageId: v.optional(v.id("messages")),
     stepId: v.optional(v.string()),
     files: v.optional(v.array(v.any())),
+    // The stream of the attempt that wrote it. Set at insert, never changed.
+    streamId: v.optional(v.id("streamingMessages")),
   })
     // Allows finding successful visible messages in order
     // Also surface pending messages separately to e.g. stream
