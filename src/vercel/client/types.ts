@@ -510,8 +510,8 @@ export type RawRequestResponseHandler = (
     /** The ids of the messages saved for this step. Empty if none were. */
     savedMessageIds?: string[];
     /**
-     * Milliseconds from just before the step's model call until its messages
-     * were saved, including any tool calls the step ran.
+     * Milliseconds from just before the step's model call until the step
+     * ended, including any tool calls the step ran. Saving it isn't counted.
      */
     durationMs?: number;
   },

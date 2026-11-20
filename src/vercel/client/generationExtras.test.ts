@@ -63,7 +63,7 @@ const streamWithoutReading = app.action({
   args: { threadId: v.string() },
   handler: async (ctx, { threadId }) => {
     const result = await agent.streamText(ctx, { threadId }, { prompt: "go" });
-    // Nothing reads the stream. `saved` consumes it and waits for every step.
+    // Nothing reads the stream. `saved` waits for every step to be saved.
     await result.saved;
     const { page } = await listMessages(ctx, components.agent, {
       threadId,

@@ -1,4 +1,5 @@
 import {
+  gateway,
   isStepCount,
   wrapLanguageModel,
   type GenerateObjectResult,
@@ -10,9 +11,6 @@ import {
   type ToolSet,
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
-// The AI SDK's own string-to-model resolution, so a gateway model id can be
-// wrapped with middleware the same way generateText would resolve it.
-import { resolveLanguageModel } from "ai/internal";
 import {
   serializeResponseMessages,
   serializeObjectResult,
@@ -355,7 +353,13 @@ export async function startGeneration<
       return stepModel;
     }
     return wrapLanguageModel({
-      model: resolveLanguageModel(stepModel),
+      // A model id resolves the way the AI SDK resolves it.
+      model:
+        typeof stepModel === "string"
+          ? (globalThis.AI_SDK_DEFAULT_PROVIDER ?? gateway).languageModel(
+              stepModel,
+            )
+          : stepModel,
       middleware,
     }) as AgentLanguageModel;
   };
@@ -372,6 +376,7 @@ export async function startGeneration<
         step: StepResult<ToolSet, RUNTIME_CONTEXT>;
         responseMessages: ModelMessage[];
         error?: string;
+        durationMs: number;
       }
     | undefined;
   // The last step save. The end waits for it, to know which message is
@@ -389,12 +394,12 @@ export async function startGeneration<
     })
       .then(
         async ({ stoppedBy, stepSaved }) => {
-          await reportRaw(toSave, stepSaved);
+          await reportRaw(toSave, stepSaved, toSave.durationMs);
           if (stoppedBy) throw new Error(stoppedBy);
         },
         async (error: unknown) => {
           // The raw request is still worth seeing when its save failed.
-          await reportRaw(toSave, []).catch(() => {});
+          await reportRaw(toSave, [], toSave.durationMs).catch(() => {});
           throw error;
         },
       )
@@ -710,6 +715,7 @@ export async function startGeneration<
   const reportRaw = async <TOOLS extends ToolSet>(
     toSave: ToSave<TOOLS>,
     stepSaved: MessageDoc[],
+    durationMs: number,
   ) => {
     if (!opts.rawRequestResponseHandler) return;
     const output = "object" in toSave ? toSave.object : toSave.step;
@@ -724,7 +730,7 @@ export async function startGeneration<
       stepOrder: stepSaved.at(-1)?.stepOrder,
       stepNumber: "step" in toSave ? toSave.step.stepNumber : undefined,
       savedMessageIds: stepSaved.map((m) => m._id),
-      durationMs: Date.now() - stepStartedAt,
+      durationMs,
     });
   };
   const reportUsage = async <TOOLS extends ToolSet>(
@@ -763,10 +769,13 @@ export async function startGeneration<
     },
     fail: (reason) => settle({ error: reason }),
     endStep: async (step, error) => {
+      // The model call's time, without the save that follows.
+      const durationMs = Date.now() - stepStartedAt;
       // A step that ends after the generation did is only reported.
-      if (ending) await reportRaw({ step }, []);
+      if (ending) await reportRaw({ step }, [], durationMs);
       else {
         held = {
+          durationMs,
           step,
           responseMessages: [
             ...initialResponseMessages,
@@ -805,11 +814,12 @@ export async function startGeneration<
        */
       finishStreamId?: string,
     ) => {
+      const durationMs = Date.now() - stepStartedAt;
       const { stepSaved } = await persist(toSave, createPendingMessage, {
         finishStreamId,
       });
       await reportUsage(toSave, stepSaved);
-      await reportRaw(toSave, stepSaved);
+      await reportRaw(toSave, stepSaved, durationMs);
     },
   };
 }

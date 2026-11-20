@@ -33,7 +33,8 @@ const supportAgent = new Agent(components.agent, {
 To tie a request to a turn, the handler also gets `promptMessageId`, `order`,
 `stepOrder` and `stepNumber`, the ids of the messages the step saved
 (`savedMessageIds`), and `durationMs`: the time from just before the model call
-until the step was saved, including any tools the step ran.
+until the step ended, including any tools the step ran. Saving the step isn't
+counted.
 
 ## Logging the context messages via the contextHandler
 
