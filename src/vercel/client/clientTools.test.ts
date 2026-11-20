@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { v } from "convex/values";
 import { makeFunctionReference } from "convex/server";
-import { stepCountIs, tool } from "ai";
+import { stepCountIs, tool, type ToolSet } from "ai";
 import { z } from "zod/v4";
 import {
   Agent,
@@ -45,7 +45,25 @@ const lookup = createTool({
   },
 });
 
-const tools = { getLocation, deleteFile, lookup };
+const askName = tool({
+  description: "Ask the user's name",
+  inputSchema: z.object({}),
+});
+const webSearch = tool({
+  type: "provider",
+  id: "test.web_search",
+  args: {},
+  isProviderExecuted: true,
+  inputSchema: z.object({}),
+});
+
+const tools = { getLocation, askName, deleteFile, lookup };
+const toolsByName: Record<string, ToolSet[string]> = {
+  ...tools,
+  web_search: webSearch,
+};
+const pick = (names: string[]) =>
+  Object.fromEntries(names.map((name) => [name, toolsByName[name]]));
 const callIds: Record<string, string> = {
   getLocation: "tc-client",
   deleteFile: "tc-delete",
@@ -296,19 +314,35 @@ const addOutput = app.mutation({
     toolCallId: v.string(),
     output: v.optional(v.any()),
     errorText: v.optional(v.string()),
+    agentTools: v.optional(v.array(v.string())),
+    tools: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const { threadId, toolCallId, output, errorText } = args;
     const tool = args.tool ?? "getLocation";
-    const agent = agentFor("mutations");
+    const agent = args.agentTools
+      ? new Agent(components.agent, {
+          name: "mutations",
+          tools: pick(args.agentTools),
+          languageModel: mockModel(),
+        })
+      : agentFor("mutations");
+    const perCall = args.tools && { tools: pick(args.tools) };
     return errorText === undefined
-      ? agent.addToolOutput(ctx, { threadId, tool, toolCallId, output })
+      ? agent.addToolOutput(ctx, {
+          threadId,
+          tool,
+          toolCallId,
+          output,
+          ...perCall,
+        })
       : agent.addToolOutput(ctx, {
           threadId,
           tool,
           toolCallId,
           state: "output-error",
           errorText,
+          ...perCall,
         });
   },
 });
@@ -622,6 +656,23 @@ describe("addToolOutput", () => {
       toolCallId: callIds[tool] ?? "tc-provider",
       output: { city: "Paris" },
     });
+  // Past addToolOutput's tool check, as an app calling the component can.
+  const componentOutput = (t: Ctx, threadId: string, tool: string) =>
+    t.mutation(api.clientTools.readsOf, {
+      kind: "mutation",
+      name: "messages/respondToToolCallApprovals",
+      args: {
+        threadId,
+        decisions: [],
+        outputs: [
+          {
+            toolCallId: callIds[tool],
+            toolName: tool,
+            output: { type: "json", value: { city: "Paris" } },
+          },
+        ],
+      },
+    });
   type Rejection = [
     string,
     string[],
@@ -644,7 +695,7 @@ describe("addToolOutput", () => {
         ["deleteFile"],
         async (t: Ctx, threadId: string) => {
           await t.mutation(api.clientTools.decide, { threadId, approved });
-          return output(t, threadId, "deleteFile");
+          return componentOutput(t, threadId, "deleteFile");
         },
         /Tool call tc-delete was already handled/,
       ],
@@ -672,7 +723,37 @@ describe("addToolOutput", () => {
       /Approval .* was already handled/,
     ],
     [
-      "an output naming another tool",
+      "an output naming another client tool",
+      ["getLocation"],
+      (t, threadId) =>
+        t.mutation(api.clientTools.addOutput, {
+          threadId,
+          tool: "askName",
+          toolCallId: "tc-client",
+          output: "done",
+        }),
+      /Tool call tc-client is a call to getLocation, not askName/,
+    ],
+    [
+      "an output for a tool the agent doesn't have",
+      ["getLocation"],
+      (t, threadId) =>
+        t.mutation(api.clientTools.addOutput, {
+          threadId,
+          tool: "nope",
+          toolCallId: "tc-client",
+          output: "done",
+        }),
+      /Tool nope is not in the agent's tools/,
+    ],
+    [
+      "an output for a server tool",
+      ["lookup"],
+      (t, threadId) => output(t, threadId, "lookup"),
+      /Tool lookup is not a client tool: it has execute/,
+    ],
+    [
+      "an output naming a server tool for a client call",
       ["getLocation"],
       (t, threadId) =>
         t.mutation(api.clientTools.addOutput, {
@@ -681,12 +762,24 @@ describe("addToolOutput", () => {
           toolCallId: "tc-client",
           output: "done",
         }),
-      /Tool call tc-client is a call to getLocation, not deleteFile/,
+      /Tool deleteFile is not a client tool: it has execute/,
+    ],
+    [
+      "an output for an agent's client tool left out of the tools passed",
+      ["getLocation"],
+      (t, threadId) =>
+        t.mutation(api.clientTools.addOutput, {
+          threadId,
+          toolCallId: "tc-client",
+          output: "done",
+          tools: ["lookup"],
+        }),
+      /Tool getLocation is not in the tools passed/,
     ],
     [
       "an output for a call awaiting approval",
       ["deleteFile"],
-      (t, threadId) => output(t, threadId, "deleteFile"),
+      (t, threadId) => componentOutput(t, threadId, "deleteFile"),
       /Tool call tc-delete is awaiting approval/,
     ],
     [
@@ -708,7 +801,13 @@ describe("addToolOutput", () => {
             ],
           },
         });
-        return output(t, threadId, "web_search");
+        return t.mutation(api.clientTools.addOutput, {
+          threadId,
+          tool: "web_search",
+          toolCallId: "tc-provider",
+          output: {},
+          tools: ["web_search"],
+        });
       },
       /Tool call tc-provider is provider-executed/,
     ],
@@ -735,6 +834,28 @@ describe("addToolOutput", () => {
       await expect(act(t, threadId)).rejects.toThrow(error);
     });
   }
+
+  test("the tools passed replace the agent's, as they do for a generation", async () => {
+    const t = createTest();
+    const threadId = await t.action(api.clientTools.start, {
+      name: "per-call-tools",
+      stream: false,
+    });
+    await t.mutation(api.clientTools.addOutput, {
+      threadId,
+      toolCallId: "tc-client",
+      output: { city: "Paris" },
+      agentTools: ["lookup"],
+      tools: ["getLocation"],
+    });
+    const { results } = await t.query(api.clientTools.messages, { threadId });
+    expect(results).toEqual([
+      expect.objectContaining({
+        toolCallId: "tc-client",
+        output: { type: "json", value: { city: "Paris" } },
+      }),
+    ]);
+  });
 
   const movedPast: [string, (t: Ctx) => Promise<string>][] = [
     [
