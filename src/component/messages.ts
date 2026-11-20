@@ -4,7 +4,7 @@ import {
   paginationOptsValidator,
   type WithoutSystemFields,
 } from "convex/server";
-import type { ObjectType } from "convex/values";
+import { ConvexError, type ObjectType } from "convex/values";
 import {
   DEFAULT_MESSAGE_RANGE,
   DEFAULT_RECENT_MESSAGES,
@@ -201,7 +201,8 @@ const addMessagesArgs = {
   messages: v.array(vMessageWithMetadataInternal),
   embeddings: v.optional(vMessageEmbeddingsWithDimension),
   failPendingSteps: v.optional(v.boolean()),
-  // A pending message to update. If the pending message failed, abort.
+  // A pending message to update. If the pending message failed, abort. If it
+  // already succeeded, throw.
   pendingMessageId: v.optional(v.id("messages")),
   // if set to true, these messages will not show up in text or vector search
   // results for the userId
@@ -367,6 +368,11 @@ async function addMessagesHandler(
     if (i === 0 && pendingMessageId) {
       const pendingMessage = await ctx.db.get("messages", pendingMessageId);
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
+      if (pendingMessage.status === "success") {
+        throw new ConvexError(
+          `Message ${pendingMessageId} can't be filled: its status is "success", not "pending"`,
+        );
+      }
       if (pendingMessage.status === "failed") {
         fail = true;
         error =

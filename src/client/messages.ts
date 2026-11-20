@@ -99,6 +99,7 @@ export type SaveMessagesArgs = {
   embeddings?: MessageEmbeddings;
   /**
    * A pending message ID to replace when adding messages.
+   * Throws if that message already succeeded.
    */
   pendingMessageId?: string;
 };
