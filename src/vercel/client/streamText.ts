@@ -282,7 +282,16 @@ export async function streamText<
         stepModel as typeof args.model,
         options.stepNumber,
       );
-      return model === stepModel ? result : { ...result, model };
+      const messages = await call.withContext(
+        options.stepNumber,
+        result?.messages ?? options.messages,
+      );
+      if (model === stepModel && !messages) return result;
+      return {
+        ...result,
+        ...(model === stepModel ? {} : { model }),
+        ...(messages ? { messages } : {}),
+      };
     },
     onStepEnd: async (step) => {
       await call.endStep(step, stepError);

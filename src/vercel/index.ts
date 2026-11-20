@@ -511,6 +511,13 @@ export class Agent<
       stepNumber: number,
     ) => Promise<AgentLanguageModel>;
     getSavedMessages: () => MessageDoc[];
+    /**
+     * The step's messages with the context message rebuilt and placed last.
+     */
+    withContext: (
+      stepNumber: number,
+      messages: ModelMessage[],
+    ) => Promise<ModelMessage[] | undefined>;
   }> {
     type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
     return startGeneration<T, Tools, CustomCtx, RUNTIME_CONTEXT>(
@@ -612,7 +619,16 @@ export class Agent<
             stepModel as AgentLanguageModel,
             options.stepNumber,
           );
-          return model === stepModel ? result : { ...result, model };
+          const messages = await call.withContext(
+            options.stepNumber,
+            result?.messages ?? options.messages,
+          );
+          if (model === stepModel && !messages) return result;
+          return {
+            ...result,
+            ...(model === stepModel ? {} : { model }),
+            ...(messages ? { messages } : {}),
+          };
         },
         onStepEnd: async (step) => {
           await call.endStep(step);

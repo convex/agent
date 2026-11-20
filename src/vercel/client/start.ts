@@ -222,6 +222,15 @@ export async function startGeneration<
     stepNumber: number,
   ) => Promise<AgentLanguageModel>;
   getSavedMessages: () => MessageDoc[];
+  /**
+   * For generateText and streamText: the step's messages with the context
+   * message rebuilt and placed last. Undefined when there is no
+   * contextMessage.
+   */
+  withContext: (
+    stepNumber: number,
+    messages: ModelMessage[],
+  ) => Promise<ModelMessage[] | undefined>;
 }> {
   const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
   // Unless something reads it before the first save, the userId comes back on
@@ -465,19 +474,46 @@ export async function startGeneration<
     typeof instructionsOption === "function"
       ? await instructionsOption(ctx, { threadId, userId })
       : instructionsOption;
-  const contextMessages = toContextMessages(
-    typeof args.contextMessage === "function"
-      ? await args.contextMessage(ctx, { threadId, userId, promptMessageId })
-      : args.contextMessage,
-  );
-  if (
-    !allowSystemInMessages &&
-    contextMessages.some((message) => message.role === "system")
-  ) {
-    throw new Error(
-      "A system contextMessage requires allowSystemInMessages: true. Pass a string or a user message instead.",
+  // generateText and streamText rebuild the context message before each step
+  // and keep it last, after the previous steps' tool calls and results.
+  // Other calls make one model call and get it once.
+  const perStep = _operation === "generateText" || _operation === "streamText";
+  const resolveContext = async (stepNumber: number) => {
+    const messages = toContextMessages(
+      typeof args.contextMessage === "function"
+        ? await args.contextMessage(ctx, {
+            threadId,
+            userId,
+            promptMessageId,
+            stepNumber,
+          })
+        : args.contextMessage,
     );
-  }
+    if (
+      !allowSystemInMessages &&
+      messages.some((message) => message.role === "system")
+    ) {
+      throw new Error(
+        "A system contextMessage requires allowSystemInMessages: true. Pass a string or a user message instead.",
+      );
+    }
+    return messages;
+  };
+  const contextMessages = perStep ? [] : await resolveContext(0);
+  // The AI SDK carries one step's messages into the next, so the context
+  // added for the previous step is removed (by reference) before adding the
+  // new one.
+  let addedContext = new Set<ModelMessage>();
+  const withContext = async (
+    stepNumber: number,
+    messages: ModelMessage[],
+  ): Promise<ModelMessage[] | undefined> => {
+    if (args.contextMessage === undefined) return undefined;
+    const fresh = await resolveContext(stepNumber);
+    const previous = addedContext;
+    addedContext = new Set(fresh);
+    return [...messages.filter((m) => !previous.has(m)), ...fresh];
+  };
   const include = rawRequestResponseInclude(
     aiCallArgs as {
       experimental_include?: RawRequestResponseInclude;
@@ -708,6 +744,7 @@ export async function startGeneration<
     // Where the AI SDK finished: throws if a save failed.
     end: ({ finishStreamId } = {}) => settle(undefined, finishStreamId),
     wrapModel,
+    withContext,
     save: async <TOOLS extends ToolSet>(
       toSave: ToSave<TOOLS>,
       createPendingMessage?: boolean,

@@ -86,7 +86,12 @@ describe("instructions functions and context messages", () => {
       { role: "user", text: "State: step 1" },
     ]);
     expect(first.contextCalls).toEqual([
-      { threadId, userId: "ada", promptMessageId: first.promptMessageId },
+      {
+        threadId,
+        userId: "ada",
+        promptMessageId: first.promptMessageId,
+        stepNumber: 0,
+      },
     ]);
 
     // The next call's history has the saved prompt and reply, and only the

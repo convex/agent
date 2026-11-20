@@ -89,8 +89,10 @@ export type AgentInstructions = Instructions | InstructionsFunction;
 
 /**
  * Message(s) sent to the model after the thread history and prompt, but not
- * saved. A string becomes a user message. A function is called once per
- * generation.
+ * saved. A string becomes a user message. In generateText and streamText the
+ * message is rebuilt before each step (a function is called again, with the
+ * step number) and stays last, after the tool calls and results of earlier
+ * steps, so the model reads it as current.
  */
 export type ContextMessage =
   | string
@@ -102,6 +104,8 @@ export type ContextMessage =
         threadId: string | undefined;
         userId: string | undefined;
         promptMessageId: string | undefined;
+        /** 0 for the first model call of a generateText or streamText. */
+        stepNumber: number;
       },
     ) =>
       | string
