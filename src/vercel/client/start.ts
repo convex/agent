@@ -38,9 +38,7 @@ import { errorToString } from "./utils.js";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 
 export function resolveUsageModel(
-  toSave:
-    | { step: { model?: ModelOrMetadata } }
-    | { object: unknown },
+  toSave: { step: { model?: ModelOrMetadata } } | { object: unknown },
   activeModel: ModelOrMetadata,
 ): ModelOrMetadata {
   return "step" in toSave ? (toSave.step.model ?? activeModel) : activeModel;
@@ -74,7 +72,7 @@ function rawRequestResponseInclude(
   return {
     ...requested,
     requestBody: requested.requestBody ?? true,
-    ...((operation === "generateText" || operation === "generateObject")
+    ...(operation === "generateText" || operation === "generateObject"
       ? { responseBody: requested.responseBody ?? true }
       : {}),
   };
@@ -347,6 +345,19 @@ export async function startGeneration<
       }
       if (saveFailure) throw saveFailure.error;
     })());
+  // generateText, streamText, generateObject and streamObject end the
+  // generation from the AI SDK's onAbort. A caller of agent.start() runs the
+  // AI SDK itself, so an abort fails the pending message here.
+  const abortSignal = args.abortSignal;
+  if (!_operation && abortSignal) {
+    abortSignal.addEventListener(
+      "abort",
+      () => {
+        settle({ error: abortSignal.reason ?? "abortSignal" }).catch(() => {});
+      },
+      { once: true },
+    );
+  }
   const toolCtx = {
     ...(ctx as GenericActionCtx<GenericDataModel> & CustomCtx),
     userId,
