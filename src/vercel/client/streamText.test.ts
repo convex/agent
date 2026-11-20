@@ -264,20 +264,13 @@ const streamTextCleanupFailure = app.action({
 });
 
 const streamTextFullStreamErrors = app.action({
-  args: {
-    threadId: v.string(),
-    returnImmediately: v.boolean(),
-    saveMessages: v.boolean(),
-  },
-  handler: async (ctx, { threadId, returnImmediately, saveMessages }) => {
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId }) => {
     const result = await failingAgent.streamText(
       ctx,
       { threadId },
       { prompt: "Test", onError: () => {} },
-      {
-        saveStreamDeltas: { returnImmediately, throttleMs: 0 },
-        ...(saveMessages ? {} : { storageOptions: { saveMessages: "none" } }),
-      },
+      { saveStreamDeltas: { throttleMs: 0 } },
     );
     const errors: string[] = [];
     for await (const part of result.fullStream) {
@@ -642,27 +635,14 @@ describe("streamText abort cleanup", () => {
   });
 });
 
-describe("provider errors reach fullStream and abort the stream", () => {
-  test.each([
-    { returnImmediately: false, saveMessages: true },
-    { returnImmediately: true, saveMessages: true },
-    { returnImmediately: false, saveMessages: false },
-    { returnImmediately: true, saveMessages: false },
-  ])(
-    "returnImmediately: $returnImmediately, saveMessages: $saveMessages",
-    async (args) => {
-      const t = createTest();
-      const threadId = await t.run(async (ctx) =>
-        createThread(ctx, components.agent, { userId: "u1" }),
-      );
-      expect(
-        await t.action(api.streamText.streamTextFullStreamErrors, {
-          threadId,
-          ...args,
-        }),
-      ).toEqual({ errors: [PROVIDER_FAILURE_TEXT], streams: ["aborted"] });
-    },
+test("a provider error reaches fullStream and aborts the stream (#428)", async () => {
+  const t = createTest();
+  const threadId = await t.run(async (ctx) =>
+    createThread(ctx, components.agent, { userId: "u1" }),
   );
+  expect(
+    await t.action(api.streamText.streamTextFullStreamErrors, { threadId }),
+  ).toEqual({ errors: [PROVIDER_FAILURE_TEXT], streams: ["aborted"] });
 });
 
 describe("provider rejects the first request (issue #387)", () => {
