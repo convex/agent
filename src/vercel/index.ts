@@ -1437,6 +1437,13 @@ export class Agent<
          * will replace the old fileIds.
          */
         fileIds?: string[];
+        /** The reasoning text to replace the existing one. Pass "" to clear it. */
+        reasoning?: string;
+        /**
+         * The reasoning details to replace the existing ones.
+         * Pass an empty array to clear them.
+         */
+        reasoningDetails?: MessageDoc["reasoningDetails"];
       };
     },
   ): Promise<void> {
@@ -1454,6 +1461,8 @@ export class Agent<
           : fileIds,
         status: args.patch.status === "success" ? "success" : "failed",
         error: args.patch.error,
+        reasoning: args.patch.reasoning,
+        reasoningDetails: args.patch.reasoningDetails,
       },
     });
   }
