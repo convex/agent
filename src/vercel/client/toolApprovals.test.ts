@@ -297,6 +297,31 @@ const handlers = {
     "tool",
     "tool-approval-response",
   ),
+  "split-calls-from-requests": (messages) =>
+    messages.flatMap((message): ModelMessage[] => {
+      if (message.role !== "assistant" || !Array.isArray(message.content)) {
+        return [message];
+      }
+      const isRequest = (part: Part) => part.type === "tool-approval-request";
+      const requests = message.content.filter(isRequest);
+      if (requests.length === 0) return [message];
+      return [
+        { ...message, content: message.content.filter((p) => !isRequest(p)) },
+        { ...message, content: requests },
+      ];
+    }),
+  "copy-provider-results-first": (messages) => [
+    {
+      role: "tool",
+      content: messages.flatMap((message) =>
+        message.role === "assistant" && Array.isArray(message.content)
+          ? message.content.filter((part) => part.type === "tool-result")
+          : [],
+      ),
+    },
+    ...messages,
+  ],
+  reverse: (messages) => [...messages].reverse(),
 } satisfies Record<string, Handler>;
 type ContextMode = keyof typeof handlers;
 
@@ -637,6 +662,63 @@ describe("tool approval semantics", () => {
     expect(approvalIdsByToolMessage.at(-1)).toEqual(["b"]);
   });
 
+  // The provider runs `a` once it is approved and answers with the call and
+  // its result in one assistant message.
+  async function providerAnswersA(s: Scenario) {
+    vi.spyOn(model, "doGenerate").mockImplementationOnce(async () => ({
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "call-a",
+          toolName: "echo",
+          input: JSON.stringify({ tag: "a" }),
+          providerExecuted: true,
+          dynamic: true,
+        },
+        {
+          type: "tool-result",
+          toolCallId: "call-a",
+          toolName: "echo",
+          result: "a",
+        },
+        { type: "text", text: "Done" },
+      ],
+      finishReason: { unified: "stop", raw: undefined },
+      usage: {
+        inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+        outputTokens: { total: 1, text: 1, reasoning: 0 },
+      },
+      warnings: [],
+    }));
+    await s.continue(await s.approve("a"));
+  }
+
+  // https://github.com/convex/agent/issues/475
+  test.each(["sibling", "sequential"])(
+    "continues a %s provider-owned approval after the provider answered the first",
+    async (next) => {
+      const s = await scenario({
+        ids: next === "sibling" ? ["a", "b"] : ["a"],
+        providerExecuted: true,
+      });
+      await providerAnswersA(s);
+      if (next === "sequential") {
+        await s.addRequest(await s.prompt("Next"), ["b"], true);
+      }
+
+      await s.continue(await s.approve("b"));
+
+      expect(executed).toEqual([]);
+      expect(
+        partsFor("a").filter((part) => part.type === "tool-result"),
+      ).toHaveLength(1);
+      expect(lastModelPrompt().at(-1)).toMatchObject({
+        role: "tool",
+        content: [{ type: "tool-approval-response", approvalId: "b" }],
+      });
+    },
+  );
+
   test.each([true, false])(
     "keeps a provider-executed decision provider-owned (approved=%s)",
     async (approved) => {
@@ -887,6 +969,138 @@ describe("tool approval semantics", () => {
 
     await expect(s.continue(await s.approve("a"))).rejects.toThrow(
       /more than one tool-approval-request for approval a/,
+    );
+    expect(executed).toEqual(["a"]);
+  });
+
+  async function requestAgain(
+    s: Scenario,
+    toolCallId: string,
+    tag: string,
+    approvalId: string,
+    providerExecuted = false,
+  ) {
+    await s.save({
+      promptMessageId: await s.prompt("Again"),
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId,
+            toolName: "echo",
+            input: { tag },
+            ...(providerExecuted && { providerExecuted }),
+          },
+          { type: "tool-approval-request", toolCallId, approvalId },
+        ],
+      },
+    });
+  }
+  // https://github.com/convex/agent/issues/476
+  test.each(["a", "changed"])(
+    "runs a later approval that reuses a completed call's id (input %s)",
+    async (tag) => {
+      const s = await scenario({ ids: ["a"] });
+      await s.completeA();
+      await requestAgain(s, "call-a", tag, "again");
+
+      await s.continue(await s.approve("again"));
+
+      expect(executed).toEqual(["a", tag]);
+      expect(await s.resultIds()).toEqual(["call-a", "call-a"]);
+      expectEveryCallAnsweredNext();
+    },
+  );
+
+  test("a cloning handler continues an id reused from a call run without approval", async () => {
+    const s = await scenario({ ids: ["a"] });
+    await s.completeA();
+    const order = await s.prompt("Next");
+    await s.save({
+      promptMessageId: order,
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call-n",
+            toolName: "echo",
+            input: { tag: "a" },
+          },
+        ],
+      },
+    });
+    await s.save({
+      promptMessageId: order,
+      message: {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-n",
+            toolName: "echo",
+            output: { type: "text", value: "a" },
+          },
+        ],
+      },
+    });
+    await requestAgain(s, "call-n", "changed", "again");
+
+    await s.continue(await s.approve("again"), "clone");
+
+    expect(executed).toEqual(["a", "changed"]);
+    expect(await s.resultIds()).toEqual(["call-a", "call-n", "call-n"]);
+    expectEveryCallAnsweredNext();
+  });
+
+  test("a cloning handler continues an id reused a second time", async () => {
+    const s = await scenario({ ids: ["a"] });
+    await s.completeA();
+    await requestAgain(s, "call-a", "a", "again");
+    await s.continue(await s.approve("again"), "clone");
+    await requestAgain(s, "call-a", "a", "third");
+
+    await s.continue(await s.approve("third"), "clone");
+
+    expect(executed).toEqual(["a", "a", "a"]);
+    expect(await s.resultIds()).toEqual(["call-a", "call-a", "call-a"]);
+    expectEveryCallAnsweredNext();
+  });
+
+  test("rejects reshaping a message with a reused id", async () => {
+    const s = await scenario({ ids: ["a"] });
+    await s.completeA();
+    await requestAgain(s, "call-a", "changed", "again");
+
+    await expect(
+      s.continue(await s.approve("again"), "split-calls-from-requests"),
+    ).rejects.toThrow(
+      "Continuation context reshapes a message with a reused tool call id call-a",
+    );
+    expect(executed).toEqual(["a"]);
+  });
+
+  test("rejects copying a reused-id provider result ahead of its requests", async () => {
+    const s = await scenario({ ids: ["a"], providerExecuted: true });
+    await providerAnswersA(s);
+    await requestAgain(s, "call-a", "a", "again", true);
+
+    await expect(
+      s.continue(await s.approve("again"), "copy-provider-results-first"),
+    ).rejects.toThrow(
+      "Continuation context reshapes a message with a reused tool call id call-a",
+    );
+  });
+
+  // The AI SDK runs the approved call before it rejects a call that history
+  // leaves without its result.
+  test("refuses a handler that separates a call from its result before running anything", async () => {
+    const s = await scenario({ ids: ["a"] });
+    await laterOrder(s, "approved");
+
+    await expect(s.continue(await s.approve("x"), "reverse")).rejects.toThrow(
+      "Continuation context has a tool call with no result",
     );
     expect(executed).toEqual(["a"]);
   });

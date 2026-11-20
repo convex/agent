@@ -34,7 +34,10 @@ import {
   docsToModelMessages,
   toModelMessage,
 } from "../mapping.js";
-import { prepareApprovalContext } from "./prepareApprovalContext.js";
+import {
+  assertToolCallsAnswered,
+  prepareApprovalContext,
+} from "./prepareApprovalContext.js";
 
 const DEFAULT_VECTOR_SCORE_THRESHOLD = 0.0;
 // Bound each page that completes an order split by the recent window.
@@ -742,6 +745,7 @@ export async function fetchContextWithPrompt(
   // complete history. Applied after contextHandler so custom handlers
   // don't need to handle this.
   processedMessages = autoDenyUnresolvedApprovals(processedMessages);
+  if (continuation) assertToolCallsAnswered(processedMessages);
 
   // Process messages to inline localhost files (if not, file urls pointing to localhost will be sent to LLM providers)
   if (process.env.CONVEX_CLOUD_URL?.startsWith("http://127.0.0.1")) {
