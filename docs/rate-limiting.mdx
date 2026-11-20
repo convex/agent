@@ -216,7 +216,7 @@ every step before it:
 ```ts
 const result = await rateLimitedAgent.streamText(
   ctx,
-  { threadId },
+  { threadId, userId },
   {
     promptMessageId,
     prepareStep: async () => {
