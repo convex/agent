@@ -3,9 +3,14 @@
 import { convexTest } from "convex-test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { getConvexSize } from "convex/values";
-import { convexValueSize } from "./streams.js";
+import {
+  convexValueSize,
+  MAX_MATERIALIZATION_ROWS,
+  timeoutStreamHandler,
+} from "./streams.js";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
+import type { MutationCtx } from "./_generated/server.js";
 import schema from "./schema.js";
 import { initConvexTest, modules } from "./setup.test.js";
 
@@ -367,4 +372,355 @@ describe("streams", () => {
     }
     expect([...cursors.values()]).toEqual([15, 15]);
   });
+});
+
+describe("a stream whose action died", () => {
+  // Just past the 10 minute timeout, since commit timestamps can run a few
+  // milliseconds ahead of the fake clock.
+  const PAST_TIMEOUT = 10 * 60 * 1000 + 1000;
+  const TIMED_OUT = "Stream timed out";
+
+  async function deadGeneration(
+    t: ReturnType<typeof initConvexTest> = initConvexTest(),
+  ) {
+    const thread = await t.mutation(api.threads.createThread, {
+      userId: "dead-action",
+    });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hello" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const prompt = messages[0]!;
+    const pending = messages[1]!;
+    const pendingId = pending._id as Id<"messages">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: pending.order,
+      stepOrder: pending.stepOrder,
+      format: "UIMessageChunk",
+    });
+    let cursor = 0;
+    const write = async (parts: unknown[]) => {
+      await t.mutation(api.streams.addDelta, {
+        streamId,
+        start: cursor,
+        end: cursor + parts.length,
+        parts,
+      });
+      cursor += parts.length;
+    };
+    const timeOut = async (ms = PAST_TIMEOUT) => {
+      vi.advanceTimersByTime(ms);
+      await t.finishInProgressScheduledFunctions();
+    };
+    const stream = () =>
+      t.run((ctx) => ctx.db.get("streamingMessages", streamId));
+    const message = (id: Id<"messages"> = pendingId) =>
+      t.run((ctx) => ctx.db.get("messages", id));
+    const replies = async () => {
+      const { page } = await t.query(api.messages.listMessagesByThreadId, {
+        threadId,
+        order: "asc",
+      });
+      return page
+        .filter((m) => m._id !== prompt._id)
+        .map((m) => ({ status: m.status, text: m.text ?? "" }));
+    };
+    return {
+      t,
+      threadId,
+      prompt,
+      pending,
+      pendingId,
+      streamId,
+      write,
+      timeOut,
+      stream,
+      message,
+      replies,
+    };
+  }
+
+  const text = (delta: string) => [
+    { type: "start" },
+    { type: "start-step" },
+    { type: "text-start", id: "t" },
+    { type: "text-delta", id: "t", delta },
+  ];
+
+  test("the timeout fails the pending message with the text it streamed", async () => {
+    vi.useFakeTimers();
+    const g = await deadGeneration();
+    await g.write(text("Hello, "));
+    await g.write([{ type: "text-delta", id: "t", delta: "world" }]);
+
+    await g.timeOut();
+
+    expect(await g.stream()).toMatchObject({
+      state: { kind: "aborted", reason: "timeout" },
+    });
+    expect(await g.message()).toMatchObject({
+      status: "failed",
+      error: TIMED_OUT,
+    });
+    expect(await g.replies()).toEqual([
+      { status: "failed", text: "Hello, world" },
+    ]);
+  });
+
+  test("a death after a saved step fails only the step that was streaming", async () => {
+    vi.useFakeTimers();
+    const g = await deadGeneration();
+    await g.write([
+      { type: "start" },
+      { type: "start-step" },
+      {
+        type: "tool-input-available",
+        toolCallId: "call-1",
+        toolName: "lookup",
+        input: { query: "owls" },
+      },
+      {
+        type: "tool-output-available",
+        toolCallId: "call-1",
+        output: { answer: 42 },
+      },
+      { type: "finish-step" },
+    ]);
+    const { messages: saved } = await g.t.mutation(api.messages.addMessages, {
+      threadId: g.threadId,
+      promptMessageId: g.prompt._id as Id<"messages">,
+      pendingMessageId: g.pendingId,
+      messages: [
+        {
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "call-1",
+                toolName: "lookup",
+                input: { query: "owls" },
+              },
+            ],
+          },
+        },
+        {
+          message: {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "call-1",
+                toolName: "lookup",
+                output: { type: "json", value: { answer: 42 } },
+              },
+            ],
+          },
+        },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    await g.write([
+      { type: "start-step" },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "Owls answer 42" },
+    ]);
+
+    await g.timeOut();
+
+    expect(await g.message(saved[2]!._id as Id<"messages">)).toMatchObject({
+      status: "failed",
+      error: TIMED_OUT,
+    });
+    expect((await g.replies()).map((r) => r.status)).toEqual([
+      "success",
+      "success",
+      "failed",
+    ]);
+    expect((await g.replies()).at(-1)?.text).toBe("Owls answer 42");
+  });
+
+  test.each([
+    { name: "succeeded", result: { status: "success" as const } },
+    {
+      name: "failed",
+      result: { status: "failed" as const, error: "provider error" },
+    },
+  ])("a message that already $name is left alone", async ({ result }) => {
+    vi.useFakeTimers();
+    const g = await deadGeneration();
+    await g.write(text("partial"));
+    await g.t.run((ctx) =>
+      ctx.db.patch("messages", g.pendingId, {
+        message: { role: "assistant", content: "final" },
+      }),
+    );
+    await g.t.mutation(api.messages.finalizeMessage, {
+      messageId: g.pendingId,
+      result,
+    });
+    const before = await g.message();
+
+    await g.timeOut();
+
+    expect((await g.stream())?.state.kind).toBe("aborted");
+    expect(await g.message()).toEqual(before);
+  });
+
+  test.each([
+    { name: "has its own stream", retryStreams: true },
+    { name: "has no stream yet, or never streams", retryStreams: false },
+  ])(
+    "a retry's pending message that $name is not failed by the replaced attempt's timeout",
+    async ({ retryStreams }) => {
+      vi.useFakeTimers();
+      const g = await deadGeneration();
+      await g.write(text("first attempt"));
+      const retryDelay = 60 * 1000;
+      vi.advanceTimersByTime(retryDelay);
+      const { messages } = await g.t.mutation(api.messages.addMessages, {
+        threadId: g.threadId,
+        promptMessageId: g.prompt._id as Id<"messages">,
+        failPendingSteps: true,
+        messages: [
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+      });
+      const retry = messages[0]!;
+      if (retryStreams) {
+        await g.t.mutation(api.streams.create, {
+          threadId: g.threadId,
+          order: retry.order,
+          stepOrder: retry.stepOrder,
+          format: "UIMessageChunk",
+        });
+      }
+
+      await g.timeOut(PAST_TIMEOUT - retryDelay);
+
+      expect((await g.stream())?.state.kind).toBe("aborted");
+      expect(await g.message(retry._id as Id<"messages">)).toMatchObject({
+        status: "pending",
+        message: { role: "assistant", content: [] },
+      });
+      expect(await g.message()).toMatchObject({
+        status: "failed",
+        error: "Restarting",
+      });
+    },
+  );
+
+  test.each([
+    {
+      name: "was deleted",
+      remove: (ctx: MutationCtx, id: Id<"messages">) =>
+        ctx.db.delete("messages", id),
+    },
+    { name: "was never saved", remove: undefined },
+  ])("a stream whose pending message $name only aborts", async ({ remove }) => {
+    vi.useFakeTimers();
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const pendingId = messages[0]!._id as Id<"messages">;
+    if (remove) {
+      await t.run((ctx) => remove(ctx, pendingId));
+    }
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: messages[0]!.order + (remove ? 0 : 1),
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    await t.mutation(api.streams.addDelta, {
+      streamId,
+      start: 0,
+      end: 1,
+      parts: [{ type: "start" }],
+    });
+
+    vi.advanceTimersByTime(PAST_TIMEOUT);
+    await t.finishInProgressScheduledFunctions();
+
+    expect(
+      (await t.run((ctx) => ctx.db.get("streamingMessages", streamId)))?.state,
+    ).toMatchObject({ kind: "aborted", reason: "timeout" });
+    if (!remove) {
+      expect(
+        (await t.run((ctx) => ctx.db.get("messages", pendingId)))?.status,
+      ).toBe("pending");
+    }
+  });
+
+  test("a timeout that fires twice keeps the first failure", async () => {
+    vi.useFakeTimers();
+    const g = await deadGeneration();
+    await g.write(text("once"));
+    await g.timeOut();
+    const failed = await g.message();
+
+    await g.t.run((ctx) => timeoutStreamHandler(ctx, { streamId: g.streamId }));
+
+    expect(failed).toMatchObject({ status: "failed", error: TIMED_OUT });
+    expect(await g.message()).toEqual(failed);
+    expect(await g.replies()).toEqual([{ status: "failed", text: "once" }]);
+  });
+
+  test.each([
+    {
+      name: "past the 1,000 document page size, recovered whole",
+      deltas: 1500,
+      recovered: true,
+    },
+    {
+      name: "over the recovery budget, failed without a partial write",
+      deltas: MAX_MATERIALIZATION_ROWS + 1,
+      recovered: false,
+    },
+  ])(
+    "a long delta log $name",
+    async ({ deltas, recovered }) => {
+      vi.useFakeTimers();
+      const g = await deadGeneration(
+        convexTest({ schema, modules, transactionLimits: true }),
+      );
+      await g.write(text(""));
+      for (let i = 0; i < deltas; i += 4000) {
+        const batch = Math.min(4000, deltas - i);
+        await g.t.run(async (ctx) => {
+          for (let j = 0; j < batch; j++) {
+            await ctx.db.insert("streamDeltas", {
+              streamId: g.streamId,
+              start: 4 + i + j,
+              end: 5 + i + j,
+              parts: [{ type: "text-delta", id: "t", delta: "x" }],
+            });
+          }
+        });
+      }
+
+      await g.timeOut();
+
+      expect((await g.stream())?.state.kind).toBe("aborted");
+      expect(await g.message()).toMatchObject({
+        status: "failed",
+        error: TIMED_OUT,
+      });
+      expect(await g.replies()).toEqual([
+        { status: "failed", text: recovered ? "x".repeat(deltas) : "" },
+      ]);
+    },
+    30_000,
+  );
 });
