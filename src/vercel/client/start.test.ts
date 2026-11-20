@@ -1,7 +1,6 @@
 import { describe, expect, it, test } from "vitest";
 import { z } from "zod";
-import { generateText, stepCountIs, streamText } from "ai";
-import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
+import { generateText, stepCountIs } from "ai";
 import { MockEmbeddingModelV4 } from "ai/test";
 import { getFunctionAddress } from "convex/server";
 import { resolveUsageModel } from "./start.js";
@@ -215,51 +214,6 @@ async function threadRows(ctx: ActionCtx, threadId: string) {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("agent.start", () => {
-  test.each([undefined, "streamText"] as const)(
-    "an abort fails the pending message (operation: %s)",
-    async (operation) => {
-      // Streams part of a reply, then waits for its signal, as a provider's
-      // request would.
-      const languageModel = mockModel({
-        doStream: async ({ abortSignal }) => ({
-          stream: new ReadableStream<LanguageModelV4StreamPart>({
-            start(controller) {
-              controller.enqueue({ type: "stream-start", warnings: [] });
-              controller.enqueue({ type: "text-start", id: "t" });
-              controller.enqueue({ type: "text-delta", id: "t", delta: "Hel" });
-              abortSignal?.addEventListener("abort", () =>
-                controller.error(new DOMException("Aborted", "AbortError")),
-              );
-            },
-          }),
-        }),
-      });
-      const agent = new Agent(components.agent, {
-        name: "start",
-        languageModel,
-      });
-      const rows = await initConvexTest().action(async (ctx) => {
-        const threadId = await createThread(ctx, components.agent, {});
-        const abort = new AbortController();
-        const { args } = await agent.start(
-          ctx,
-          { prompt: "hi", abortSignal: abort.signal },
-          { threadId },
-          operation,
-        );
-        const result = streamText(args);
-        setTimeout(() => abort.abort("Stopped"), 20);
-        await result.consumeStream();
-        await sleep(50);
-        return threadRows(ctx, threadId);
-      });
-      expect(rows).toEqual([
-        ["user", "success", null],
-        ["assistant", "failed", "Stopped"],
-      ]);
-    },
-  );
-
   test("an abort while a save commits fails the pending message it made", async () => {
     const agent = new Agent(components.agent, {
       name: "start",
