@@ -366,7 +366,7 @@ export const abort = mutation({
   handler: abortById,
 });
 
-async function abortById(
+export async function abortById(
   ctx: MutationCtx,
   args: {
     streamId: Id<"streamingMessages">;

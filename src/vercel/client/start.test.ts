@@ -1,6 +1,7 @@
 import { describe, expect, it, test } from "vitest";
 import { z } from "zod";
-import { stepCountIs } from "ai";
+import { generateText, stepCountIs, streamText } from "ai";
+import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
 import { MockEmbeddingModelV4 } from "ai/test";
 import { getFunctionAddress } from "convex/server";
 import { resolveUsageModel } from "./start.js";
@@ -201,4 +202,120 @@ describe("a generation takes its userId from the thread it saves to", () => {
       rawRequestResponse: ["u1", "u1"],
     });
   });
+});
+
+async function threadRows(ctx: ActionCtx, threadId: string) {
+  const { page } = await ctx.runQuery(
+    components.agent.messages.listMessagesByThreadId,
+    { threadId, order: "asc" },
+  );
+  return page.map((m) => [m.message?.role, m.status, m.error ?? null]);
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("agent.start", () => {
+  test.each([undefined, "streamText"] as const)(
+    "an abort fails the pending message (operation: %s)",
+    async (operation) => {
+      // Streams part of a reply, then waits for its signal, as a provider's
+      // request would.
+      const languageModel = mockModel({
+        doStream: async ({ abortSignal }) => ({
+          stream: new ReadableStream<LanguageModelV4StreamPart>({
+            start(controller) {
+              controller.enqueue({ type: "stream-start", warnings: [] });
+              controller.enqueue({ type: "text-start", id: "t" });
+              controller.enqueue({ type: "text-delta", id: "t", delta: "Hel" });
+              abortSignal?.addEventListener("abort", () =>
+                controller.error(new DOMException("Aborted", "AbortError")),
+              );
+            },
+          }),
+        }),
+      });
+      const agent = new Agent(components.agent, {
+        name: "start",
+        languageModel,
+      });
+      const rows = await initConvexTest().action(async (ctx) => {
+        const threadId = await createThread(ctx, components.agent, {});
+        const abort = new AbortController();
+        const { args } = await agent.start(
+          ctx,
+          { prompt: "hi", abortSignal: abort.signal },
+          { threadId },
+          operation,
+        );
+        const result = streamText(args);
+        setTimeout(() => abort.abort("Stopped"), 20);
+        await result.consumeStream();
+        await sleep(50);
+        return threadRows(ctx, threadId);
+      });
+      expect(rows).toEqual([
+        ["user", "success", null],
+        ["assistant", "failed", "Stopped"],
+      ]);
+    },
+  );
+
+  test("an abort while a save commits fails the pending message it made", async () => {
+    const agent = new Agent(components.agent, {
+      name: "start",
+      languageModel: mockModel({ content: [{ type: "text", text: "done" }] }),
+    });
+    const rows = await initConvexTest().action(async (ctx) => {
+      const threadId = await createThread(ctx, components.agent, {});
+      const abort = new AbortController();
+      const intercepted: ActionCtx = {
+        ...ctx,
+        runMutation: (async (reference, mutationArgs) => {
+          const result = await ctx.runMutation(reference, mutationArgs);
+          // The step save has committed; its reply hasn't arrived.
+          if (
+            (mutationArgs as { pendingMessageId?: string }).pendingMessageId
+          ) {
+            abort.abort("Stopped");
+            await sleep(50);
+          }
+          return result;
+        }) as ActionCtx["runMutation"],
+      };
+      const { args, save } = await agent.start(
+        intercepted,
+        { prompt: "hi", abortSignal: abort.signal },
+        { threadId },
+      );
+      const result = await generateText(args);
+      await save({ step: result.steps[0] }, true);
+      await sleep(50);
+      return threadRows(ctx, threadId);
+    });
+    expect(rows).toEqual([
+      ["user", "success", null],
+      ["assistant", "success", null],
+      ["assistant", "failed", "Stopped"],
+    ]);
+  });
+});
+
+test("a missing model throws before the prompt is saved", async () => {
+  const agent = new Agent(components.agent, {
+    name: "no-model",
+    // Required by the type, but can be missing at runtime.
+    languageModel: undefined as never,
+  });
+  const { error, rows } = await initConvexTest().action(async (ctx) => {
+    const threadId = await createThread(ctx, components.agent, {});
+    const error = await agent
+      .generateText(ctx, { threadId }, { prompt: "hi" })
+      .then(
+        () => null,
+        (e: Error) => e.message,
+      );
+    return { error, rows: await threadRows(ctx, threadId) };
+  });
+  expect(error).toContain("model is required");
+  expect(rows).toEqual([]);
 });

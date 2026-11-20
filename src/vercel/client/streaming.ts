@@ -228,20 +228,19 @@ export function mergeTransforms<TOOLS extends ToolSet>(
     | StreamTextTransform<TOOLS>
     | Array<StreamTextTransform<TOOLS>>
     | undefined,
-) {
-  if (!options) {
-    return existing;
-  }
-  const chunking =
-    typeof options === "boolean"
-      ? DEFAULT_STREAMING_OPTIONS.chunking
-      : options.chunking;
+): Array<StreamTextTransform<TOOLS>> {
   const transforms = Array.isArray(existing)
-    ? existing
+    ? [...existing]
     : existing
       ? [existing]
       : [];
-  transforms.push(smoothStream({ delayInMs: null, chunking }));
+  if (options) {
+    const chunking =
+      typeof options === "boolean"
+        ? DEFAULT_STREAMING_OPTIONS.chunking
+        : options.chunking;
+    transforms.push(smoothStream({ delayInMs: null, chunking }));
+  }
   return transforms;
 }
 
@@ -276,8 +275,7 @@ export class DeltaStreamer<T> {
   public abortController: AbortController;
   /**
    * When true, external code finishes the stream row (atomically with the
-   * message save, issue #181) and `consumeStream` must not. Decided once, at
-   * construction.
+   * message save, issue #181) and `consumeStream` must not.
    */
   #finishHandledExternally: boolean;
   /**
@@ -286,6 +284,9 @@ export class DeltaStreamer<T> {
    * non-streaming row.
    */
   #stoppedAccepting: boolean = false;
+  #stepEnds = 0;
+  #sourceDone = false;
+  #progress: (() => void) | undefined;
 
   constructor(
     public readonly component: AgentComponent,
@@ -325,6 +326,9 @@ export class DeltaStreamer<T> {
     this.#keepAliveStopped = !("runAction" in ctx);
     this.#nextParts = [];
     this.abortController = new AbortController();
+    this.abortController.signal.addEventListener("abort", () =>
+      this.#progress?.(),
+    );
     if (config.abortSignal) {
       const abortFromSignal = () => {
         void this.#abort("abortSignal").catch(() => {
@@ -451,6 +455,10 @@ export class DeltaStreamer<T> {
     try {
       for await (const chunk of stream) {
         await this.addParts([chunk]);
+        if ((chunk as { type?: string }).type === "finish-step") {
+          this.#stepEnds++;
+          this.#progress?.();
+        }
       }
     } catch (error) {
       // A provider can throw while responding to an abort. Join the durable
@@ -458,6 +466,9 @@ export class DeltaStreamer<T> {
       // preserving the provider error for the caller.
       await this.#abort(errorToString(error)).catch(() => {});
       throw error;
+    } finally {
+      this.#sourceDone = true;
+      this.#progress?.();
     }
     this.#stopKeepAlive();
     // Abort cleanup owns the terminal component transition, so consumeStream
@@ -484,6 +495,25 @@ export class DeltaStreamer<T> {
     if (!this.#finishHandledExternally) {
       await this.finish();
     }
+  }
+
+  /**
+   * Waits until `stepEnds` step ends have come through the source, writes
+   * every part before them, and stops taking parts, for the caller to finish
+   * the stream with its message save (issue #181). Resolves undefined if the
+   * stream was aborted or never created.
+   */
+  public async handOver(stepEnds: number): Promise<string | undefined> {
+    const signal = this.abortController.signal;
+    while (this.#stepEnds < stepEnds && !this.#sourceDone && !signal.aborted) {
+      await new Promise<void>((resolve) => (this.#progress = resolve));
+    }
+    this.#progress = undefined;
+    this.#finishHandledExternally = true;
+    await this.flushAndStopAccepting();
+    if (signal.aborted) return undefined;
+    await this.#creatingStreamIdPromise?.catch(() => {});
+    return this.streamId;
   }
 
   /**
