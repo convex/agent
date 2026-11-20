@@ -381,8 +381,6 @@ export async function finishHandler(
   });
 }
 
-// TODO: use this heartbeat while streaming, every 30 seconds or so,
-// then reduce the timeout to 60 seconds.
 export const heartbeat = mutation({
   args: { streamId: v.id("streamingMessages") },
   returns: v.null(),
