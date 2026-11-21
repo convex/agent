@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.12
+
+### Patch Changes
+
+- 4235fc6: A save that fills a pending message continues in that message's turn,
+  so a stopped generation's recovered steps no longer land after a newer
+  message.
+- f55b684: Store a message's text only in `text` when that makes the row smaller
+  (one-way: older component versions reject these rows); responses no longer
+  save empty `sources` or `warnings`.
+- 3d66dd1: `usageHandler` and `rawRequestResponseHandler` get the generation's
+  `promptMessageId`.
+
 ## 0.7.11
 
 ### Patch Changes
