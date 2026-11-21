@@ -804,6 +804,20 @@ describe("mapping", () => {
       expect(contentTypes(res.messages[1].message)).toEqual(["tool-result"]);
     });
 
+    test("saves no empty sources or warnings", async () => {
+      const res = await serializeResponseMessages(
+        ctx,
+        component,
+        { ...makeStep(step0Messages), warnings: [] },
+        undefined,
+        step0Messages,
+      );
+      for (const message of res.messages) {
+        expect(message).not.toHaveProperty("sources");
+        expect(message).not.toHaveProperty("warnings");
+      }
+    });
+
     test("keeps an interrupted finish reason", async () => {
       const res = await serializeResponseMessages(
         ctx,

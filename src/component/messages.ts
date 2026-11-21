@@ -42,6 +42,7 @@ import {
   vVectorId,
 } from "./vector/tables.js";
 import { changeRefcount } from "./files.js";
+import { leaveOutText, withText } from "../messageText.js";
 import {
   getStreamingMessagesWithMetadata,
   finishHandler,
@@ -56,9 +57,13 @@ import {
 } from "../approvals.js";
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
-  return withDerivedReasoning(
-    omit(message, ["parentMessageId", "stepId", "files"]),
-  );
+  const {
+    parentMessageId: _parentMessageId,
+    stepId: _stepId,
+    files: _files,
+    ...doc
+  } = withText(message);
+  return withDerivedReasoning(doc);
 }
 
 export async function deleteMessage(
@@ -357,6 +362,9 @@ async function addMessagesHandler(
         threadId,
       });
     }
+    const text = hideFromUserIdSearch
+      ? undefined
+      : extractText(message.message);
     const messageDoc = {
       ...rest,
       ...message,
@@ -364,7 +372,8 @@ async function addMessagesHandler(
       parentMessageId: promptMessageId,
       userId,
       tool: isTool(message.message),
-      text: hideFromUserIdSearch ? undefined : extractText(message.message),
+      text,
+      ...leaveOutText(message.message, text),
       status: fail ? "failed" : (message.status ?? "success"),
       error: fail ? error : message.error,
     } satisfies Omit<
@@ -514,8 +523,9 @@ export const finalizeMessage = mutation({
   },
   returns: v.null(),
   handler: async (ctx, { messageId, result }) => {
-    const message = await ctx.db.get("messages", messageId);
-    assert(message, `Message ${messageId} not found`);
+    const stored = await ctx.db.get("messages", messageId);
+    assert(stored, `Message ${messageId} not found`);
+    const message = withText(stored);
     if (message.status !== "pending") {
       console.debug(
         "Trying to finalize a message that's already",
@@ -605,9 +615,9 @@ export const updateMessage = mutation({
     const patch: Partial<Doc<"messages">> = { ...args.patch };
 
     if (args.patch.message !== undefined) {
-      patch.message = args.patch.message;
       patch.tool = isTool(args.patch.message);
       patch.text = extractText(args.patch.message);
+      Object.assign(patch, leaveOutText(args.patch.message, patch.text));
     }
 
     if (args.patch.status === "failed") {
@@ -688,8 +698,9 @@ async function* recentMessages(
     threadId,
     sortOrder: "desc",
   })) {
-    read.push(doc);
-    yield doc;
+    const message = withText(doc);
+    read.push(message);
+    yield message;
     if (read.length === APPROVAL_LOOKUP_MESSAGES) return;
   }
 }
