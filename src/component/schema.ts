@@ -64,6 +64,10 @@ export const schema = defineSchema({
     parentMessageId: v.optional(v.id("messages")),
     stepId: v.optional(v.string()),
     files: v.optional(v.array(v.any())),
+
+    // Set when the message's text parts are stored empty, as `text` holds
+    // their text: the length of each text part's text, or of a string content.
+    textLengths: v.optional(v.array(v.number())),
   })
     // Allows finding successful visible messages in order
     // Also surface pending messages separately to e.g. stream

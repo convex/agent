@@ -267,7 +267,7 @@ export function serializeUsage(usage: LanguageModelUsage): Usage {
 export function serializeWarnings(
   warnings: CallWarning[] | undefined,
 ): MessageWithMetadata["warnings"] {
-  if (!warnings) {
+  if (!warnings?.length) {
     return undefined;
   }
   return warnings.map((warning) => {
@@ -317,6 +317,7 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
   // ref: https://github.com/vercel/ai/blob/main/packages/ai/src/generate-text/to-response-messages.ts#L120
   const hasToolMessage = step.response.messages.at(-1)?.role === "tool";
   const resolvedModel = step.model ?? model;
+  const sources = step.sources.length ? step.sources : undefined;
   const assistantFields = {
     model: resolvedModel ? getModelName(resolvedModel) : undefined,
     provider: resolvedModel ? getProviderName(resolvedModel) : undefined,
@@ -325,9 +326,9 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     warnings: serializeWarnings(step.warnings),
     finishReason: step.finishReason,
     // Only store the sources on one message
-    sources: hasToolMessage ? undefined : step.sources,
+    sources: hasToolMessage ? undefined : sources,
   } satisfies Omit<MessageWithMetadata, "message" | "text" | "fileIds">;
-  const toolFields = { sources: step.sources };
+  const toolFields = { sources };
   const toSerialize = withStepCitations(step, messagesToSerialize);
 
   const messages: MessageWithMetadata[] = await Promise.all(
