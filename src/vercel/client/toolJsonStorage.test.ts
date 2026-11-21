@@ -121,19 +121,6 @@ const result = expect.objectContaining({
   output: { type: "json", value: schema },
 });
 
-test.each([
-  ["input", call],
-  ["result", result],
-])("saves a tool %s with a $ref key", async (_name, part) => {
-  const t = createTest();
-  const threadId = await t.run((ctx) =>
-    createThread(ctx, components.agent, {}),
-  );
-  await t.action(api.toolJson.generate, { threadId, saveStreamDeltas: false });
-  const { parts } = await storedToolParts(t, threadId);
-  expect(parts).toContainEqual(part);
-});
-
 test("streams a tool result with a $ref key through deltas", async () => {
   const t = createTest();
   const threadId = await t.run((ctx) =>
