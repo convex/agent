@@ -101,7 +101,7 @@ export async function streamText<
 > {
   type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
   const { threadId } = options ?? {};
-  const { args, userId, order, stepOrder, promptMessageId, ...call } =
+  const { args, userId, order, stepOrder, promptMessageId, streamId, ...call } =
     await startGeneration<
       StreamingTextArgs<AgentTools, TOOLS, OUTPUT, RUNTIME_CONTEXT>,
       Tools,
@@ -111,7 +111,11 @@ export async function streamText<
       ctx,
       component,
       streamTextArgs,
-      { ...options, endsFromHooks: true },
+      {
+        ...options,
+        endsFromHooks: true,
+        streamsDeltas: Boolean(threadId && options.saveStreamDeltas),
+      },
       "streamText",
     );
 
@@ -145,6 +149,7 @@ export async function streamText<
             materialize: (parts) =>
               materializeUIMessageChunkFiles(ctx, component, parts),
             abortSignal: args.abortSignal,
+            streamId,
           },
           {
             threadId,

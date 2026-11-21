@@ -14,8 +14,9 @@ import {
   type UIMessage,
 } from "../UIMessages.js";
 import {
+  addMessages as addCanonicalMessages,
   listMessages,
-  saveMessages as saveCanonicalMessages,
+  type CreateStream,
   type MessageOrder,
 } from "../../client/messages.js";
 import type {
@@ -118,10 +119,20 @@ export async function saveMessages(
     agentName?: string;
   },
 ): Promise<{ messages: MessageDoc[] }> {
+  const { messages } = await addMessages(ctx, component, args);
+  return { messages };
+}
+
+/** {@link saveMessages}, which can start a stream with its pending message. */
+export async function addMessages(
+  ctx: MutationCtx | ActionCtx,
+  component: AgentComponent,
+  args: Parameters<typeof saveMessages>[2] & { createStream?: CreateStream },
+): Promise<{ messages: MessageDoc[]; streamId?: string }> {
   const serialized = await Promise.all(
     args.messages.map((message) => serializeMessage(ctx, component, message)),
   );
-  return saveCanonicalMessages(ctx, component, {
+  return addCanonicalMessages(ctx, component, {
     threadId: args.threadId,
     userId: args.userId ?? undefined,
     agentName: args.agentName,
@@ -140,6 +151,7 @@ export async function saveMessages(
       };
     }),
     failPendingSteps: args.failPendingSteps ?? false,
+    createStream: args.createStream,
   });
 }
 
