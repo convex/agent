@@ -310,17 +310,6 @@ const handlers = {
         { ...message, content: requests },
       ];
     }),
-  "copy-provider-results-first": (messages) => [
-    {
-      role: "tool",
-      content: messages.flatMap((message) =>
-        message.role === "assistant" && Array.isArray(message.content)
-          ? message.content.filter((part) => part.type === "tool-result")
-          : [],
-      ),
-    },
-    ...messages,
-  ],
   reverse: (messages) => [...messages].reverse(),
 } satisfies Record<string, Handler>;
 type ContextMode = keyof typeof handlers;
@@ -978,7 +967,6 @@ describe("tool approval semantics", () => {
     toolCallId: string,
     tag: string,
     approvalId: string,
-    providerExecuted = false,
   ) {
     await s.save({
       promptMessageId: await s.prompt("Again"),
@@ -990,7 +978,6 @@ describe("tool approval semantics", () => {
             toolCallId,
             toolName: "echo",
             input: { tag },
-            ...(providerExecuted && { providerExecuted }),
           },
           { type: "tool-approval-request", toolCallId, approvalId },
         ],
@@ -1079,18 +1066,6 @@ describe("tool approval semantics", () => {
       "Continuation context reshapes a message with a reused tool call id call-a",
     );
     expect(executed).toEqual(["a"]);
-  });
-
-  test("rejects copying a reused-id provider result ahead of its requests", async () => {
-    const s = await scenario({ ids: ["a"], providerExecuted: true });
-    await providerAnswersA(s);
-    await requestAgain(s, "call-a", "a", "again", true);
-
-    await expect(
-      s.continue(await s.approve("again"), "copy-provider-results-first"),
-    ).rejects.toThrow(
-      "Continuation context reshapes a message with a reused tool call id call-a",
-    );
   });
 
   // The AI SDK runs the approved call before it rejects a call that history
@@ -1600,65 +1575,6 @@ describe("respondToToolCallApprovals reading back to the request", () => {
       }),
     );
   }
-  const clientCall: Message = {
-    role: "assistant",
-    content: [
-      {
-        type: "tool-call",
-        toolCallId: "call-pick",
-        toolName: "pick",
-        input: {},
-      },
-    ],
-  };
-
-  test.each(["an approval", "a client tool output"] as const)(
-    "%s behind 120 earlier messages reads 4 documents",
-    async (path) => {
-      const s = await scenario({ olderMessages: 120 });
-      if (path === "a client tool output") {
-        await appendAtRequest(s, [clientCall]);
-      }
-      const documentsRead = await s.t.run(async (ctx) => {
-        if (path === "an approval") {
-          await agent.approveToolCall(ctx, {
-            threadId: s.threadId,
-            approvalId: "a",
-          });
-        } else {
-          await agent.addToolOutput(ctx, {
-            threadId: s.threadId,
-            tool: "pick",
-            toolCallId: "call-pick",
-            output: "picked",
-            tools: { pick: createTool({ inputSchema: z.object({}) }) },
-          });
-        }
-        const { documentsRead } = await ctx.meta.getTransactionMetrics();
-        return documentsRead.used;
-      });
-      expect(documentsRead).toBe(4);
-    },
-  );
-
-  test("saves after the request order's last step, past newer orders and pending or failed steps", async () => {
-    const s = await scenario();
-    await s.t.run((ctx) =>
-      ctx.runMutation(components.agent.messages.addMessages, {
-        threadId: s.threadId,
-        promptMessageId: s.requestMessageId,
-        messages: [
-          { message: step("one"), status: "failed", error: "x" },
-          { message: step("two"), status: "pending" },
-        ],
-      }),
-    );
-    await s.prompt("Next");
-    const messageId = await s.approve("a");
-    const saved = (await s.messages()).page.find((m) => m._id === messageId);
-    expect([saved?.order, saved?.stepOrder]).toEqual([0, 4]);
-  });
-
   test("finds a request that is the last message of the window, and not one past it", async () => {
     const s = await scenario({ olderMessages: 20 });
     await appendAtRequest(

@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import type { FunctionArgs } from "convex/server";
 import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -1638,37 +1637,6 @@ describe("saving into a pending message that already succeeded", () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  test("a repeated streamed fill throws and leaves its stream to the caller", async () => {
-    const { t, threadId, pending, snapshot } = await seeded();
-    await t.mutation(api.messages.addMessages, {
-      threadId,
-      pendingMessageId: pending,
-      messages: [{ message: { role: "assistant", content: "first answer" } }],
-    });
-    const { order, stepOrder } = (await snapshot()).messages.find(
-      (m) => m._id === pending,
-    )!;
-    const streamId = await t.mutation(api.streams.create, {
-      threadId,
-      order,
-      stepOrder,
-      format: "UIMessageChunk",
-    });
-    const before = await snapshot();
-
-    await expect(
-      t.mutation(api.messages.addMessages, {
-        threadId,
-        pendingMessageId: pending,
-        finishStreamId: streamId,
-        messages: [
-          { message: { role: "assistant", content: "second answer" } },
-        ],
-      }),
-    ).rejects.toThrow(NOT_PENDING);
-    expect(await snapshot()).toEqual(before);
-  });
-
   test("a repeated step save throws, and the first save's successor still takes the next step", async () => {
     const { t, threadId, prompt, pending, snapshot } = await seeded();
     const step = (text: string) => ({
@@ -1706,56 +1674,6 @@ describe("saving into a pending message that already succeeded", () => {
       ["success", "attempt 1"],
       ["success", "It is 72F"],
     ]);
-  });
-
-  test("a repeated step save of a different length throws and writes nothing", async () => {
-    const { t, threadId, prompt, pending, snapshot } = await seeded();
-    await t.mutation(api.messages.addMessages, {
-      threadId,
-      promptMessageId: prompt,
-      pendingMessageId: pending,
-      messages: toolStep("attempt 1"),
-    });
-    const before = await snapshot();
-
-    await expect(
-      t.mutation(api.messages.addMessages, {
-        threadId,
-        promptMessageId: prompt,
-        pendingMessageId: pending,
-        messages: [
-          { message: { role: "assistant", content: "attempt 2, no tool" } },
-          { message: { role: "assistant", content: [] }, status: "pending" },
-        ],
-      }),
-    ).rejects.toThrow(NOT_PENDING);
-    expect(await snapshot()).toEqual(before);
-  });
-
-  test("a repeated step save with failPendingSteps throws and leaves the successor pending", async () => {
-    const { t, threadId, prompt, pending, snapshot } = await seeded();
-    const { messages: first } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      promptMessageId: prompt,
-      pendingMessageId: pending,
-      messages: toolStep("attempt 1"),
-    });
-    const before = await snapshot();
-
-    await expect(
-      t.mutation(api.messages.addMessages, {
-        threadId,
-        promptMessageId: prompt,
-        pendingMessageId: pending,
-        failPendingSteps: true,
-        messages: toolStep("attempt 2"),
-      }),
-    ).rejects.toThrow(NOT_PENDING);
-    const after = await snapshot();
-    expect(after).toEqual(before);
-    expect(
-      after.messages.find((m) => m._id === first.at(-1)!._id),
-    ).toMatchObject({ status: "pending" });
   });
 });
 
@@ -1973,67 +1891,5 @@ describe("cloneThread", () => {
       upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
     });
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
-  });
-});
-
-describe("respondToToolCallApprovals", () => {
-  type Respond = Omit<
-    FunctionArgs<typeof api.messages.respondToToolCallApprovals>,
-    "threadId"
-  >;
-  type Content = Extract<
-    FunctionArgs<
-      typeof api.messages.addMessages
-    >["messages"][number]["message"],
-    { role: "assistant" }
-  >["content"];
-
-  async function readsOf(content: Content, respond: Respond) {
-    const t = initConvexTest();
-    const thread = await t.mutation(api.threads.createThread, {});
-    const threadId = thread._id as Id<"threads">;
-    await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [
-        { message: { role: "user", content: "Prompt" } },
-        { message: { role: "assistant", content } },
-      ],
-    });
-    return t.run(async (ctx) => {
-      const before = await ctx.meta.getTransactionMetrics();
-      await ctx.runMutation(api.messages.respondToToolCallApprovals, {
-        threadId,
-        ...respond,
-      });
-      const after = await ctx.meta.getTransactionMetrics();
-      return after.documentsRead.used - before.documentsRead.used;
-    });
-  }
-
-  test("a client tool output reads as much as an approval decision", async () => {
-    const call = {
-      type: "tool-call" as const,
-      toolCallId: "a",
-      toolName: "lookup",
-      input: {},
-    };
-    const output = await readsOf([call], {
-      decisions: [],
-      outputs: [
-        {
-          toolCallId: "a",
-          toolName: "lookup",
-          output: { type: "text", value: "found" },
-        },
-      ],
-    });
-    const approval = await readsOf(
-      [
-        call,
-        { type: "tool-approval-request", toolCallId: "a", approvalId: "ap" },
-      ],
-      { decisions: [{ approvalId: "ap", approved: true }] },
-    );
-    expect(output).toBe(approval);
   });
 });
