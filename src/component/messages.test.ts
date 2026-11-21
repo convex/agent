@@ -1677,6 +1677,96 @@ describe("saving into a pending message that already succeeded", () => {
   });
 });
 
+test("a stopped generation's recovered steps stay in its turn after a newer message", async () => {
+  const t = initConvexTest();
+  const thread = await t.mutation(api.threads.createThread, {});
+  const threadId = thread._id as Id<"threads">;
+  const { messages } = await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [
+      { message: { role: "user", content: "weather?" } },
+      { message: { role: "assistant", content: [] }, status: "pending" },
+    ],
+  });
+  const pending = messages[1];
+  const streamId = await t.mutation(api.streams.create, {
+    threadId,
+    order: pending.order,
+    stepOrder: pending.stepOrder,
+    format: "UIMessageChunk",
+  });
+  await t.mutation(api.streams.addDelta, {
+    streamId,
+    start: 0,
+    end: 1,
+    parts: [
+      { type: "start-step" },
+      {
+        type: "tool-input-available",
+        toolCallId: "c",
+        toolName: "lookup",
+        input: {},
+      },
+      { type: "tool-output-available", toolCallId: "c", output: "72F" },
+      { type: "finish-step" },
+      { type: "start-step" },
+      { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "It is 72F" },
+    ],
+  });
+  await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [{ message: { role: "user", content: "thanks" } }],
+  });
+  await t.mutation(api.messages.finalizeMessage, {
+    messageId: pending._id as Id<"messages">,
+    result: { status: "failed", error: "stopped" },
+  });
+  const { page } = await t.query(api.messages.listMessagesByThreadId, {
+    threadId,
+    order: "asc",
+  });
+  expect(page.map((m) => [m.order, m.message?.role])).toEqual([
+    [0, "user"],
+    [0, "assistant"],
+    [0, "tool"],
+    [0, "assistant"],
+    [1, "user"],
+  ]);
+});
+
+test("a user message saved after filling an older pending message starts a new turn", async () => {
+  const t = initConvexTest();
+  const thread = await t.mutation(api.threads.createThread, {});
+  const threadId = thread._id as Id<"threads">;
+  const { messages } = await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [
+      { message: { role: "user", content: "first" } },
+      { message: { role: "assistant", content: [] }, status: "pending" },
+      { message: { role: "user", content: "second" } },
+    ],
+  });
+  await t.mutation(api.messages.addMessages, {
+    threadId,
+    pendingMessageId: messages[1]._id as Id<"messages">,
+    messages: [
+      { message: { role: "assistant", content: "answer" } },
+      { message: { role: "user", content: "third" } },
+    ],
+  });
+  const { page } = await t.query(api.messages.listMessagesByThreadId, {
+    threadId,
+    order: "asc",
+  });
+  expect(page.map((m) => [m.order, m.stepOrder, m.text])).toEqual([
+    [0, 0, "first"],
+    [0, 1, "answer"],
+    [1, 0, "second"],
+    [2, 0, "third"],
+  ]);
+});
+
 describe("deleting a message aborts generation writing to it (issue #300)", () => {
   test("a stream at the deleted order is aborted", async () => {
     const t = initConvexTest();

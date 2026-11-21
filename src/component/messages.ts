@@ -305,6 +305,7 @@ async function addMessagesHandler(
     );
   }
   let order, stepOrder;
+  let pendingMessage: Doc<"messages"> | null = null;
   let fail = false;
   let error: string | undefined;
   const startsAtNextOrder = requestedOrder === "next";
@@ -333,6 +334,14 @@ async function addMessagesHandler(
       prompt?.lastStepOrder ??
       (await getMaxMessage(ctx, threadId, order))?.stepOrder ??
       promptMessage.stepOrder;
+  } else if (pendingMessageId) {
+    // What fills a pending message stays in its turn.
+    pendingMessage = await ctx.db.get("messages", pendingMessageId);
+    assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
+    order = pendingMessage.order;
+    stepOrder =
+      (await getMaxMessage(ctx, threadId, order))?.stepOrder ??
+      pendingMessage.stepOrder;
   } else {
     const maxMessage = await getMaxMessage(ctx, threadId);
     order = maxMessage?.order ?? -1;
@@ -383,7 +392,7 @@ async function addMessagesHandler(
     // If there is a pending message, we replace that one with the first message
     // and subsequent ones will follow the regular order/subOrder advancement.
     if (i === 0 && pendingMessageId) {
-      const pendingMessage = await ctx.db.get("messages", pendingMessageId);
+      pendingMessage ??= await ctx.db.get("messages", pendingMessageId);
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
       if (pendingMessage.status === "success") {
         throw new ConvexError(
@@ -418,7 +427,8 @@ async function addMessagesHandler(
     } else if (message.message.role === "user") {
       if (
         (explicitOrder !== undefined && order === explicitOrder) ||
-        (promptMessage && promptMessage.order === order)
+        (promptMessage && promptMessage.order === order) ||
+        (!promptMessageId && pendingMessage?.order === order)
       ) {
         // Avoid colliding with a later order when saving from an older one.
         const maxMessage = await getMaxMessage(ctx, threadId);
