@@ -208,7 +208,7 @@ import { tool, stepCountIs } from "ai";
 import { convexGateway } from "@convex-dev/ai-sdk-provider";
 import { z } from "zod/v3";
 import { Agent, createTool, type Config } from "@convex-dev/agent";
-import { components } from "./_generated/api";
+import { components, internal } from "./_generated/api";
 
 const sharedDefaults = {
   // The language model to use for the agent.
@@ -233,6 +233,8 @@ const sharedDefaults = {
     const { request, response, agentName, threadId, userId } = args;
     // ... log, save request/response to your database, etc.
   },
+  // An internal mutation run after each save of a thread's messages. See https://docs.convex.dev/agents/messages
+  onSaveMessages: internal.myModule.onSaveMessages,
   // Used for limiting the number of retries when a tool call fails. Default: 3.
   callSettings: { maxRetries: 3, temperature: 1.0 },
 } satisfies Config;

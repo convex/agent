@@ -78,6 +78,7 @@ import {
 } from "../validators.js";
 import {
   listMessages,
+  onSaveMessagesHandle,
   saveMessages,
   type SaveMessageArgs,
   type SaveMessagesArgs,
@@ -157,6 +158,10 @@ export {
   type ThreadDoc,
   type Usage,
 } from "../validators.js";
+export {
+  vOnSaveMessagesArgs,
+  type OnSaveMessagesArgs,
+} from "../onSaveMessagesArgs.js";
 export { createTool, type ToolCtx } from "./client/createTool.js";
 export {
   definePlaygroundAPI,
@@ -912,6 +917,9 @@ export class Agent<
       ...rest,
       agentName: this.options.name,
       embeddings,
+      onSaveMessagesHandle:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1134,6 +1142,9 @@ export class Agent<
         threadId: messages[0].threadId,
         userId: messages[0].userId,
         embeddingModel,
+        onSaveMessagesHandle:
+          this.options.onSaveMessages &&
+          (await onSaveMessagesHandle(this.options.onSaveMessages)),
       },
       messages,
     );
@@ -1217,6 +1228,9 @@ export class Agent<
       threadId: args.threadId,
       agentName: this.options.name,
       decisions: args.decisions,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1292,6 +1306,9 @@ export class Agent<
                   ),
         },
       ],
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1345,6 +1362,9 @@ export class Agent<
       { userId: args.userId, threadId: args.threadId },
       messages.map((m) => m.message),
     );
+    const onSaveMessages =
+      this.options.onSaveMessages &&
+      (await onSaveMessagesHandle(this.options.onSaveMessages));
     return sendToolJson(messages, encodeToolJsonInMessages, (messages) =>
       ctx.runMutation(this.component.messages.addMessages, {
         userId: args.userId,
@@ -1354,6 +1374,7 @@ export class Agent<
         messages,
         embeddings,
         failPendingSteps: false,
+        onSaveMessages,
       }),
     );
   }
@@ -1406,6 +1427,9 @@ export class Agent<
       messages,
       embeddings,
       agentName: this.options.name,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1427,6 +1451,9 @@ export class Agent<
     await runMutation(ctx, this.component.messages.finalizeMessage, {
       messageId: args.messageId,
       result: args.result,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1473,6 +1500,9 @@ export class Agent<
       this.component,
       args.patch.message,
     );
+    const onSaveMessages =
+      this.options.onSaveMessages &&
+      (await onSaveMessagesHandle(this.options.onSaveMessages));
     await sendToolJson([{ message }], encodeToolJsonInMessages, ([encoded]) =>
       runMutation(ctx, this.component.messages.updateMessage, {
         messageId: args.messageId,
@@ -1486,6 +1516,7 @@ export class Agent<
           reasoning: args.patch.reasoning,
           reasoningDetails: args.patch.reasoningDetails,
         },
+        onSaveMessages,
       }),
     );
   }
@@ -1500,7 +1531,12 @@ export class Agent<
     ctx: MutationCtx | ActionCtx,
     args: { messageIds: string[] },
   ): Promise<void> {
-    await ctx.runMutation(this.component.messages.deleteByIds, args);
+    await ctx.runMutation(this.component.messages.deleteByIds, {
+      messageIds: args.messageIds,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
+    });
   }
 
   /**
@@ -1515,6 +1551,9 @@ export class Agent<
   ): Promise<void> {
     await ctx.runMutation(this.component.messages.deleteByIds, {
       messageIds: [args.messageId],
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1571,6 +1610,9 @@ export class Agent<
       startStepOrder: args.startStepOrder,
       endOrder: args.endOrder,
       endStepOrder: args.endStepOrder,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1588,6 +1630,9 @@ export class Agent<
     await ctx.runMutation(this.component.threads.deleteAllForThreadIdAsync, {
       threadId: args.threadId,
       limit: args.pageSize,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 
@@ -1605,6 +1650,9 @@ export class Agent<
     await ctx.runAction(this.component.threads.deleteAllForThreadIdSync, {
       threadId: args.threadId,
       limit: args.pageSize,
+      onSaveMessages:
+        this.options.onSaveMessages &&
+        (await onSaveMessagesHandle(this.options.onSaveMessages)),
     });
   }
 

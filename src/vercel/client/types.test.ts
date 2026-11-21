@@ -1,12 +1,22 @@
 import type { LanguageModelV3, LanguageModelV4 } from "@ai-sdk/provider";
+import type { FunctionReference } from "convex/server";
 import { expectTypeOf, test } from "vitest";
-import type { Agent } from "../index.js";
+import type { Agent, OnSaveMessagesArgs } from "../index.js";
 import type { startGeneration } from "./start.js";
 import type { AgentPrompt, Config } from "./types.js";
 
 expectTypeOf<{ languageModel: string }>().toExtend<Config>();
 expectTypeOf<{ languageModel: LanguageModelV4 }>().toExtend<Config>();
 expectTypeOf<{ languageModel: LanguageModelV3 }>().not.toExtend<Config>();
+
+type OnSave = Config["onSaveMessages"];
+type Hook<Visibility extends "public" | "internal"> = FunctionReference<
+  "mutation",
+  Visibility,
+  OnSaveMessagesArgs
+>;
+expectTypeOf<Hook<"internal">>().toExtend<OnSave>();
+expectTypeOf<Hook<"public">>().not.toExtend<OnSave>();
 
 expectTypeOf<{ model: string }>().toExtend<AgentPrompt>();
 expectTypeOf<{ model: LanguageModelV4 }>().toExtend<AgentPrompt>();

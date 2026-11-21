@@ -27,6 +27,7 @@ import type {
 } from "ai";
 
 import type {
+  FunctionReference_future,
   GenericActionCtx,
   GenericDataModel,
   WithoutSystemFields,
@@ -38,6 +39,7 @@ import type {
   StreamMessage,
   ThreadDoc,
 } from "../../validators.js";
+import type { OnSaveMessagesArgs } from "../../onSaveMessagesArgs.js";
 import type { StreamingOptions } from "./streaming.js";
 import type { ActionCtx } from "../../client/types.js";
 
@@ -171,6 +173,24 @@ export type Config = {
    * log the raw request body or response headers to a table, or logs.
    */
   rawRequestResponseHandler?: RawRequestResponseHandler;
+  /**
+   * An internal mutation to run after each save this Agent makes to a
+   * thread's messages: generations, saves, approvals, updates, embeddings
+   * and deletions. Use `vOnSaveMessagesArgs` as its args. A report is
+   * atomic with its save: if the save commits, its report is scheduled; if
+   * the report can't be scheduled, the save doesn't commit, and fails like
+   * any other failure of that save. The hook runs later, in its own
+   * transaction per thread; if it throws, the error is logged and the report
+   * dropped. If its function is gone, the Agent saves as if it had no hook.
+   * Reports can arrive out of order: read messages by id for their current
+   * state. Writes made without this Agent, such as the standalone
+   * `saveMessage` or calls to the component, aren't reported.
+   */
+  onSaveMessages?: FunctionReference_future<
+    "mutation",
+    "internal",
+    OnSaveMessagesArgs
+  >;
   /**
    * @deprecated Reach out if you use this. Otherwise will be removed soon.
    * Default provider options to pass for the LLM calls.

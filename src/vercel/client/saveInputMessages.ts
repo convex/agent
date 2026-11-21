@@ -28,6 +28,7 @@ export async function saveInputMessages(
     userId: string | undefined;
     threadId: string;
     agentName?: string;
+    onSaveMessagesHandle?: string;
     storageOptions?: {
       saveMessages?: "all" | "promptAndOutput";
     };
@@ -93,6 +94,7 @@ export async function saveInputMessages(
     failPendingSteps: !!args.promptMessageId,
     promptMessageId: args.promptMessageId,
     embeddings,
+    onSaveMessagesHandle: args.onSaveMessagesHandle,
   });
   return {
     promptMessageId: toSave.length
