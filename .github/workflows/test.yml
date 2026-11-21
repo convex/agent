@@ -26,16 +26,36 @@ jobs:
           persist-credentials: false
 
       - name: Node setup
+        id: node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           cache-dependency-path: package-lock.json
           node-version: "24.22.1"
           cache: "npm"
 
-      - name: Install and build
-        run: |
-          npm ci
-          npm run build
+      - name: Restore node_modules
+        id: node-modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules
+          key:
+            node-modules-${{ runner.os }}-${{ runner.arch }}-node-${{
+            steps.node.outputs.node-version }}-${{ hashFiles('package.json',
+            'package-lock.json', 'playground/package.json') }}
+
+      - name: Install
+        if: steps.node-modules.outputs.cache-hit != 'true'
+        run: npm ci
+
+      - name: Save node_modules
+        if: steps.node-modules.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: node_modules
+          key: ${{ steps.node-modules.outputs.cache-primary-key }}
+
+      - name: Build
+        run: npm run build
       - name: Validate release notes when the proposed merge changes the version
         env:
           BASE_SHA:
