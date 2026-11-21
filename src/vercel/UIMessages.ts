@@ -275,7 +275,6 @@ function groupAssistantMessages<METADATA = unknown>(
   const groups: Group<METADATA>[] = [];
 
   let currentAssistantGroup: (MessageDoc & ExtraFields<METADATA>)[] = [];
-  let currentOrder: number | undefined;
 
   for (const message of messages) {
     const coreMessage = message.message && toModelMessage(message.message);
@@ -289,7 +288,6 @@ function groupAssistantMessages<METADATA = unknown>(
           messages: currentAssistantGroup,
         });
         currentAssistantGroup = [];
-        currentOrder = undefined;
       }
       // Add singleton group
       groups.push({
@@ -299,18 +297,15 @@ function groupAssistantMessages<METADATA = unknown>(
     } else {
       // Assistant or tool message
 
-      // Start new group if order changes or this is the first assistant/tool message
-      if (currentOrder !== undefined && message.order !== currentOrder) {
-        if (currentAssistantGroup.length > 0) {
-          groups.push({
-            role: "assistant",
-            messages: currentAssistantGroup,
-          });
-          currentAssistantGroup = [];
-        }
+      const previous = currentAssistantGroup.at(-1);
+      if (previous && !continuesReply(previous, message)) {
+        groups.push({
+          role: "assistant",
+          messages: currentAssistantGroup,
+        });
+        currentAssistantGroup = [];
       }
 
-      currentOrder = message.order;
       currentAssistantGroup.push(message);
 
       // End group if this is an assistant message without tool calls
@@ -320,7 +315,6 @@ function groupAssistantMessages<METADATA = unknown>(
           messages: currentAssistantGroup,
         });
         currentAssistantGroup = [];
-        currentOrder = undefined;
       }
     }
   }
@@ -1014,9 +1008,9 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
     }
     const previous = acc.at(-1)!;
     if (
-      message.order !== previous.order ||
       previous.role !== message.role ||
-      message.role !== "assistant"
+      message.role !== "assistant" ||
+      !continuesReply(previous, message)
     ) {
       acc.push(message);
       return acc;
@@ -1052,6 +1046,18 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
     return acc;
   }, [] as UIMessage[]);
   return combined;
+}
+
+// A failed step ends its generation, so a step after it at the same order
+// that did not fail belongs to a retry or restart.
+function continuesReply(
+  previous: { order: number; status: string },
+  message: { order: number; status: string },
+) {
+  return (
+    message.order === previous.order &&
+    (previous.status !== "failed" || message.status === "failed")
+  );
 }
 
 function getToolCallId(

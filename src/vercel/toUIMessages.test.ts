@@ -424,6 +424,39 @@ describe("toUIMessages", () => {
     });
   });
 
+  it("keeps a restarted reply apart from a failed tool call step", () => {
+    const uiMessages = toUIMessages([
+      baseMessageDoc({
+        _id: "first",
+        stepOrder: 1,
+        status: "failed",
+        error: "Restarting",
+        tool: true,
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolName: "myTool",
+              toolCallId: "call1",
+              input: "hi",
+            },
+          ],
+        },
+      }),
+      baseMessageDoc({
+        _id: "second",
+        stepOrder: 2,
+        message: { role: "assistant", content: "reply 2" },
+        text: "reply 2",
+      }),
+    ]);
+    expect(uiMessages.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["first", "failed", ""],
+      ["second", "success", "reply 2"],
+    ]);
+  });
+
   it("handles tool result", () => {
     const messages = [
       baseMessageDoc({
