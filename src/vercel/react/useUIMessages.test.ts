@@ -45,6 +45,26 @@ describe("mergeUIMessages", () => {
     });
   });
 
+  it("keeps a restarted reply apart from the attempt it failed", () => {
+    const failed = message("first", "1/1", "failed", "partial 1 words");
+    const streaming = mergeUIMessages(
+      [failed, message("pending", "1/2", "pending", "")],
+      [message("stream-2", "1/2", "streaming", "reply")],
+    );
+    const saved = mergeUIMessages(
+      [failed, message("second", "1/2", "success", "reply 2")],
+      [],
+    );
+    expect(streaming.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["first", "failed", "partial 1 words"],
+      ["stream-2", "streaming", "reply"],
+    ]);
+    expect(saved.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["first", "failed", "partial 1 words"],
+      ["second", "success", "reply 2"],
+    ]);
+  });
+
   it("returns messages in order whatever order they arrive in", () => {
     const result = mergeUIMessages(
       [
