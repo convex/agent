@@ -570,17 +570,49 @@ export const finalizeMessage = mutation({
   handler: async (ctx, { messageId, result }) => {
     const message = await ctx.db.get("messages", messageId);
     assert(message, `Message ${messageId} not found`);
-    if (message.status !== "pending") {
+    // A step save of a streamed attempt filled this message and made the
+    // attempt's next pending message, whose id may not have reached the
+    // caller: its reply can be lost after the save commits.
+    const pending =
+      message.status === "success" &&
+      message.streamId &&
+      result.status === "failed"
+        ? await pendingMessageOfStream(ctx, message, message.streamId)
+        : message;
+    if (pending?.status !== "pending") {
       console.debug(
         "Trying to finalize a message that's already",
         message.status,
       );
       return message.status === "failed" ? (message.error ?? null) : null;
     }
-    await finalizePending(ctx, message, result);
+    await finalizePending(ctx, pending, result);
     return null;
   },
 });
+
+// Each save of a streamed attempt replaces its pending message and makes at
+// most one more, all linked to its stream.
+async function pendingMessageOfStream(
+  ctx: QueryCtx,
+  message: Doc<"messages">,
+  streamId: Id<"streamingMessages">,
+) {
+  const pending = ctx.db
+    .query("messages")
+    .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+      q
+        .eq("threadId", message.threadId)
+        .eq("status", "pending")
+        .eq("tool", false)
+        .eq("order", message.order)
+        .gt("stepOrder", message.stepOrder),
+    );
+  for await (const m of pending) {
+    if (m.streamId === streamId) return m;
+  }
+  return null;
+}
 
 async function finalizePending(
   ctx: MutationCtx,
