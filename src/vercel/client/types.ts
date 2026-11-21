@@ -313,6 +313,8 @@ export type UsageHandler = (
     providerMetadata: ProviderMetadata | undefined;
     model: string;
     provider: string;
+    /** The generation's prompt message. Undefined for embeddings. */
+    promptMessageId?: string;
   },
 ) => void | Promise<void>;
 
@@ -374,6 +376,7 @@ export type RawRequestResponseHandler = (
     response:
       | LanguageModelResponseMetadata
       | Omit<LanguageModelResponseMetadata, "messages">;
+    promptMessageId?: string;
   },
 ) => void | Promise<void>;
 

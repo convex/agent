@@ -28,6 +28,9 @@ const supportAgent = new Agent(components.agent, {
 });
 ```
 
+`usageHandler` and `rawRequestResponseHandler` also get the generation's
+`promptMessageId`, to tie usage to the reply that spent it.
+
 Tip: Define the `usageHandler` within a function where you have more variables
 available to attribute the usage to a different user, team, project, etc.
 

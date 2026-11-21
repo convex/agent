@@ -491,6 +491,7 @@ export async function startGeneration<
         agentName: opts.agentName,
         request: output.request,
         response: output.response,
+        promptMessageId,
       });
     }
     if (opts.usageHandler && output.usage) {
@@ -503,6 +504,7 @@ export async function startGeneration<
         provider: getProviderName(usageModel),
         usage: output.usage,
         providerMetadata: output.providerMetadata,
+        promptMessageId,
       });
     }
   };
