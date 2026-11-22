@@ -812,13 +812,13 @@ export function toModelMessageContent(
           } satisfies TextPart;
         case "image":
           return {
-            type: part.type,
-            image: (isStoredProviderReference(part.image)
+            type: "file",
+            data: (isStoredProviderReference(part.image)
               ? part.image.reference
-              : toModelMessageDataOrUrl(part.image)) as ImagePart["image"],
-            mediaType: getMimeOrMediaType(part),
+              : toModelMessageDataOrUrl(part.image)) as FilePart["data"],
+            mediaType: getMimeOrMediaType(part) ?? "image",
             ...metadata,
-          } satisfies ImagePart;
+          } satisfies FilePart;
         case "file":
           return {
             type: part.type,

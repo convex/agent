@@ -345,8 +345,7 @@ export function applyUIMessageChunksIncremental<
                 type: `tool-${part.toolName}`,
                 toolCallId: part.toolCallId,
                 state: "output-error",
-                input: undefined,
-                rawInput: part.input,
+                input: part.input,
                 errorText: part.errorText,
               } satisfies ToolUIPart);
           message.parts.push(toolPart);
@@ -363,14 +362,7 @@ export function applyUIMessageChunksIncremental<
           ...(part.providerExecuted === undefined
             ? {}
             : { providerExecuted: part.providerExecuted }),
-          ...(toolPart.type === "dynamic-tool"
-            ? {
-                input: part.input,
-              }
-            : {
-                input: undefined,
-                rawInput: part.input,
-              }),
+          input: part.input,
           ...(part.title === undefined ? {} : { title: part.title }),
           ...(part.toolMetadata === undefined
             ? {}

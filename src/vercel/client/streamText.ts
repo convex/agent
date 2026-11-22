@@ -6,7 +6,7 @@ import type {
   UIMessage as AIUIMessage,
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
-import { streamText as streamTextAi } from "ai";
+import { streamText as streamTextAi, toUIMessageStream } from "ai";
 import {
   compressUIMessageChunks,
   DEFAULT_STREAMING_OPTIONS,
@@ -280,7 +280,9 @@ export async function streamText<
     typeof streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>
   >[0]) as StreamTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
   const stream = streamer?.consumeStream(
-    result.toUIMessageStream<AIUIMessage<Tools>>({
+    toUIMessageStream<Tools, AIUIMessage<Tools>>({
+      stream: result.stream,
+      tools: args.tools,
       sendSources:
         typeof options.saveStreamDeltas === "object"
           ? (options.saveStreamDeltas.sendSources ??

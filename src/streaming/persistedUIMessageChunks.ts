@@ -319,9 +319,7 @@ export function reducePersistedUIMessageChunks(
         Object.assign(part, {
           state: "output-error" as const,
           errorText: stringField(chunk, "errorText"),
-          ...(part.type === "dynamic-tool"
-            ? { input: chunk.input, rawInput: undefined }
-            : { input: undefined, rawInput: chunk.input }),
+          input: chunk.input,
           resultProviderMetadata:
             providerMetadata(chunk.providerMetadata) ??
             part.resultProviderMetadata,
