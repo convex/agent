@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 import { createThread } from "../../client/threads.js";
 import type { GenericSchema, SchemaDefinition } from "convex/server";
 import { streamText } from "ai";
@@ -657,7 +657,12 @@ describe("Delta Stream Consumption", () => {
       { streamId, start: 0, end: 3, parts: [{ type: "a" }] },
       { streamId, start: 6, end: 9, parts: [{ type: "b" }] },
     ];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
     const { parts, cursor } = getParts(deltas);
+    expect(warn).toHaveBeenCalledWith(
+      "Got delta for stream test-stream that has a gap 3 -> 6",
+    );
     // Should stop at the gap
     expect(parts).toHaveLength(1);
     expect(cursor).toBe(3);

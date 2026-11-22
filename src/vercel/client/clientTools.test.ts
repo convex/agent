@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { v } from "convex/values";
 import { stepCountIs, tool, type ToolSet } from "ai";
 import { z } from "zod/v4";
@@ -885,11 +885,14 @@ describe("addToolOutput", () => {
   });
 
   test("a client call in a stream that failed takes no output, and its step is retried", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => error.mockRestore());
     const t = createTest();
     const { threadId, promptMessageId } = await t.action(
       api.clientTools.failStep,
       {},
     );
+    expect(error.mock.calls).toEqual([["Mock error message"]]);
     const failed = "0.1 failed assistant:tool-call";
     const rows = async () =>
       (await t.query(api.clientTools.messages, { threadId })).rows;

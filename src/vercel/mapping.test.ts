@@ -975,7 +975,10 @@ describe("mapping", () => {
         { role: "user" as const, content: "new message" },
       ] as any;
 
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const result = autoDenyUnresolvedApprovals(messages);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
+      warnSpy.mockRestore();
       expect(result).toHaveLength(4); // original 3 + 1 synthetic tool message
       // Synthetic denial should be inserted right after the assistant message (index 1)
       expect(result[2].role).toBe("tool");
@@ -1017,7 +1020,11 @@ describe("mapping", () => {
         },
       ] as any;
 
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const result = autoDenyUnresolvedApprovals(messages);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
+      warnSpy.mockRestore();
       expect(result).toHaveLength(2); // assistant + 1 synthetic tool message
       expect(result[1].role).toBe("tool");
       const denialContent = result[1].content as any[];

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createThread, saveMessages } from "@convex-dev/agent";
 import { api, components } from "../_generated/api";
 import { initConvexTest } from "../setup.test";
@@ -52,6 +52,15 @@ const continuation = (threadId: string, promptMessageId: string) => ({
 });
 
 describe("submitApproval", () => {
+  // Keeps the scheduled continuation pending, so the tests can assert on it
+  // without the generation running.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("continues once, after the last of parallel decisions", async () => {
     const { threadId, decide, scheduled } = await setup(["a", "b"]);
     await decide("a");

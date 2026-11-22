@@ -357,7 +357,7 @@ describe("streams", () => {
     await insertDeltas(t, streamId, 0, 5000, 10);
 
     await t.mutation(api.streams.deleteStreamAsync, { streamId });
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    await t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(1));
 
     expect(await countDeltas(t, streamId)).toBe(0);
     expect(

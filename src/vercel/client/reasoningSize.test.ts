@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { getDocumentSize } from "convex/values";
 import { Agent, createThread, toUIMessages } from "../index.js";
 import { mockModel } from "./mockModel.js";
@@ -105,6 +105,8 @@ describe("step reasoning is stored once and derived on read (#418)", () => {
   });
 
   test("a failed stream saves its reasoning once", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => error.mockRestore());
     const t = initConvexTest();
     const agent = agentWith({
       content: [{ type: "reasoning", text: LONG }],
@@ -122,6 +124,7 @@ describe("step reasoning is stored once and derived on read (#418)", () => {
       return threadId;
     });
     await t.finishAllScheduledFunctions(() => {});
+    expect(error.mock.calls).toEqual([["provider failed"]]);
     expect((await storedAssistant(t)).status).toBe("failed");
     expect((await readAssistant(t, threadId)).reasoning).toBe(LONG);
   });

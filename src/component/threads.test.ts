@@ -489,7 +489,7 @@ describe("threads", () => {
     });
 
     await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    await t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(1));
     vi.useRealTimers();
 
     expect(await t.query(api.threads.getThread, { threadId })).toBeNull();
