@@ -1983,3 +1983,141 @@ describe("cloneThread", () => {
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
   });
 });
+
+describe("failing pending steps", () => {
+  test("reads only the prompt's order", async () => {
+    const t = convexTest({
+      schema,
+      modules,
+      transactionLimits: { documentsRead: 40 },
+    });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const {
+      messages: [prompt],
+    } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "retry me" } }],
+    });
+    await t.run(async (ctx) => {
+      for (let order = 1; order <= 60; order++) {
+        await ctx.db.insert("messages", {
+          threadId,
+          order,
+          stepOrder: 0,
+          status: "pending",
+          tool: false,
+        });
+      }
+    });
+
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: prompt._id as Id<"messages">,
+      failPendingSteps: true,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    expect(messages).toMatchObject([{ order: 0, status: "pending" }]);
+  });
+});
+
+describe("listing a thread's messages", () => {
+  test("stops a page early before the transaction read limit, unless bound by endCursor", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const big = "x".repeat(400_000);
+    for (let batch = 0; batch < 10; batch++) {
+      await t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: Array.from({ length: 5 }, (_, i) => ({
+          message: { role: "user" as const, content: `${batch * 5 + i} ${big}` },
+        })),
+      });
+    }
+
+    const pages = [];
+    let cursor: string | null = null;
+    do {
+      const page: Awaited<
+        ReturnType<typeof t.query<typeof api.messages.listMessagesByThreadId>>
+      > = await t.query(api.messages.listMessagesByThreadId, {
+        threadId,
+        order: "desc",
+        paginationOpts: { numItems: 100, cursor },
+      });
+      pages.push(page);
+      cursor = page.continueCursor;
+    } while (!pages.at(-1)!.isDone);
+
+    expect(pages[0].page.length).toBeLessThan(50);
+    expect(pages[0].isDone).toBe(false);
+    const listed = pages.flatMap((p) =>
+      p.page.map((m) => Number(m.text!.split(" ", 1)[0])),
+    );
+    expect(listed).toEqual(Array.from({ length: 50 }, (_, i) => 49 - i));
+
+    // A paginated hook keeps the first page bound to where the next starts,
+    // so it reads to there as it grows.
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: Array.from({ length: 5 }, (_, i) => ({
+        message: { role: "user" as const, content: `${50 + i} ${big}` },
+      })),
+    });
+    const grown = await t.query(api.messages.listMessagesByThreadId, {
+      threadId,
+      order: "desc",
+      paginationOpts: {
+        numItems: 100,
+        cursor: null,
+        endCursor: pages[0].continueCursor,
+      },
+    });
+    expect(grown.page.length).toBe(pages[0].page.length + 5);
+  });
+
+  test("an emptied page between pages isn't the last page", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: Array.from({ length: 6 }, (_, i) => ({
+        message: { role: "user" as const, content: `${i}` },
+      })),
+    });
+    const list = (paginationOpts: {
+      numItems: number;
+      cursor: string | null;
+      endCursor?: string;
+    }) =>
+      t.query(api.messages.listMessagesByThreadId, {
+        threadId,
+        order: "desc",
+        paginationOpts,
+      });
+    const first = await list({ numItems: 2, cursor: null });
+    const middle = await list({ numItems: 2, cursor: first.continueCursor });
+    await t.mutation(api.messages.deleteByIds, {
+      messageIds: middle.page.map((m) => m._id as Id<"messages">),
+    });
+
+    const emptied = await list({
+      numItems: 2,
+      cursor: first.continueCursor,
+      endCursor: middle.continueCursor,
+    });
+    expect(emptied).toMatchObject({
+      page: [],
+      isDone: false,
+      continueCursor: middle.continueCursor,
+    });
+    const last = await list({ numItems: 2, cursor: middle.continueCursor });
+    expect(last.page.map((m) => m.text)).toEqual(["1", "0"]);
+    const past = await list({ numItems: 2, cursor: last.continueCursor });
+    expect(past).toMatchObject({ page: [], isDone: true });
+  });
+});
