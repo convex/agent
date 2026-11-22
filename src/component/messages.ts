@@ -273,7 +273,15 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
-  if (promptMessageId && !promptMessage && abandonIfPromptMissing) {
+  // A thread deletion removes streams and messages page by page, so either
+  // may be gone first; a save into a generation whose stream is gone would
+  // land behind the deletion's cursor and outlive the thread.
+  if (
+    abandonIfPromptMissing &&
+    ((promptMessageId && !promptMessage) ||
+      (finishStreamId &&
+        !(await ctx.db.get("streamingMessages", finishStreamId))))
+  ) {
     return { messages: [] };
   }
   if (!userId && threadId) {

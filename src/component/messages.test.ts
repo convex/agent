@@ -1840,6 +1840,51 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     expect(all.page).toHaveLength(0);
   });
 
+  test("abandons a failed save whose stream a thread deletion already removed", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const prompt = messages[0];
+    const promptMessageId = prompt._id as Id<"messages">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: prompt.order,
+      stepOrder: prompt.stepOrder + 1,
+      format: "UIMessageChunk",
+    });
+    await t.run(async (ctx) => ctx.db.delete("streamingMessages", streamId));
+
+    const saved = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      abandonIfPromptMissing: true,
+      finishStreamId: streamId,
+      messages: [
+        {
+          message: { role: "assistant", content: "partial" },
+          status: "failed",
+          error: "The generation failed",
+        },
+      ],
+    });
+    expect(saved.messages).toEqual([]);
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+          q.eq("threadId", threadId),
+        )
+        .collect(),
+    );
+    expect(rows.map((m) => m._id)).toEqual([promptMessageId]);
+  });
+
   test("still throws for a caller that did not opt in", async () => {
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, { userId: "u" });
