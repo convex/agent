@@ -12,7 +12,6 @@ import {
   vProviderMetadata,
   vReasoningDetails,
 } from "../validators.js";
-import { typedV } from "convex-helpers/validators";
 import vectorTables, { vVectorId } from "./vector/tables.js";
 
 export const schema = defineSchema({
@@ -174,10 +173,5 @@ export const schema = defineSchema({
     "name",
   ]),
 });
-
-// Named so the emitted .d.ts doesn't inline the build's `v`, which can hold
-// validators missing from the oldest convex in peerDependencies.
-export const vv: ReturnType<typeof typedV<typeof schema>> = typedV(schema);
-export { vv as v };
 
 export default schema;

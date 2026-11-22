@@ -376,7 +376,8 @@ export async function abortById(
 ) {
   const stream = await ctx.db.get("streamingMessages", args.streamId);
   if (!stream) {
-    throw new Error(`Stream not found: ${args.streamId}`);
+    console.warn("Stream not found", args.streamId);
+    return false;
   }
   if (args.finalDelta) {
     await ctx.db.insert("streamDeltas", args.finalDelta);

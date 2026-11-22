@@ -1,7 +1,7 @@
 import { assert, omit, pick } from "convex-helpers";
 import { partial } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
-import type { ObjectType } from "convex/values";
+import { v, type ObjectType } from "convex/values";
 import {
   type ThreadDoc,
   vPaginationResult,
@@ -17,7 +17,7 @@ import {
   query,
 } from "./_generated/server.js";
 import { deleteMessage } from "./messages.js";
-import { schema, v } from "./schema.js";
+import { schema } from "./schema.js";
 import {
   deleteStreamsPageForThreadId,
   deletionCursor,

@@ -82,6 +82,9 @@ function rawRequestResponseInclude(
   };
 }
 
+// Another writer ended the generation: a retry, an abort, or a deleted prompt.
+export class GenerationStopped extends Error {}
+
 export async function startGeneration<
   T,
   Tools extends ToolSet = ToolSet,
@@ -284,7 +287,7 @@ export async function startGeneration<
       error: toSave.error,
     })
       .then((stoppedBy) => {
-        if (stoppedBy) throw new Error(stoppedBy);
+        if (stoppedBy) throw new GenerationStopped(stoppedBy);
       })
       .catch((error: unknown) => {
         saveFailure ??= { error };
@@ -543,7 +546,7 @@ export async function startGeneration<
       }
       if (ending) {
         await ending;
-        throw new Error("The generation has ended");
+        throw new GenerationStopped("The generation has ended");
       }
       // A failed save rejects prepareStep, which fails the call through the
       // AI SDK.

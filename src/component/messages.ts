@@ -4,7 +4,7 @@ import {
   paginationOptsValidator,
   type WithoutSystemFields,
 } from "convex/server";
-import { ConvexError, type ObjectType } from "convex/values";
+import { ConvexError, v, type ObjectType } from "convex/values";
 import {
   DEFAULT_MESSAGE_RANGE,
   DEFAULT_RECENT_MESSAGES,
@@ -33,7 +33,7 @@ import {
   query,
   type QueryCtx,
 } from "./_generated/server.js";
-import { schema, v } from "./schema.js";
+import { schema } from "./schema.js";
 import { insertVector, searchVectors } from "./vector/index.js";
 import {
   getVectorIdInfo,
@@ -241,11 +241,6 @@ async function addMessagesHandler(
 ) {
   let userId = args.userId;
   const threadId = args.threadId;
-  if (!userId && args.threadId) {
-    const thread = await ctx.db.get("threads", args.threadId);
-    assert(thread, `Thread ${args.threadId} not found`);
-    userId = thread.userId;
-  }
   const {
     embeddings,
     failPendingSteps,
@@ -278,18 +273,42 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
+  if (promptMessageId && !promptMessage && abandonIfPromptMissing) {
+    return { messages: [] };
+  }
+  if (!userId && threadId) {
+    const thread = await ctx.db.get("threads", threadId);
+    assert(thread, `Thread ${threadId} not found`);
+    userId = thread.userId;
+  }
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
-    const pendingMessages = await ctx.db
-      .query("messages")
-      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-        q.eq("threadId", threadId).eq("status", "pending"),
-      )
-      .order("desc")
-      .take(100);
+    const pendingMessages = promptMessage
+      ? (
+          await Promise.all(
+            [true, false].map((tool) =>
+              ctx.db
+                .query("messages")
+                .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+                  q
+                    .eq("threadId", threadId)
+                    .eq("status", "pending")
+                    .eq("tool", tool)
+                    .eq("order", promptMessage.order),
+                )
+                .take(100),
+            ),
+          )
+        ).flat()
+      : await ctx.db
+          .query("messages")
+          .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+            q.eq("threadId", threadId).eq("status", "pending"),
+          )
+          .order("desc")
+          .take(100);
     await Promise.all(
       pendingMessages
-        .filter((m) => !promptMessage || m.order === promptMessage.order)
         .filter((m) => !pendingMessageId || m._id !== pendingMessageId)
         .map(async (m) => {
           if (m.embeddingId) {
@@ -320,9 +339,6 @@ async function addMessagesHandler(
     const maxMessage = await getMaxMessage(ctx, threadId, order);
     stepOrder = maxMessage?.stepOrder ?? -1;
   } else if (promptMessageId) {
-    if (!promptMessage && abandonIfPromptMissing) {
-      return { messages: [] };
-    }
     assert(promptMessage, `Parent message ${promptMessageId} not found`);
     if (promptMessage.status === "failed") {
       fail = true;
@@ -534,7 +550,10 @@ export const finalizeMessage = mutation({
   returns: v.null(),
   handler: async (ctx, { messageId, result }) => {
     const stored = await ctx.db.get("messages", messageId);
-    assert(stored, `Message ${messageId} not found`);
+    if (!stored) {
+      console.warn("Message not found", messageId);
+      return;
+    }
     const message = withText(stored);
     if (message.status !== "pending") {
       console.debug(
@@ -866,6 +885,13 @@ export const cloneThread = action({
   },
 });
 
+// A page stops early, short and not done, once the messages it read reach
+// this. Half the 16 MiB transaction read limit, so the message that crossed
+// it (up to the 1 MiB document limit) still fits. A page bound by `endCursor`
+// reads to it: paginated hooks only continue from the last page's cursor, so
+// rows a bound page skipped would never show.
+const MAX_PAGE_BYTES = 8 * 1024 * 1024;
+
 export const listMessagesByThreadIdArgs = {
   threadId: v.id("threads"),
   excludeToolMessages: v.optional(v.boolean()),
@@ -937,16 +963,21 @@ async function listMessagesByThreadIdHandler(
       ),
     );
   }
-  const messages = await mergedStream(streams, ["order", "stepOrder"]).paginate(
-    args.paginationOpts ?? {
-      numItems: DEFAULT_RECENT_MESSAGES,
-      cursor: null,
-    },
+  const paginationOpts = args.paginationOpts ?? {
+    numItems: DEFAULT_RECENT_MESSAGES,
+    cursor: null,
+  };
+  return await mergedStream(streams, ["order", "stepOrder"]).paginate(
+    paginationOpts.endCursor
+      ? paginationOpts
+      : {
+          ...paginationOpts,
+          maximumBytesRead: Math.min(
+            paginationOpts.maximumBytesRead ?? Infinity,
+            MAX_PAGE_BYTES,
+          ),
+        },
   );
-  if (messages.page.length === 0) {
-    messages.isDone = true;
-  }
-  return messages;
 }
 
 export const getMessagesByIds = query({
