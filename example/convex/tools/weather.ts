@@ -19,7 +19,14 @@ export const getGeocoding = tool({
         longitude: number;
         name: string;
       }[];
+      error?: boolean;
+      reason?: string;
     };
+    if (!geocodingResponse.ok || geocodingData.error) {
+      throw new Error(
+        `Geocoding request failed: ${geocodingData.reason ?? geocodingResponse.status}`,
+      );
+    }
 
     if (!geocodingData.results?.[0]) {
       throw new Error(`Location '${location}' not found`);
@@ -51,8 +58,15 @@ export const getWeather = tool({
         wind_gusts_10m: number;
         weather_code: number;
       };
+      error?: boolean;
+      reason?: string;
     };
     console.log("got weather for location", data);
+    if (!response.ok || data.error) {
+      throw new Error(
+        `Weather request failed: ${data.reason ?? response.status}`,
+      );
+    }
     return {
       temperature: `${data.current.temperature_2m}°F`,
       feelsLike: `${data.current.apparent_temperature}°F`,
