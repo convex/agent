@@ -23,14 +23,22 @@ export const deleteUnusedFiles = internalMutation({
     if (toDelete.length > 0) {
       console.debug(`Deleting ${toDelete.length} files...`);
     }
-    await Promise.all(
-      toDelete.map((f) => ctx.storage.delete(f.storageId as Id<"_storage">)),
-    );
-    // Also mark them as deleted in the component.
     // This is in a transaction (mutation), so there's no races.
-    await ctx.runMutation(components.agent.files.deleteFiles, {
-      fileIds: toDelete.map((f) => f._id),
-    });
+    const deletedIds = await ctx.runMutation(
+      components.agent.files.deleteFiles,
+      { fileIds: toDelete.map((f) => f._id) },
+    );
+    await Promise.all(
+      toDelete
+        .filter((f) => deletedIds.includes(f._id))
+        .map(async (f) => {
+          const storageId = f.storageId as Id<"_storage">;
+          // A blob that's already gone would otherwise roll back the batch.
+          if (await ctx.db.system.get("_storage", storageId)) {
+            await ctx.storage.delete(storageId);
+          }
+        }),
+    );
     if (!files.isDone) {
       console.debug(
         `Deleted ${toDelete.length} files but not done yet, continuing...`,
