@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import type { Message } from "../../validators.js";
 import { assert } from "convex-helpers";
+import { convertUint8ArrayToBase64 } from "@ai-sdk/provider-utils";
 import type { StorageReader } from "convex/server";
 
 export const MAX_FILE_SIZE = 1024 * 64;
@@ -55,8 +56,11 @@ export async function storeFile(
         "Read more in the docs.",
     );
   }
+  if (sha256 && !/^[0-9a-f]{64}$/i.test(sha256)) {
+    throw new Error(`sha256 must be 64 hex characters, got "${sha256}"`);
+  }
   const hash =
-    sha256 ||
+    sha256?.toLowerCase() ||
     Array.from(
       new Uint8Array(
         await crypto.subtle.digest("SHA-256", await blob.slice().arrayBuffer()),
@@ -85,7 +89,17 @@ export async function storeFile(
       },
     };
   }
-  const newStorageId = await ctx.storage.store(blob);
+  // Storage takes the digest base64 encoded; file hashes are hex.
+  const newStorageId = await ctx.storage.store(
+    blob,
+    sha256
+      ? {
+          sha256: convertUint8ArrayToBase64(
+            Uint8Array.from(hash.match(/../g)!, (byte) => parseInt(byte, 16)),
+          ),
+        }
+      : undefined,
+  );
   let newStorageRegistered = false;
   let cleanupAttempted = false;
   const cleanupNewStorage = async () => {
@@ -94,12 +108,6 @@ export async function storeFile(
     await ctx.storage.delete(newStorageId);
   };
   try {
-    if (sha256) {
-      const metadata = await ctx.storage.getMetadata(newStorageId);
-      if (metadata?.sha256 !== sha256) {
-        throw new Error("Hash mismatch: " + metadata?.sha256 + " != " + sha256);
-      }
-    }
     const { fileId, storageId } = await ctx.runMutation(
       component.files.addFile,
       {
