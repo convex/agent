@@ -5,7 +5,7 @@ import { action } from "../_generated/server";
 import { v } from "convex/values";
 import { authorizeThreadAccess } from "../threads";
 import { storyAgent } from "../agents/story";
-import { stepCountIs, tool } from "ai";
+import { stepCountIs, tool, toUIMessageStream } from "ai";
 import { groq } from "@ai-sdk/groq";
 import z from "zod/v3";
 import { defaultConfig } from "../agents/config";
@@ -54,7 +54,7 @@ export const streamReasoning = action({
       },
       { saveStreamDeltas: { chunking: "line" } },
     );
-    for await (const chunk of result.toUIMessageStream()) {
+    for await (const chunk of toUIMessageStream({ stream: result.stream })) {
       console.log(chunk);
     }
   },

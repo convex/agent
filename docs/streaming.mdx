@@ -264,10 +264,8 @@ for await (const textPart of result.textStream) {
 }
 ```
 
-`agent.streamObject` saves the object from the AI SDK's `onFinish`, which only
-runs once the stream has been read to the end. Read `result.partialObjectStream`
-to the end before the action returns: awaiting `result.object` alone does not
-read the stream.
+With an `output`, such as `Output.object({ schema })`, read partial objects from
+`result.partialOutputStream`.
 
 If you want to both iterate as the stream is happening, as well as save the
 deltas, you can pass `{ saveStreamDeltas: { returnImmediately: true } }` to
@@ -420,7 +418,7 @@ see [Getting Started](./getting-started.mdx) for installation and requirements.
 import { components } from "./_generated/api";
 import { type ActionCtx } from "./_generated/server";
 import { DeltaStreamer, compressUIMessageChunks } from "@convex-dev/agent";
-import { streamText } from "ai";
+import { streamText, toUIMessageStream } from "ai";
 import { convexGateway } from "@convex-dev/ai-sdk-provider";
 
 async function stream(ctx: ActionCtx, threadId: string, order: number) {
@@ -457,7 +455,7 @@ async function stream(ctx: ActionCtx, threadId: string, order: number) {
   // We could await here if we wanted to wait for the stream to finish,
   // but instead we have it process asynchronously so we can return a streaming
   // http Response.
-  void streamer.consumeStream(response.toUIMessageStream());
+  void streamer.consumeStream(toUIMessageStream({ stream: response.stream }));
 
   return {
     // e.g. to do `response.toTextStreamResponse()` for HTTP streaming.

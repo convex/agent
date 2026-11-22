@@ -156,7 +156,7 @@ file around once you've retrieved it via searching.
 const description = await thread.generateText({
   message: {
     role: "user",
-    content: [{ type: "image", image: url, mediaType: blob.type }],
+    content: [{ type: "file", data: url, mediaType: blob.type }],
   },
 });
 ```

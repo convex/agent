@@ -73,15 +73,12 @@ const { fileId, url, storageId } = file;
 
 ```ts
 // in your mutation
-const { filePart, imagePart } = await getFile(ctx, components.agent, fileId);
+const { filePart } = await getFile(ctx, components.agent, fileId);
 const { messageId } = await fileAgent.saveMessage(ctx, {
   threadId,
   message: {
     role: "user",
-    content: [
-      imagePart ?? filePart, // if it's an image, prefer that kind.
-      { type: "text", text: "What is this image?" },
-    ],
+    content: [filePart, { type: "text", text: "What is this image?" }],
   },
   metadata: { fileIds: [fileId] }, // IMPORTANT: this tracks the file usage.
 });
@@ -116,7 +113,7 @@ await thread.generateText({
     {
       role: "user",
       content: [
-        { type: "image", image: imageBytes, mediaType: "image/png" },
+        { type: "file", data: imageBytes, mediaType: "image/png" },
         { type: "text", text: "What is this image?" },
       ],
     },
@@ -158,7 +155,7 @@ await thread.generateText({
     {
       role: "user",
       content: [
-        { type: "image", image: url, mediaType: blob.type },
+        { type: "file", data: url, mediaType: blob.type },
         { type: "text", text: "What is this image?" },
       ],
     },
@@ -213,7 +210,7 @@ export const ask = internalAction({
         {
           role: "user",
           content: [
-            { type: "image", image, mediaType },
+            { type: "file", data: image, mediaType },
             { type: "text", text: prompt },
           ],
         },

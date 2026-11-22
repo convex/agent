@@ -5,21 +5,22 @@ import { defaultConfig } from "../agents/config.js";
 import z from "zod/v4";
 import { v } from "convex/values";
 import { syncStreams, DeltaStreamer } from "@convex-dev/agent";
-import { streamObject } from "ai";
+import { Output, streamText } from "ai";
 import { authorizeThreadAccess } from "../threads.js";
 import { getAuthUserId } from "../utils.js";
 
 export const streamArray = action({
   args: { threadId: v.string() },
   handler: async (ctx, { threadId }) => {
-    const response = streamObject({
+    const response = streamText({
       model: defaultConfig.languageModel,
       prompt: "Make a list of items needed to host a birthday party",
-      schema: z.object({
-        name: z.string().describe("The name of the item"),
-        quantity: z.number().describe("How many to bring"),
+      output: Output.array({
+        element: z.object({
+          name: z.string().describe("The name of the item"),
+          quantity: z.number().describe("How many to bring"),
+        }),
       }),
-      output: "array",
     });
     const streamer = new DeltaStreamer(
       components.agent,
@@ -41,7 +42,7 @@ export const streamArray = action({
     await streamer.consumeStream(response.elementStream);
     return {
       streamId: await streamer.getStreamId(),
-      object: await response.object,
+      object: await response.output,
     };
   },
 });
