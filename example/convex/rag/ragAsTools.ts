@@ -1,5 +1,5 @@
 // See the docs at https://docs.convex.dev/agents/rag
-import { createTool } from "@convex-dev/agent";
+import { createTool, stepCountIs } from "@convex-dev/agent";
 import { RAG } from "@convex-dev/rag";
 import { v } from "convex/values";
 import { z } from "zod/v3";
@@ -18,11 +18,16 @@ export const sendMessage = action({
   args: { threadId: v.string(), prompt: v.string() },
   handler: async (ctx, { threadId, prompt }) => {
     const userId = await getAuthUserId(ctx);
-    const { promptMessageId } = await agent.generateText(
+    const { messageId: promptMessageId } = await agent.saveMessage(ctx, {
+      threadId,
+      prompt,
+    });
+    await agent.generateText(
       ctx,
       { threadId },
       {
-        prompt,
+        promptMessageId,
+        stopWhen: stepCountIs(3),
         tools: {
           addContext: createTool({
             description: "Store information to search later via RAG",
@@ -53,7 +58,7 @@ export const sendMessage = action({
               });
               // To show the context in the demo UI, we record the context used
               await ctx.runMutation(internal.rag.utils.recordContextUsed, {
-                messageId: promptMessageId!,
+                messageId: promptMessageId,
                 entries: context.entries,
                 results: context.results,
               });
