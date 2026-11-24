@@ -1,12 +1,16 @@
 {
   "$schema": "https://unpkg.com/@changesets/config@4.0.1/schema.json",
-  "baseBranch": "main",
-  "access": "public",
-  "changelog": "@changesets/cli/changelog",
+  "changelog": [
+    "@changesets/changelog-github",
+    {
+      "repo": "convex/agent",
+      "template": "\n\n- {summary}"
+    }
+  ],
   "commit": false,
-  "fixed": [],
-  "linked": [],
-  "updateInternalDependencies": "patch",
+  "access": "public",
+  "baseBranch": "main",
+  "format": "prettier",
   "bumpVersionsWithWorkspaceProtocolOnly": true,
   "ignore": ["@convex-dev/agent-playground"]
 }

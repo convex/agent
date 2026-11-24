@@ -98,6 +98,7 @@
     "@ai-sdk/provider-utils": "5.0.75",
     "@assistant-ui/react": "0.15.25",
     "@assistant-ui/react-markdown": "0.14.19",
+    "@changesets/changelog-github": "1.0.1",
     "@changesets/cli": "3.0.3",
     "@convex-dev/ai-sdk-provider": "0.1.0",
     "@convex-dev/eslint-plugin": "5.0.0",
