@@ -33,6 +33,9 @@ Choose the version bump, describe the user-visible change, and commit the
 generated file with your implementation. Docs-only and development-tooling
 changes do not need a changeset.
 
+Once your PR is open, add its number in parentheses at the end of the first
+paragraph of each changeset, for example `(#279)`.
+
 Review and merge the release PR when ready. Click **Approve workflows to run**
 on the PR if its checks are waiting for approval. To refresh it manually, run
 the [Update release PR workflow](./.github/workflows/version.yml) on main.
