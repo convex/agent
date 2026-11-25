@@ -350,11 +350,6 @@ async function addMessagesHandler(
         await markPendingMessageFailed(ctx, m, "Restarting");
       }
     }
-    await abortLiveStreams(
-      ctx,
-      replaced.flatMap((m) => (m.streamId ? [m.streamId] : [])),
-      "Restarting",
-    );
   }
   let order, stepOrder;
   let lastMessage: Doc<"messages"> | null = null;
@@ -640,6 +635,14 @@ async function finalizePending(
   budget?: RecoveryBudget,
 ) {
   const messageId = message._id;
+  // Failing a linked message aborts its attempt's stream in the same
+  // transaction, whether a retry in addMessagesHandler or an app's
+  // Agent.finalizeMessage (a stop button) fails it. Otherwise the stream stays
+  // `streaming` next to the failed row until its timeout, since the attempt's
+  // own save, which would finish it, is dropped by isLateSave.
+  if (result.status === "failed" && message.streamId) {
+    await abortLiveStreams(ctx, [message.streamId], result.error);
+  }
   // See if we can add any in-progress data
   if (!message.message?.content.length) {
     const { messages, materializationFailures, streamsToRelease } =
