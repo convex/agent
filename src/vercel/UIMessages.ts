@@ -248,7 +248,14 @@ export function toUIMessages<
       uiMessages.push(createUserUIMessage(group.message));
     } else {
       // Assistant/tool group
-      uiMessages.push(createAssistantUIMessage(group.messages));
+      const uiMessage = createAssistantUIMessage<METADATA, DATA_PARTS, TOOLS>(
+        group.messages,
+      );
+      const previous = uiMessages.at(-1);
+      if (previous && isEmptyFailedAttempt(previous, uiMessage)) {
+        uiMessages.pop();
+      }
+      uiMessages.push(uiMessage);
     }
   }
 
@@ -1007,6 +1014,11 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
       return [message];
     }
     const previous = acc.at(-1)!;
+    if (isEmptyFailedAttempt(previous, message)) {
+      acc.pop();
+      acc.push(message);
+      return acc;
+    }
     if (
       previous.role !== message.role ||
       message.role !== "assistant" ||
@@ -1057,6 +1069,23 @@ function continuesReply(
   return (
     message.order === previous.order &&
     (previous.status !== "failed" || message.status === "failed")
+  );
+}
+
+// A reply restarted before its first delta leaves a failed row with nothing
+// in it. toUIMessages and combineUIMessages drop that row once a later step of
+// the same order arrives, so no empty failed bubble shows above the restart.
+function isEmptyFailedAttempt(previous: UIMessage, message: UIMessage) {
+  return (
+    previous.role === "assistant" &&
+    message.role === "assistant" &&
+    previous.status === "failed" &&
+    previous.order === message.order &&
+    previous.parts.every(
+      (part) =>
+        part.type === "step-start" ||
+        ((part.type === "text" || part.type === "reasoning") && !part.text),
+    )
   );
 }
 

@@ -65,6 +65,24 @@ describe("mergeUIMessages", () => {
     ]);
   });
 
+  it("drops an empty failed attempt when the reply restarts", () => {
+    const failed = message("first", "1/1", "failed", "");
+    const streaming = mergeUIMessages(
+      [failed, message("pending", "1/2", "pending", "")],
+      [message("stream-2", "1/2", "streaming", "reply")],
+    );
+    const saved = mergeUIMessages(
+      [failed, message("second", "1/2", "success", "reply 2")],
+      [],
+    );
+    expect(streaming.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["stream-2", "streaming", "reply"],
+    ]);
+    expect(saved.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["second", "success", "reply 2"],
+    ]);
+  });
+
   it("returns messages in order whatever order they arrive in", () => {
     const result = mergeUIMessages(
       [

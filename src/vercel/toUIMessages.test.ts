@@ -457,6 +457,28 @@ describe("toUIMessages", () => {
     ]);
   });
 
+  it("drops an empty failed attempt when the reply restarts", () => {
+    const uiMessages = toUIMessages([
+      baseMessageDoc({
+        _id: "first",
+        stepOrder: 1,
+        status: "failed",
+        error: "Restarting",
+        message: { role: "assistant", content: "" },
+        text: "",
+      }),
+      baseMessageDoc({
+        _id: "second",
+        stepOrder: 2,
+        message: { role: "assistant", content: "reply 2" },
+        text: "reply 2",
+      }),
+    ]);
+    expect(uiMessages.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["second", "success", "reply 2"],
+    ]);
+  });
+
   it("handles tool result", () => {
     const messages = [
       baseMessageDoc({
