@@ -1871,6 +1871,89 @@ test("a stream is only created with a new pending message last, else nothing is 
   expect(await rows()).toEqual(before);
 });
 
+test("a retry fails an unlinked and a linked pending message at once, and only the linked one's late save is dropped", async () => {
+  const t = initConvexTest();
+  const thread = await t.mutation(api.threads.createThread, {});
+  const threadId = thread._id as Id<"threads">;
+  const { messages } = await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [{ message: { role: "user", content: "go" } }],
+  });
+  const promptMessageId = messages[0]._id as Id<"messages">;
+  const pending = [
+    {
+      message: { role: "assistant" as const, content: [] },
+      status: "pending" as const,
+    },
+  ];
+  // Saved by a version before #432, so it has no streamId.
+  const unlinked = await t.mutation(api.messages.addMessages, {
+    threadId,
+    promptMessageId,
+    messages: pending,
+  });
+  const linked = await t.mutation(api.messages.addMessages, {
+    threadId,
+    promptMessageId,
+    messages: pending,
+    createStream: { format: "UIMessageChunk" },
+  });
+  const linkedStreamId = linked.streamId as Id<"streamingMessages">;
+  await t.run((ctx) =>
+    ctx.db.insert("streamDeltas", {
+      streamId: linkedStreamId,
+      start: 0,
+      end: 1,
+      parts: [
+        { type: "start-step" },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "streamed" },
+        { type: "text-end", id: "t" },
+        { type: "finish-step" },
+      ],
+    }),
+  );
+  const retry = await t.mutation(api.messages.addMessages, {
+    threadId,
+    promptMessageId,
+    failPendingSteps: true,
+    messages: pending,
+    createStream: { format: "UIMessageChunk" },
+  });
+  const lateSave = (pendingMessageId: string, content: string) =>
+    t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      pendingMessageId: pendingMessageId as Id<"messages">,
+      messages: [{ message: { role: "assistant", content } }],
+    });
+  const late = await lateSave(linked.messages[0]._id, "late linked");
+  expect(late.messages.map((m) => [m.status, m.text])).toEqual([
+    ["failed", "streamed"],
+  ]);
+  await lateSave(unlinked.messages[0]._id, "late unlinked");
+  const state = await t.run(async (ctx) => ({
+    rows: (await ctx.db.query("messages").collect())
+      .slice(1)
+      .map((m) => [m.status, m.error ?? null, m.text ?? null]),
+    streams: (await ctx.db.query("streamingMessages").collect()).map((s) => [
+      s._id,
+      s.state.kind,
+    ]),
+  }));
+  expect(state).toEqual({
+    rows: [
+      ["failed", "Restarting", "late unlinked"],
+      ["failed", "Restarting", "streamed"],
+      ["pending", null, null],
+    ],
+    streams: [
+      [linkedStreamId, "aborted"],
+      [retry.streamId, "streaming"],
+    ],
+  });
+});
+
 test("a retry replacing several streamed attempts stays within one transaction's reads", async () => {
   const t = convexTest({ schema, modules, transactionLimits: true });
   const thread = await t.mutation(api.threads.createThread, {});

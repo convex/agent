@@ -307,9 +307,13 @@ async function addMessagesHandler(
     "createStream needs a new pending message last",
   );
   let pendingMessage: Doc<"messages"> | null | undefined;
-  // Checked before anything is written. A linked message failed by a retry
-  // already holds what its attempt streamed, so a late save from that attempt
-  // would only duplicate it.
+  // Any failed message with a streamId has ended its attempt, whatever failed
+  // it: finalizePending (for a retry below, or Agent.finalizeMessage), which
+  // already saved what the attempt streamed, an updateMessage, or the
+  // attempt's own save of a failed step. A save to it writes nothing and
+  // returns the failed row, which persist in start.ts turns into an error.
+  // Checked before anything is written. A failed message saved before #432
+  // has no streamId, and a save still fills it as failed.
   const isLateSave = (row: Doc<"messages"> | null) => {
     if (row && row.threadId !== threadId) {
       throw new ConvexError(`Message ${pendingMessageId} is in another thread`);
