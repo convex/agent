@@ -177,3 +177,38 @@ test("a stopped generation keeps its streamed text after many earlier attempts",
     });
   });
 });
+
+test("finalizeMessage failing a streamed attempt's pending message ends its stream, and the attempt's later save is dropped", async () => {
+  await initConvexTest().action(async (ctx) => {
+    const s = await promptThread(ctx);
+    const release = gate();
+    const agent = new Agent(components.agent, {
+      name: "lifecycle",
+      languageModel: model(ANSWER, END, release.opened),
+    });
+    const running = agent
+      .streamText(
+        ctx,
+        { threadId: s.threadId },
+        { promptMessageId: s.promptMessageId },
+        deltas,
+      )
+      .then((result) => result.consumeStream());
+    running.catch(() => {});
+    await until(s.streamingText);
+    const pending = (await s.rows()).find((m) => m.status === "pending")!;
+    // What an app's stop button does.
+    await agent.finalizeMessage(ctx, {
+      messageId: pending._id,
+      result: { status: "failed", error: "Stopped" },
+    });
+    expect((await s.streams()).map((st) => st.status)).toEqual(["aborted"]);
+    release.open();
+    await expect(running).rejects.toThrow("Stopped");
+    expect((await s.rows()).map((m) => [m.status, m.text])).toEqual([
+      ["success", "Go."],
+      ["failed", "Retried."],
+    ]);
+    expect((await s.streams()).map((st) => st.status)).toEqual(["aborted"]);
+  });
+});
