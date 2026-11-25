@@ -336,6 +336,10 @@ export async function startGeneration<
             {
               messageId: pendingMessageId,
               result: { status: "failed", error },
+              // pendingMessageId may be a message the last step save filled
+              // if that save committed but its reply was lost; finalizeMessage
+              // then fails the pending message the save made on this stream.
+              failStreamPending: true,
             },
           );
         }

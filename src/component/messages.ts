@@ -606,6 +606,18 @@ function orderedMessagesStream(
   );
 }
 
+/**
+ * Fails or succeeds a pending message, saving what its stream recovered.
+ * A message that is no longer pending is left as is; the call returns its
+ * error if it failed.
+ *
+ * `failStreamPending` is for the settle step in start.ts only. With it, a
+ * failed result for a filled message of a streamed attempt fails that
+ * attempt's current pending message (same `streamId`, later step) instead:
+ * a step save can commit and lose its reply, so the attempt never learned
+ * that pending message's id. Agent.finalizeMessage leaves it off, so an app
+ * finalizing a filled message changes nothing.
+ */
 export const finalizeMessage = mutation({
   args: {
     messageId: v.id("messages"),
@@ -613,17 +625,16 @@ export const finalizeMessage = mutation({
       v.object({ status: v.literal("success") }),
       v.object({ status: v.literal("failed"), error: v.string() }),
     ),
+    failStreamPending: v.optional(v.boolean()),
   },
   // The error of a message something else failed first, like a retry.
   returns: v.union(v.null(), v.string()),
-  handler: async (ctx, { messageId, result }) => {
+  handler: async (ctx, { messageId, result, failStreamPending }) => {
     const stored = await ctx.db.get("messages", messageId);
     assert(stored, `Message ${messageId} not found`);
     const message = withText(stored);
-    // A step save of a streamed attempt filled this message and made the
-    // attempt's next pending message, whose id may not have reached the
-    // caller: its reply can be lost after the save commits.
     const pending =
+      failStreamPending &&
       message.status === "success" &&
       message.streamId &&
       result.status === "failed"

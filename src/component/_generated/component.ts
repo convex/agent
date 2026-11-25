@@ -1739,6 +1739,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
+          failStreamPending?: boolean;
           messageId: string;
           result: { status: "success" } | { error: string; status: "failed" };
         },

@@ -2011,6 +2011,100 @@ test("a retry replacing several streamed attempts stays within one transaction's
   ]);
 });
 
+describe("finalizeMessage on a filled message of a streamed attempt", () => {
+  // A streamed attempt whose first step save filled `filled` and made `next`.
+  async function filledStep() {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const pending = {
+      message: { role: "assistant" as const, content: [] },
+      status: "pending" as const,
+    };
+    const started = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hi" } }, pending],
+      createStream: { format: "UIMessageChunk" },
+    });
+    const filled = started.messages[1]._id as Id<"messages">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: filled,
+      messages: [{ message: { role: "assistant", content: "step" } }, pending],
+    });
+    const statuses = () =>
+      t.run(async (ctx) =>
+        (await ctx.db.query("messages").collect()).map((m) => m.status),
+      );
+    return {
+      t,
+      threadId,
+      promptMessageId: started.messages[0]._id as Id<"messages">,
+      filled,
+      statuses,
+    };
+  }
+
+  test("with failStreamPending, failing it fails the attempt's pending message", async () => {
+    const { t, filled, statuses } = await filledStep();
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: filled,
+      result: { status: "failed", error: "lost reply" },
+      failStreamPending: true,
+    });
+    expect(await statuses()).toEqual(["success", "success", "failed"]);
+  });
+
+  test("without failStreamPending, as from Agent.finalizeMessage, failing it does nothing", async () => {
+    const { t, filled, statuses } = await filledStep();
+    expect(
+      await t.mutation(api.messages.finalizeMessage, {
+        messageId: filled,
+        result: { status: "failed", error: "Stopped" },
+      }),
+    ).toBeNull();
+    expect(await statuses()).toEqual(["success", "success", "pending"]);
+  });
+
+  test("finalizing it as success does nothing", async () => {
+    const { t, filled, statuses } = await filledStep();
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: filled,
+      result: { status: "success" },
+      failStreamPending: true,
+    });
+    expect(await statuses()).toEqual(["success", "success", "pending"]);
+  });
+
+  test("a retry's pending message in the same order, on another stream, stays pending", async () => {
+    const { t, threadId, promptMessageId, filled, statuses } =
+      await filledStep();
+    const retry = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      failPendingSteps: true,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+      createStream: { format: "UIMessageChunk" },
+    });
+    const filledDoc = await t.run((ctx) => ctx.db.get("messages", filled));
+    expect(retry.messages[0].order).toBe(filledDoc!.order);
+    expect(retry.streamId).not.toBe(filledDoc!.streamId);
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: filled,
+      result: { status: "failed", error: "lost reply" },
+      failStreamPending: true,
+    });
+    expect(await statuses()).toEqual([
+      "success",
+      "success",
+      "failed",
+      "pending",
+    ]);
+  });
+});
+
 describe("deleting a message aborts generation writing to it (issue #300)", () => {
   test("a stream at the deleted order is aborted", async () => {
     const t = initConvexTest();

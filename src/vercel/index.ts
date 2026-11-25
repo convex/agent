@@ -1413,6 +1413,8 @@ export class Agent<
    * Commit or rollback a message that was pending.
    * This is done automatically when saving messages by default.
    * If creating pending messages, you can call this when the full "transaction" is done.
+   * A message that is no longer pending, like one a step save filled, is left
+   * as it is. Failing a streamed pending message also aborts its stream.
    * @param ctx The ctx argument to your mutation or action.
    * @param args What message to save. Generally the parent message sent into
    *   the generateText call.
