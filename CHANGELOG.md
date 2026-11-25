@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.7.11
+
+### Patch Changes
+
+- ca390f7: `generateText` aborted during its last step resolves, as the AI SDK
+  does, and a step cut off by `stopStream` fails instead of staying pending.
+- 52d99de: Add `agent.addToolOutput` to save a client tool's output next to its
+  call; `createTool` accepts a tool without `execute` unless it sets
+  `needsApproval` (#231).
+- 767fb5f: Approval continuations resume after a provider-executed result and
+  run a later approval that reuses a completed call's `toolCallId` (#475, #476);
+  a context handler that reshapes a message holding a reused id, or leaves a
+  tool call without its result, is refused before any tool runs.
+- 7ec6c35: Async thread, user and stream deletes do more per scheduled
+  transaction, and `deleteStreamSync` no longer refuses a stream that fits in
+  one.
+- 40d8d46: `finalizeMessage` recovers long or multiple streams faster with
+  built-in `.paginate()`; self-hosted backends need
+  precompiled-2026-10-22-db19afd or later.
+- 3907c54: Continue an approval with `textSearch` or `vectorSearch` on by
+  searching with the order's user prompt, instead of throwing "Target message
+  has no text for searching" (#474).
+- cd96852: Build against convex 1.49.0 and keep the published types compatible
+  with convex 1.46.0.
+- a3352b9: Export `deriveUIMessagesFromDeltas` from the root entry, so a client
+  on another framework can turn stream deltas into UIMessages without React.
+- 69bdb2b: Fail a `streamObject` pending message when its save fails, instead of
+  leaving it pending.
+- 69bdb2b: Keep every step the AI SDK finished when a generation fails or is
+  aborted, and fail the message after them, reversing #326.
+- ca390f7: `onStepEnd`, `usageHandler` and `rawRequestResponseHandler` run
+  before each step is saved, and `onEnd` after the last save, also after a
+  provider error; a provider error or refused final save no longer calls
+  `onAbort`.
+- ac68684: Throw instead of overwriting when a `pendingMessageId` already
+  succeeded.
+- d7ed05f: `respondToToolCallApprovals` reads messages only back to the request,
+  and its order once, instead of the newest 100 and the order again.
+- 69bdb2b: Save every step the AI SDK runs, including one a steering message
+  continues past, and keep provider errors in `fullStream` with
+  `saveStreamDeltas` (#388, #428). A failed step save fails the generation
+  instead of retrying with the next step (#419).
+- a203522: Skip AI SDK `steering-message` stream chunks (ai 7.0.163+, with
+  `experimental_steering`) instead of warning and failing to recover a failed or
+  aborted stream.
+- 69bdb2b: Throw `model is required` before saving the prompt, and fail the
+  pending message an `agent.start()` save makes when the caller aborts during
+  it.
+- dc77e07: Keep a stream alive while its action is quiet for over 10 minutes,
+  such as during a long tool call, instead of timing it out with "async abort".
+- ca390f7: With `saveStreamDeltas`, an abort rejects `text` with its reason
+  instead of `AbortError`, a provider error resolves it with the partial text,
+  and deltas end at `finish-step` without the UI `finish` chunk.
+- 69bdb2b: Throw `Restarting` from a generation superseded by a newer one from
+  the same `promptMessageId`, instead of resolving.
+- e12afb6: Keep text citations, such as Anthropic's, while streaming, saving and
+  reloading. One-way: an older component version rejects messages saved with
+  citations.
+- e981c9e: Store tool inputs and outputs Convex refuses, such as JSON Schemas
+  with `$ref` keys, as JSON text and read them back parsed (#457).
+- 468c83e: Give UI text, reasoning and tool parts their own provider metadata,
+  so signatures and citations survive `toUIMessages` and `fromUIMessages`; a
+  tool result's message-level `providerMetadata` now shows as
+  `resultProviderMetadata` instead of `callProviderMetadata`.
+- 3887740: Let `updateMessage` replace or clear `reasoning` and
+  `reasoningDetails`, from the component and `agent.updateMessage`.
+
 ## 0.7.10
 
 ### Patch Changes

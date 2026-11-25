@@ -203,6 +203,30 @@ describe("a generation takes its userId from the thread it saves to", () => {
   });
 });
 
+test("usage and raw request handlers get the prompt message id", async () => {
+  const seen: Record<string, string | undefined> = {};
+  const agent = new Agent(components.agent, {
+    name: "prompt-id",
+    languageModel: mockModel({ content: [{ type: "text", text: "done" }] }),
+    usageHandler: async (_ctx, { promptMessageId }) => {
+      seen.usage = promptMessageId;
+    },
+    rawRequestResponseHandler: async (_ctx, { promptMessageId }) => {
+      seen.rawRequestResponse = promptMessageId;
+    },
+  });
+  const promptMessageId = await initConvexTest().action(async (ctx) => {
+    const threadId = await createThread(ctx, components.agent, {});
+    return (await agent.generateText(ctx, { threadId }, { prompt: "hi" }))
+      .promptMessageId;
+  });
+  expect(promptMessageId).toBeDefined();
+  expect(seen).toEqual({
+    usage: promptMessageId,
+    rawRequestResponse: promptMessageId,
+  });
+});
+
 async function threadRows(ctx: ActionCtx, threadId: string) {
   const { page } = await ctx.runQuery(
     components.agent.messages.listMessagesByThreadId,

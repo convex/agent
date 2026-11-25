@@ -42,6 +42,13 @@ export const MAX_MATERIALIZATION_BYTES = 8 * 1024 * 1024;
 export const MAX_MATERIALIZATION_ROWS = 16_000;
 export const MAX_MATERIALIZATION_STREAMS = 10;
 
+/** What recovery may still read in this transaction. */
+export type RecoveryBudget = { bytes: number; rows: number };
+export const recoveryBudget = (): RecoveryBudget => ({
+  bytes: MAX_MATERIALIZATION_BYTES,
+  rows: MAX_MATERIALIZATION_ROWS,
+});
+
 // Mirrors convex/values size.js; getConvexSize is newer than the oldest
 // convex this package supports.
 export function convexValueSize(value: unknown): number {
@@ -876,6 +883,7 @@ export async function getStreamingMessagesWithMetadata(
     streamId?: Id<"streamingMessages">;
   },
   metadata: { status: "success" | "failed"; error?: string },
+  budget = recoveryBudget(),
 ): Promise<{
   messages: MessageWithMetadataInternal[];
   materializationFailures: Array<{
@@ -902,12 +910,17 @@ export async function getStreamingMessagesWithMetadata(
       `Order ${order} has more than ${MAX_MATERIALIZATION_STREAMS} streams to recover`,
     );
   }
-  let bytesRemaining = MAX_MATERIALIZATION_BYTES;
-  let rowsRemaining = MAX_MATERIALIZATION_ROWS;
+  const overBudget = (streamId: Id<"streamingMessages">) =>
+    new Error(
+      `Delta logs for order ${order} exceed the ${MAX_MATERIALIZATION_BYTES} byte or ${MAX_MATERIALIZATION_ROWS} document recovery budget at stream ${streamId}`,
+    );
   const messages: MessageWithMetadataInternal[] = [];
   const streamsToRelease: Id<"streamingMessages">[] = [];
   for (const streamingMessage of streamingMessages) {
     try {
+      if (budget.bytes <= 0 || budget.rows <= 0) {
+        throw overBudget(streamingMessage._id);
+      }
       // One built-in .paginate() per stream: only mutations allow several per
       // transaction. A query would need paginator, as listDeltas uses.
       const deltas = await ctx.db
@@ -916,19 +929,17 @@ export async function getStreamingMessagesWithMetadata(
           q.eq("streamId", streamingMessage._id),
         )
         .paginate({
-          numItems: rowsRemaining,
-          maximumRowsRead: rowsRemaining,
-          maximumBytesRead: bytesRemaining,
+          numItems: budget.rows,
+          maximumRowsRead: budget.rows,
+          maximumBytesRead: budget.bytes,
           cursor: null,
         });
-      if (!deltas.isDone) {
-        throw new Error(
-          `Delta logs for order ${order} exceed the ${MAX_MATERIALIZATION_BYTES} byte or ${MAX_MATERIALIZATION_ROWS} document recovery budget at stream ${streamingMessage._id}`,
-        );
-      }
-      rowsRemaining -= deltas.page.length;
+      budget.rows -= deltas.page.length;
       for (const delta of deltas.page) {
-        bytesRemaining -= convexValueSize(delta);
+        budget.bytes -= convexValueSize(delta);
+      }
+      if (!deltas.isDone) {
+        throw overBudget(streamingMessage._id);
       }
       const { parts } = getPersistedUIMessageChunkParts(deltas.page);
       // We don't save messages that have already been saved

@@ -42,6 +42,7 @@ import {
   vVectorId,
 } from "./vector/tables.js";
 import { changeRefcount } from "./files.js";
+import { leaveOutText, withText } from "../messageText.js";
 import {
   getStreamingMessagesWithMetadata,
   finishHandler,
@@ -50,6 +51,8 @@ import {
   abortById,
   abortLiveStreams,
   createStream,
+  recoveryBudget,
+  type RecoveryBudget,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -58,9 +61,14 @@ import {
 } from "../approvals.js";
 
 function publicMessage(message: Doc<"messages">): MessageDoc {
-  return withDerivedReasoning(
-    omit(message, ["parentMessageId", "stepId", "files", "streamId"]),
-  );
+  const {
+    parentMessageId: _parentMessageId,
+    stepId: _stepId,
+    files: _files,
+    streamId: _streamId,
+    ...doc
+  } = withText(message);
+  return withDerivedReasoning(doc);
 }
 
 export async function deleteMessage(
@@ -292,15 +300,32 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
-  const pendingMessage =
-    pendingMessageId && (await ctx.db.get("messages", pendingMessageId));
-  if (pendingMessage && pendingMessage.threadId !== threadId) {
-    throw new ConvexError(`Message ${pendingMessageId} is in another thread`);
-  }
-  // A linked message failed by a retry already holds what its attempt
-  // streamed, so a late save from that attempt would only duplicate it.
-  if (pendingMessage?.status === "failed" && pendingMessage.streamId) {
-    return { messages: [publicMessage(pendingMessage)] };
+  assert(
+    !streamToCreate ||
+      (messages.at(-1)?.status === "pending" &&
+        !(pendingMessageId && messages.length === 1)),
+    "createStream needs a new pending message last",
+  );
+  let pendingMessage: Doc<"messages"> | null | undefined;
+  // Any failed message with a streamId has ended its attempt, whatever failed
+  // it: finalizePending (for a retry below, or Agent.finalizeMessage), which
+  // already saved what the attempt streamed, an updateMessage, or the
+  // attempt's own save of a failed step. A save to it writes nothing and
+  // returns the failed row, which persist in start.ts turns into an error.
+  // Checked before anything is written. A failed message saved before #432
+  // has no streamId, and a save still fills it as failed.
+  const isLateSave = (row: Doc<"messages"> | null) => {
+    if (row && row.threadId !== threadId) {
+      throw new ConvexError(`Message ${pendingMessageId} is in another thread`);
+    }
+    return row?.status === "failed" && !!row.streamId;
+  };
+  // Only a retry's late save is checked here, so it fails no newer attempt.
+  if (failPendingSteps && pendingMessageId) {
+    pendingMessage = await ctx.db.get("messages", pendingMessageId);
+    if (isLateSave(pendingMessage)) {
+      return { messages: [publicMessage(pendingMessage!)] };
+    }
   }
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
@@ -314,24 +339,24 @@ async function addMessagesHandler(
     const replaced = pendingMessages
       .filter((m) => !promptMessage || m.order === promptMessage.order)
       .filter((m) => !pendingMessageId || m._id !== pendingMessageId);
+    // One transaction recovers them all, so they share its reads.
+    const budget = recoveryBudget();
     for (const m of replaced) {
       // A linked attempt keeps what it streamed, as if it ended here.
       if (m.streamId) {
-        await finalizePending(ctx, m, {
-          status: "failed",
-          error: "Restarting",
-        });
+        await finalizePending(
+          ctx,
+          withText(m),
+          { status: "failed", error: "Restarting" },
+          budget,
+        );
       } else {
         await markPendingMessageFailed(ctx, m, "Restarting");
       }
     }
-    await abortLiveStreams(
-      ctx,
-      replaced.flatMap((m) => (m.streamId ? [m.streamId] : [])),
-      "Restarting",
-    );
   }
   let order, stepOrder;
+  let lastMessage: Doc<"messages"> | null = null;
   let fail = false;
   let error: string | undefined;
   const startsAtNextOrder = requestedOrder === "next";
@@ -356,14 +381,33 @@ async function addMessagesHandler(
     }
     order = promptMessage.order;
     // Defend against there being existing messages with this parent.
-    stepOrder =
-      prompt?.lastStepOrder ??
-      (await getMaxMessage(ctx, threadId, order))?.stepOrder ??
-      promptMessage.stepOrder;
+    if (prompt) {
+      stepOrder = prompt.lastStepOrder;
+    } else {
+      lastMessage = await getMaxMessage(ctx, threadId, order);
+      stepOrder = lastMessage?.stepOrder ?? promptMessage.stepOrder;
+    }
+  } else if (pendingMessageId) {
+    // What fills a pending message stays in its turn.
+    pendingMessage ??= await ctx.db.get("messages", pendingMessageId);
+    assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
+    order = pendingMessage.order;
+    lastMessage = await getMaxMessage(ctx, threadId, order);
+    stepOrder = lastMessage?.stepOrder ?? pendingMessage.stepOrder;
   } else {
-    const maxMessage = await getMaxMessage(ctx, threadId);
-    order = maxMessage?.order ?? -1;
-    stepOrder = maxMessage?.stepOrder ?? -1;
+    lastMessage = await getMaxMessage(ctx, threadId);
+    order = lastMessage?.order ?? -1;
+    stepOrder = lastMessage?.stepOrder ?? -1;
+  }
+  if (pendingMessageId) {
+    // A step's pending message is usually the last one, already read.
+    pendingMessage ??=
+      lastMessage?._id === pendingMessageId
+        ? lastMessage
+        : await ctx.db.get("messages", pendingMessageId);
+    if (isLateSave(pendingMessage)) {
+      return { messages: [publicMessage(pendingMessage!)] };
+    }
   }
   const toReturn: Doc<"messages">[] = [];
   let streamId: Id<"streamingMessages"> | undefined;
@@ -390,6 +434,9 @@ async function addMessagesHandler(
         threadId,
       });
     }
+    const text = hideFromUserIdSearch
+      ? undefined
+      : extractText(message.message);
     const messageDoc = {
       ...rest,
       ...message,
@@ -397,7 +444,8 @@ async function addMessagesHandler(
       parentMessageId: promptMessageId,
       userId,
       tool: isTool(message.message),
-      text: hideFromUserIdSearch ? undefined : extractText(message.message),
+      text,
+      ...leaveOutText(message.message, text),
       status: fail ? "failed" : (message.status ?? "success"),
       error: fail ? error : message.error,
     } satisfies Omit<
@@ -443,7 +491,8 @@ async function addMessagesHandler(
     } else if (message.message.role === "user") {
       if (
         (explicitOrder !== undefined && order === explicitOrder) ||
-        (promptMessage && promptMessage.order === order)
+        (promptMessage && promptMessage.order === order) ||
+        (!promptMessageId && pendingMessage?.order === order)
       ) {
         // Avoid colliding with a later order when saving from an older one.
         const maxMessage = await getMaxMessage(ctx, threadId);
@@ -568,8 +617,9 @@ export const finalizeMessage = mutation({
   // The error of a message something else failed first, like a retry.
   returns: v.union(v.null(), v.string()),
   handler: async (ctx, { messageId, result }) => {
-    const message = await ctx.db.get("messages", messageId);
-    assert(message, `Message ${messageId} not found`);
+    const stored = await ctx.db.get("messages", messageId);
+    assert(stored, `Message ${messageId} not found`);
+    const message = withText(stored);
     // A step save of a streamed attempt filled this message and made the
     // attempt's next pending message, whose id may not have reached the
     // caller: its reply can be lost after the save commits.
@@ -586,7 +636,7 @@ export const finalizeMessage = mutation({
       );
       return message.status === "failed" ? (message.error ?? null) : null;
     }
-    await finalizePending(ctx, pending, result);
+    await finalizePending(ctx, withText(pending), result);
     return null;
   },
 });
@@ -618,12 +668,21 @@ async function finalizePending(
   ctx: MutationCtx,
   message: Doc<"messages">,
   result: { status: "success" } | { status: "failed"; error: string },
+  budget?: RecoveryBudget,
 ) {
   const messageId = message._id;
+  // Failing a linked message aborts its attempt's stream in the same
+  // transaction, whether a retry in addMessagesHandler or an app's
+  // Agent.finalizeMessage (a stop button) fails it. Otherwise the stream stays
+  // `streaming` next to the failed row until its timeout, since the attempt's
+  // own save, which would finish it, is dropped by isLateSave.
+  if (result.status === "failed" && message.streamId) {
+    await abortLiveStreams(ctx, [message.streamId], result.error);
+  }
   // See if we can add any in-progress data
   if (!message.message?.content.length) {
     const { messages, materializationFailures, streamsToRelease } =
-      await getStreamingMessagesWithMetadata(ctx, message, result);
+      await getStreamingMessagesWithMetadata(ctx, message, result, budget);
     if (materializationFailures.length > 0) {
       console.error(
         "Failed to materialize persisted assistant streams",
@@ -701,9 +760,9 @@ export const updateMessage = mutation({
     const patch: Partial<Doc<"messages">> = { ...args.patch };
 
     if (args.patch.message !== undefined) {
-      patch.message = args.patch.message;
       patch.tool = isTool(args.patch.message);
       patch.text = extractText(args.patch.message);
+      Object.assign(patch, leaveOutText(args.patch.message, patch.text));
     }
 
     if (args.patch.status === "failed") {
@@ -784,8 +843,9 @@ async function* recentMessages(
     threadId,
     sortOrder: "desc",
   })) {
-    read.push(doc);
-    yield doc;
+    const message = withText(doc);
+    read.push(message);
+    yield message;
     if (read.length === APPROVAL_LOOKUP_MESSAGES) return;
   }
 }

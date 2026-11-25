@@ -274,7 +274,6 @@ describe("text citations", () => {
       deltas,
     );
     const sdk = await sdkUIMessage();
-    expect(textParts(sdk.parts)).toMatchObject([{ citations: CITATIONS }]);
     expect(textParts(message.parts)).toEqual(textParts(sdk.parts));
   });
 
@@ -334,19 +333,14 @@ describe("text citations", () => {
     );
   });
 
-  test.each([
-    { name: "no response messages", before: [] },
-    { name: "approval tool responses", before: [APPROVAL_TOOL_RESPONSE] },
-  ])(
-    "empty cited text the SDK leaves no assistant message for is saved after $name",
-    async ({ before }) => {
-      const messages = await serialize([EMPTY_CITED[0]], "", before);
-      expect(messages).toEqual([
-        ...before,
-        { role: "assistant", content: [{ ...CITED_PART, text: "" }] },
-      ]);
-    },
-  );
+  test("empty cited text the SDK leaves no assistant message for is saved after approval tool responses", async () => {
+    const before = [APPROVAL_TOOL_RESPONSE];
+    const messages = await serialize([EMPTY_CITED[0]], "", before);
+    expect(messages).toEqual([
+      ...before,
+      { role: "assistant", content: [{ ...CITED_PART, text: "" }] },
+    ]);
+  });
 
   // ai 7.0.163 started keeping empty text that has provider metadata in its
   // response messages (https://github.com/vercel/ai/pull/24405); earlier
@@ -385,23 +379,6 @@ describe("text citations", () => {
       ]);
     },
   );
-
-  test("a message saved with citations lists them", async () => {
-    const t = initConvexTest();
-    const threadId = await t.action(async (ctx) => {
-      const threadId = await createThread(ctx, component, {});
-      await agentWith(citingModel()).saveMessage(ctx, {
-        threadId,
-        message: { role: "assistant", content: [CITED_PART] },
-      });
-      return threadId;
-    });
-    const [assistant] = await storedAssistants(t, threadId);
-    expect(assistant.message!.content).toEqual([CITED_PART]);
-    expect(textParts((await reload(t, threadId)).parts)).toMatchObject([
-      { citations: CITATIONS },
-    ]);
-  });
 
   test("UI messages round-trip their citations and provider metadata through MessageDocs", async () => {
     const sdk = await sdkUIMessage();

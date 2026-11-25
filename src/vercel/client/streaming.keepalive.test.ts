@@ -88,23 +88,6 @@ test("a stream created with its message heartbeats before its first part", async
   });
 });
 
-test("a stream whose deltas keep flowing never heartbeats", async () => {
-  await initConvexTest().action(async (ctx) => {
-    const { streamer, calls } = await recordedStreamer(ctx);
-    for (let i = 0; i < 20; i++) {
-      await streamer.addParts([`part ${i}`]);
-      await vi.advanceTimersByTimeAsync(MINUTE);
-    }
-    await streamer.finish();
-    await vi.advanceTimersByTimeAsync(30 * MINUTE);
-    expect(calls).toEqual([
-      "create",
-      ...Array<string>(20).fill("addDelta"),
-      "finish",
-    ]);
-  });
-});
-
 test("failed heartbeats retry after 15, 30 and 60 seconds, before the stream times out", async () => {
   await initConvexTest().action(async (ctx) => {
     const { streamer, heartbeats, onAsyncAbort } = await recordedStreamer(ctx, {

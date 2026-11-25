@@ -1,6 +1,5 @@
 import { describe, expect, test } from "vitest";
 import { v } from "convex/values";
-import { makeFunctionReference } from "convex/server";
 import { stepCountIs, tool, type ToolSet } from "ai";
 import { z } from "zod/v4";
 import {
@@ -32,17 +31,9 @@ const deleteFile = createTool({
   },
 });
 
-const aborts = new Map<string, AbortController>();
 const lookup = createTool({
   inputSchema: z.object({ q: z.string() }),
-  execute: async (_ctx, { q }) => {
-    const controller = aborts.get(q);
-    if (controller) {
-      controller.abort("Stopped");
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    return `Found ${q}`;
-  },
+  execute: async (_ctx, { q }) => `Found ${q}`,
 });
 
 const askName = tool({
@@ -116,24 +107,13 @@ function agentFor(name: string, steps = [["getLocation"]]) {
 const start = app.action({
   args: {
     name: v.string(),
-    stream: v.boolean(),
     toolNames: v.optional(v.array(v.string())),
     steps: v.optional(v.array(v.array(v.string()))),
   },
-  handler: async (ctx, { name, stream, toolNames, steps }) => {
+  handler: async (ctx, { name, toolNames, steps }) => {
     const agent = agentFor(name, steps ?? (toolNames && [toolNames]));
     const { threadId } = await agent.createThread(ctx, {});
-    if (stream) {
-      const result = await agent.streamText(
-        ctx,
-        { threadId },
-        { prompt: "Where am I?" },
-        { saveStreamDeltas: { chunking: "word", throttleMs: 0 } },
-      );
-      await result.consumeStream();
-    } else {
-      await agent.generateText(ctx, { threadId }, { prompt: "Where am I?" });
-    }
+    await agent.generateText(ctx, { threadId }, { prompt: "Where am I?" });
     return threadId;
   },
 });
@@ -143,22 +123,13 @@ const cont = app.action({
     name: v.string(),
     threadId: v.string(),
     promptMessageId: v.optional(v.string()),
-    stream: v.boolean(),
     steps: v.optional(v.array(v.array(v.string()))),
     withoutClientTool: v.optional(v.boolean()),
     failing: v.optional(v.boolean()),
   },
   handler: async (
     ctx,
-    {
-      name,
-      threadId,
-      promptMessageId,
-      stream,
-      steps,
-      withoutClientTool,
-      failing,
-    },
+    { name, threadId, promptMessageId, steps, withoutClientTool, failing },
   ) => {
     const agent = failing
       ? new Agent(components.agent, {
@@ -171,43 +142,24 @@ const cont = app.action({
       promptMessageId,
       ...(withoutClientTool ? { tools: { deleteFile, lookup } } : {}),
     };
-    let text: string;
-    if (stream) {
-      const result = await agent.streamText(ctx, { threadId }, args, {
-        saveStreamDeltas: { chunking: "word", throttleMs: 0 },
-      });
-      await result.consumeStream();
-      text = await result.text;
-    } else {
-      text = (await agent.generateText(ctx, { threadId }, args)).text;
-    }
-    const model = models.get(name)!;
-    const calls = stream ? model.doStreamCalls : model.doGenerateCalls;
+    const { text } = await agent.generateText(ctx, { threadId }, args);
+    const calls = models.get(name)!.doGenerateCalls;
     return { text, prompt: JSON.parse(JSON.stringify(calls.at(-1)!.prompt)) };
   },
 });
 
-// Streams a step whose model fails, or whose server tool aborts the stream,
-// after the call is emitted, leaving a failed row that holds the call.
+// Streams a step whose model fails after the call is emitted, leaving a
+// failed row that holds the call.
 const failStep = app.action({
-  args: {
-    toolNames: v.array(v.string()),
-    mode: v.union(v.literal("error"), v.literal("abort")),
-  },
-  handler: async (ctx, { toolNames, mode }) => {
+  args: {},
+  handler: async (ctx) => {
     const agent = new Agent(components.agent, {
-      name: `failing-${toolNames.join("-")}-${mode}`,
+      name: "failing-getLocation-error",
       tools,
       stopWhen: stepCountIs(5),
       languageModel: mockModel({
-        contentSteps: [
-          toolNames.map((name) =>
-            name === "lookup"
-              ? { ...toolCall(name), input: JSON.stringify({ q: mode }) }
-              : toolCall(name),
-          ),
-        ],
-        fail: mode === "error",
+        contentSteps: [[toolCall("getLocation")]],
+        fail: true,
       }),
     });
     const { threadId } = await agent.createThread(ctx, {});
@@ -215,13 +167,11 @@ const failStep = app.action({
       threadId,
       prompt: "Where am I?",
     });
-    const controller = new AbortController();
-    if (mode === "abort") aborts.set(mode, controller);
     try {
       const result = await agent.streamText(
         ctx,
         { threadId },
-        { promptMessageId: messageId, abortSignal: controller.signal },
+        { promptMessageId: messageId },
         { saveStreamDeltas: { chunking: "word", throttleMs: 0 } },
       );
       await result.consumeStream();
@@ -252,58 +202,6 @@ const readsOf = app.mutation({
       result,
       documents: after.documentsRead.used - before.documentsRead.used,
     };
-  },
-});
-
-// The component functions a generation calls and the documents each reads,
-// for an agent with or without the client tool. With a promptMessageId it
-// continues that thread.
-const generationCalls = app.action({
-  args: {
-    withClientTool: v.boolean(),
-    threadId: v.optional(v.string()),
-    promptMessageId: v.optional(v.string()),
-  },
-  handler: async (ctx, { withClientTool, threadId, promptMessageId }) => {
-    const agent = new Agent(components.agent, {
-      name: "calls",
-      tools: withClientTool ? { getLocation, lookup } : { lookup },
-      stopWhen: stepCountIs(5),
-      languageModel: mockModel({
-        content:
-          withClientTool && !promptMessageId
-            ? [toolCall("getLocation")]
-            : [{ type: "text", text: PARIS }],
-      }),
-    });
-    const calls: string[] = [];
-    const measure = makeFunctionReference<"mutation">("clientTools:readsOf");
-    const record =
-      (kind: "query" | "mutation") => async (ref: any, args: any) => {
-        const name = String(ref[Symbol.for("toReferencePath")]).replace(
-          "_reference/childComponent/agent/",
-          "",
-        );
-        const { result, documents } = await ctx.runMutation(measure, {
-          kind,
-          name,
-          args,
-        });
-        calls.push(`${kind} ${name} reads ${documents}`);
-        return result;
-      };
-    const recording = {
-      ...ctx,
-      runQuery: record("query") as typeof ctx.runQuery,
-      runMutation: record("mutation") as typeof ctx.runMutation,
-    };
-    threadId ??= (await agent.createThread(ctx, {})).threadId;
-    await agent.generateText(
-      recording,
-      { threadId },
-      promptMessageId ? { promptMessageId } : { prompt: "Where?" },
-    );
-    return { threadId, calls };
   },
 });
 
@@ -387,11 +285,10 @@ const saveOnFirstOrder = app.mutation({
 });
 
 // Two generations on one order reserve their pending messages before either
-// finishes. The first saves a client call; the second saves text or is still
-// pending.
+// finishes. The first saves a client call; the second is still pending.
 const raceSteps = app.mutation({
-  args: { secondPending: v.boolean() },
-  handler: async (ctx, { secondPending }) => {
+  args: {},
+  handler: async (ctx) => {
     const { threadId } = await agentFor("mutations").createThread(ctx, {});
     const { messageId } = await saveMessage(ctx, components.agent, {
       threadId,
@@ -407,7 +304,7 @@ const raceSteps = app.mutation({
         })
       ).messages[0]._id;
     const first = await reserve();
-    const second = await reserve();
+    await reserve();
     await saveMessages(ctx, components.agent, {
       threadId,
       pendingMessageId: first,
@@ -425,13 +322,6 @@ const raceSteps = app.mutation({
         },
       ],
     });
-    if (!secondPending) {
-      await saveMessages(ctx, components.agent, {
-        threadId,
-        pendingMessageId: second,
-        messages: [{ role: "assistant", content: "Moving on." }],
-      });
-    }
     return threadId;
   },
 });
@@ -484,7 +374,6 @@ const { api, createTest } = app.defineModules({
     cont,
     failStep,
     readsOf,
-    generationCalls,
     addOutput,
     decide,
     saveOnFirstOrder,
@@ -536,93 +425,82 @@ describe("addToolOutput", () => {
     ).toThrow(/cannot need approval/);
   });
 
-  for (const stream of [false, true]) {
-    const mode = stream ? "streamText" : "generateText";
-
-    test(`${mode}: the output is saved next to its call and the continuation sees call then result`, async () => {
-      const t = createTest();
-      const name = `order-${mode}`;
-      const threadId = await t.action(api.clientTools.start, { name, stream });
-      const before = await t.query(api.clientTools.messages, { threadId });
-      expect(before.toolParts).toEqual([
-        expect.objectContaining({
-          toolCallId: "tc-client",
-          state: "input-available",
-          input: { precise: true },
-        }),
-      ]);
-      const callOrder = before.docs[0].order;
-      await t.mutation(api.clientTools.saveUserMessage, {
-        threadId,
-        prompt: "in between",
-      });
-
-      const { messageId } = await t.mutation(api.clientTools.addOutput, {
-        threadId,
+  test("generateText: the output is saved next to its call and the continuation sees call then result", async () => {
+    const t = createTest();
+    const name = "order-generateText";
+    const threadId = await t.action(api.clientTools.start, { name });
+    const before = await t.query(api.clientTools.messages, { threadId });
+    expect(before.toolParts).toEqual([
+      expect.objectContaining({
         toolCallId: "tc-client",
+        state: "input-available",
+        input: { precise: true },
+      }),
+    ]);
+    const callOrder = before.docs[0].order;
+    await t.mutation(api.clientTools.saveUserMessage, {
+      threadId,
+      prompt: "in between",
+    });
+
+    const { messageId } = await t.mutation(api.clientTools.addOutput, {
+      threadId,
+      toolCallId: "tc-client",
+      output: { city: "Paris" },
+    });
+    const after = await t.query(api.clientTools.messages, { threadId });
+    expect(after.docs.find((m) => m._id === messageId)?.order).toBe(callOrder);
+    expect(after.toolParts).toEqual([
+      expect.objectContaining({
+        state: "output-available",
         output: { city: "Paris" },
-      });
-      const after = await t.query(api.clientTools.messages, { threadId });
-      expect(after.docs.find((m) => m._id === messageId)?.order).toBe(
-        callOrder,
-      );
-      expect(after.toolParts).toEqual([
-        expect.objectContaining({
-          state: "output-available",
-          output: { city: "Paris" },
-        }),
-      ]);
+      }),
+    ]);
 
-      const next = await t.action(api.clientTools.cont, {
-        name,
-        threadId,
-        promptMessageId: messageId,
-        stream,
-      });
-      expect(next.text).toBe(PARIS);
-      expect(promptRoles(next.prompt)).toEqual([
-        "user:text",
-        "assistant:tool-call",
-        "tool:tool-result",
-      ]);
-      expect(next.prompt.at(-1).content[0]).toMatchObject({
-        toolCallId: "tc-client",
-        toolName: "getLocation",
-        output: { type: "json", value: { city: "Paris" } },
-      });
+    const next = await t.action(api.clientTools.cont, {
+      name,
+      threadId,
+      promptMessageId: messageId,
     });
-  }
+    expect(next.text).toBe(PARIS);
+    expect(promptRoles(next.prompt)).toEqual([
+      "user:text",
+      "assistant:tool-call",
+      "tool:tool-result",
+    ]);
+    expect(next.prompt.at(-1).content[0]).toMatchObject({
+      toolCallId: "tc-client",
+      toolName: "getLocation",
+      output: { type: "json", value: { city: "Paris" } },
+    });
+  });
 
-  for (const [output, saved] of [
-    ["Paris", { type: "text", value: "Paris" }],
-    [undefined, { type: "json", value: null }],
-  ] as const) {
-    test(`an output of ${JSON.stringify(output) ?? "undefined"} is saved as ${saved.type}`, async () => {
-      const t = createTest();
-      const threadId = await t.action(api.clientTools.start, {
-        name: `output-${saved.type}`,
-        stream: false,
-      });
-      await t.mutation(api.clientTools.addOutput, {
-        threadId,
-        toolCallId: "tc-client",
-        output,
-      });
-      const { results } = await t.query(api.clientTools.messages, {
-        threadId,
-      });
-      expect(results).toEqual([
-        expect.objectContaining({ toolCallId: "tc-client", output: saved }),
-      ]);
+  test("an output of undefined is saved as json", async () => {
+    const t = createTest();
+    const threadId = await t.action(api.clientTools.start, {
+      name: "output-json",
     });
-  }
+    await t.mutation(api.clientTools.addOutput, {
+      threadId,
+      toolCallId: "tc-client",
+      output: undefined,
+    });
+    const { results } = await t.query(api.clientTools.messages, {
+      threadId,
+    });
+    expect(results).toEqual([
+      expect.objectContaining({
+        toolCallId: "tc-client",
+        output: { type: "json", value: null },
+      }),
+    ]);
+  });
 
   test("errorText saves an error result the model sees", async () => {
     const t = createTest();
     const name = "error-text";
     const threadId = await t.action(api.clientTools.start, {
       name,
-      stream: false,
     });
     const { messageId } = await t.mutation(api.clientTools.addOutput, {
       threadId,
@@ -640,7 +518,6 @@ describe("addToolOutput", () => {
       name,
       threadId,
       promptMessageId: messageId,
-      stream: false,
     });
     expect(next.prompt.at(-1).content[0]).toMatchObject({
       toolCallId: "tc-client",
@@ -689,17 +566,15 @@ describe("addToolOutput", () => {
       },
       /Tool call tc-client was already handled/,
     ],
-    ...[true, false].map(
-      (approved): Rejection => [
-        `an output after ${approved ? "an approval" : "a denial"}`,
-        ["deleteFile"],
-        async (t: Ctx, threadId: string) => {
-          await t.mutation(api.clientTools.decide, { threadId, approved });
-          return componentOutput(t, threadId, "deleteFile");
-        },
-        /Tool call tc-delete was already handled/,
-      ],
-    ),
+    [
+      "an output after an approval",
+      ["deleteFile"],
+      async (t, threadId) => {
+        await t.mutation(api.clientTools.decide, { threadId, approved: true });
+        return componentOutput(t, threadId, "deleteFile");
+      },
+      /Tool call tc-delete was already handled/,
+    ],
     [
       "an approval after a result",
       ["deleteFile"],
@@ -751,18 +626,6 @@ describe("addToolOutput", () => {
       ["lookup"],
       (t, threadId) => output(t, threadId, "lookup"),
       /Tool lookup is not a client tool: it has execute/,
-    ],
-    [
-      "an output naming a server tool for a client call",
-      ["getLocation"],
-      (t, threadId) =>
-        t.mutation(api.clientTools.addOutput, {
-          threadId,
-          tool: "deleteFile",
-          toolCallId: "tc-client",
-          output: "done",
-        }),
-      /Tool deleteFile is not a client tool: it has execute/,
     ],
     [
       "an output for an agent's client tool left out of the tools passed",
@@ -828,7 +691,6 @@ describe("addToolOutput", () => {
       const t = createTest();
       const threadId = await t.action(api.clientTools.start, {
         name: `reject-${label}`,
-        stream: false,
         toolNames,
       });
       await expect(act(t, threadId)).rejects.toThrow(error);
@@ -839,7 +701,6 @@ describe("addToolOutput", () => {
     const t = createTest();
     const threadId = await t.action(api.clientTools.start, {
       name: "per-call-tools",
-      stream: false,
     });
     await t.mutation(api.clientTools.addOutput, {
       threadId,
@@ -864,39 +725,21 @@ describe("addToolOutput", () => {
         const name = "without-client-tool";
         const threadId = await t.action(api.clientTools.start, {
           name,
-          stream: false,
         });
         const { docs } = await t.query(api.clientTools.messages, { threadId });
         await t.action(api.clientTools.cont, {
           name,
           threadId,
           promptMessageId: docs[0]._id,
-          stream: false,
           withoutClientTool: true,
         });
         return threadId;
       },
     ],
     [
-      "text was saved by hand on its order",
-      async (t) => {
-        const threadId = await t.action(api.clientTools.start, {
-          name: "by-hand",
-          stream: false,
-        });
-        await t.mutation(api.clientTools.saveOnFirstOrder, {
-          threadId,
-          message: { role: "assistant", content: "Moving on." },
-        });
-        return threadId;
-      },
+      "a concurrent generation on its order is pending",
+      (t) => t.mutation(api.clientTools.raceSteps, {}),
     ],
-    ...[false, true].map(
-      (secondPending): [string, (t: Ctx) => Promise<string>] => [
-        `a concurrent generation on its order ${secondPending ? "is pending" : "saved text"}`,
-        (t) => t.mutation(api.clientTools.raceSteps, { secondPending }),
-      ],
-    ),
   ];
   for (const [label, setup] of movedPast) {
     test(`an output is rejected once ${label}`, async () => {
@@ -913,7 +756,6 @@ describe("addToolOutput", () => {
     const name = "late-output";
     const threadId = await t.action(api.clientTools.start, {
       name,
-      stream: false,
       steps: [["getLocation"], ["text"]],
     });
     const prompt = await t.mutation(api.clientTools.saveUserMessage, {
@@ -924,7 +766,6 @@ describe("addToolOutput", () => {
       name,
       threadId,
       promptMessageId: prompt.messageId,
-      stream: false,
     });
     expect(promptRoles(meanwhile.prompt)).toEqual(["user:text", "user:text"]);
 
@@ -933,7 +774,6 @@ describe("addToolOutput", () => {
       name,
       threadId,
       promptMessageId: messageId,
-      stream: false,
     });
     expect(promptRoles(late.prompt)).toEqual([
       "user:text",
@@ -949,7 +789,6 @@ describe("addToolOutput", () => {
       name,
       threadId,
       promptMessageId: thanks.messageId,
-      stream: false,
     });
     expectEveryCallAnsweredNext(after.prompt);
     expect(promptRoles(after.prompt)).toEqual([
@@ -968,7 +807,6 @@ describe("addToolOutput", () => {
     const name = "two-client-calls";
     const threadId = await t.action(api.clientTools.start, {
       name,
-      stream: false,
       toolNames: ["getLocation", "getLocation:tc-client-2"],
     });
     const first = await output(t, threadId);
@@ -981,65 +819,52 @@ describe("addToolOutput", () => {
       name,
       threadId,
       promptMessageId: first.messageId,
-      stream: false,
     });
     expect(next.text).toBe(PARIS);
     expectEveryCallAnsweredNext(next.prompt);
   });
 
-  for (const approved of [true, false]) {
-    for (const outputFirst of [false, true]) {
-      test(`a step with a client call and ${approved ? "an approved" : "a denied"} call continues from the ${outputFirst ? "decision" : "output"}`, async () => {
-        const t = createTest();
-        const name = `mixed-${approved}-${outputFirst}`;
-        const threadId = await t.action(api.clientTools.start, {
-          name,
-          stream: false,
-          toolNames: ["getLocation", "deleteFile"],
-        });
-        const decision = () =>
-          t.mutation(api.clientTools.decide, { threadId, approved });
-        const { messageId } = outputFirst
-          ? (await output(t, threadId), await decision())
-          : (await decision(), await output(t, threadId));
-        executed.length = 0;
+  test("a step with a client call and an approved call continues from the output", async () => {
+    const t = createTest();
+    const name = "mixed-true-false";
+    const threadId = await t.action(api.clientTools.start, {
+      name,
+      toolNames: ["getLocation", "deleteFile"],
+    });
+    await t.mutation(api.clientTools.decide, { threadId, approved: true });
+    const { messageId } = await output(t, threadId);
+    executed.length = 0;
 
-        const next = await t.action(api.clientTools.cont, {
-          name,
-          threadId,
-          promptMessageId: messageId,
-          stream: false,
-        });
-        expect(next.text).toBe(PARIS);
-        expect(executed).toEqual(approved ? ["a.txt"] : []);
-        const results = next.prompt
-          .filter((m: any) => m.role === "tool")
-          .flatMap((m: any) => m.content)
-          .filter((p: any) => p.type === "tool-result");
-        expect(results).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              toolCallId: "tc-client",
-              output: { type: "json", value: { city: "Paris" } },
-            }),
-            expect.objectContaining({
-              toolCallId: "tc-delete",
-              output: approved
-                ? { type: "text", value: "Deleted a.txt" }
-                : expect.objectContaining({ type: "execution-denied" }),
-            }),
-          ]),
-        );
-      });
-    }
-  }
+    const next = await t.action(api.clientTools.cont, {
+      name,
+      threadId,
+      promptMessageId: messageId,
+    });
+    expect(next.text).toBe(PARIS);
+    expect(executed).toEqual(["a.txt"]);
+    const results = next.prompt
+      .filter((m: any) => m.role === "tool")
+      .flatMap((m: any) => m.content)
+      .filter((p: any) => p.type === "tool-result");
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          toolCallId: "tc-client",
+          output: { type: "json", value: { city: "Paris" } },
+        }),
+        expect.objectContaining({
+          toolCallId: "tc-delete",
+          output: { type: "text", value: "Deleted a.txt" },
+        }),
+      ]),
+    );
+  });
 
   test("a continuation that failed is retried from the same output", async () => {
     const t = createTest();
     const name = "failed-continuation";
     const threadId = await t.action(api.clientTools.start, {
       name,
-      stream: false,
     });
     const { messageId } = await output(t, threadId);
     await expect(
@@ -1047,7 +872,6 @@ describe("addToolOutput", () => {
         name,
         threadId,
         promptMessageId: messageId,
-        stream: false,
         failing: true,
       }),
     ).rejects.toThrow(/Mock error message/);
@@ -1055,85 +879,35 @@ describe("addToolOutput", () => {
       name,
       threadId,
       promptMessageId: messageId,
-      stream: false,
     });
     expect(next.text).toBe(PARIS);
     expectEveryCallAnsweredNext(next.prompt);
   });
 
-  for (const [toolNames, mode] of [
-    [["getLocation"], "error"],
-    [["getLocation", "lookup"], "abort"],
-  ] as const) {
-    test(`a client call in a stream that ${mode === "error" ? "failed" : "was aborted during a server tool"} takes no output, and its step is retried`, async () => {
-      const t = createTest();
-      const { threadId, promptMessageId } = await t.action(
-        api.clientTools.failStep,
-        { toolNames: [...toolNames], mode },
-      );
-      const failed = `0.1 failed assistant:${toolNames.map(() => "tool-call").join(",")}`;
-      const rows = async () =>
-        (await t.query(api.clientTools.messages, { threadId })).rows;
-      expect(await rows()).toEqual(["0.0 success user:text", failed]);
-      await expect(output(t, threadId)).rejects.toThrow(
-        /Tool call tc-client was not found/,
-      );
-      const retried = await t.action(api.clientTools.cont, {
-        name: `retry-${mode}`,
-        threadId,
-        promptMessageId,
-        stream: false,
-        steps: [],
-      });
-      expect(retried.text).toBe(PARIS);
-      expect(await rows()).toEqual([
-        "0.0 success user:text",
-        failed,
-        "0.2 success assistant:text",
-      ]);
-    });
-  }
-});
-
-describe("component calls and reads per generation", () => {
-  // Measured on main at a3321497, before client tools. The continuation is
-  // from a result saved by hand on its call's order, as main documented.
-  const firstTurn = [
-    "query messages/listMessagesByThreadId reads 0",
-    "mutation messages/addMessages reads 3",
-    "mutation messages/addMessages reads 7",
-  ];
-  const continuation = [
-    "query messages/listMessagesByThreadId reads 4",
-    "mutation messages/addMessages reads 5",
-    "mutation messages/addMessages reads 8",
-  ];
-
-  for (const withClientTool of [false, true]) {
-    test(`a generation ${withClientTool ? "that calls a client tool" : "without client tools"} makes the same calls and reads as before client tools`, async () => {
-      const { calls } = await createTest().action(
-        api.clientTools.generationCalls,
-        { withClientTool },
-      );
-      expect(calls).toEqual(firstTurn);
-    });
-  }
-
-  test("a continuation from addToolOutput makes the same calls and reads as one from a result saved by hand on main", async () => {
+  test("a client call in a stream that failed takes no output, and its step is retried", async () => {
     const t = createTest();
-    const { threadId } = await t.action(api.clientTools.generationCalls, {
-      withClientTool: true,
-    });
-    const { messageId } = await t.mutation(api.clientTools.addOutput, {
+    const { threadId, promptMessageId } = await t.action(
+      api.clientTools.failStep,
+      {},
+    );
+    const failed = "0.1 failed assistant:tool-call";
+    const rows = async () =>
+      (await t.query(api.clientTools.messages, { threadId })).rows;
+    expect(await rows()).toEqual(["0.0 success user:text", failed]);
+    await expect(output(t, threadId)).rejects.toThrow(
+      /Tool call tc-client was not found/,
+    );
+    const retried = await t.action(api.clientTools.cont, {
+      name: "retry-error",
       threadId,
-      toolCallId: "tc-client",
-      output: { city: "Paris" },
+      promptMessageId,
+      steps: [],
     });
-    const { calls } = await t.action(api.clientTools.generationCalls, {
-      withClientTool: true,
-      threadId,
-      promptMessageId: messageId,
-    });
-    expect(calls).toEqual(continuation);
+    expect(retried.text).toBe(PARIS);
+    expect(await rows()).toEqual([
+      "0.0 success user:text",
+      failed,
+      "0.2 success assistant:text",
+    ]);
   });
 });

@@ -207,6 +207,43 @@ limit.
 This balances pragmatism of trying to prevent requests ahead of time with an
 estimate, while also rate limiting the actual usage.
 
+### Step 3: Checking before each step
+
+A tool loop makes one model call per step. The `usageHandler` runs when a step
+ends, before the next one starts, so a check in `prepareStep` sees the usage of
+every step before it:
+
+```ts
+const result = await rateLimitedAgent.streamText(
+  ctx,
+  { threadId, userId },
+  {
+    promptMessageId,
+    prepareStep: async () => {
+      await rateLimiter.check(ctx, "tokenUsagePerUser", {
+        key: userId,
+        throws: true,
+      });
+      return undefined;
+    },
+  },
+  { saveStreamDeltas: true },
+);
+```
+
+When the check throws, that model call doesn't happen. The steps that finished
+stay saved, and the pending reply is marked failed with the error, which for a
+rate limit error is its data, e.g.
+`{"kind":"RateLimited","name":"tokenUsagePerUser","retryAfter":…}`.
+`generateText` rethrows the error. `streamText` passes it to `onError`, as the
+AI SDK does for any failed step, and `text` rejects only if no step finished.
+
+To run a check on every model call, including `generateObject`, pass a `model`
+wrapped with the AI SDK's `wrapLanguageModel` and throw from `wrapGenerate` and
+`wrapStream`. Both close over `ctx` and `userId`, so they belong in the action
+that calls the agent, not in the `Agent` config. To refuse without saving
+anything, check before calling the agent, as in Step 1.
+
 ## Client-side Handling
 
 See [RateLimiting.tsx](../example/ui/rate_limiting/RateLimiting.tsx) for the
