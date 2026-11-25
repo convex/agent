@@ -82,7 +82,11 @@ function rawRequestResponseInclude(
   };
 }
 
-// Another writer ended the generation: a retry, an abort, or a deleted prompt.
+/**
+ * Thrown into a generation that another writer ended: a retry, an abort, or a
+ * deleted prompt or thread. streamText's default onError skips logging it; an
+ * app passing its own onError can check `error instanceof GenerationStopped`.
+ */
 export class GenerationStopped extends Error {}
 
 export async function startGeneration<

@@ -16,3 +16,10 @@ test("the root entry exports deriveUIMessagesFromDeltas without loading React", 
     deltas.deriveUIMessagesFromDeltas,
   );
 });
+
+test("the root entry exports GenerationStopped for an onError that filters it", async () => {
+  const agent = await import("./index.js");
+  const start = await import("./client/start.js");
+
+  expect(agent.GenerationStopped).toBe(start.GenerationStopped);
+});
