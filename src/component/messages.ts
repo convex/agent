@@ -273,19 +273,30 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
-  // A thread deletion removes streams and messages page by page, so either
-  // may be gone first; a save into a generation whose stream is gone would
-  // land behind the deletion's cursor and outlive the thread.
+  const finishStream =
+    finishStreamId && (await ctx.db.get("streamingMessages", finishStreamId));
+  // deleteThreadStep deletes a thread's messages, then the thread, and only
+  // then its streams, so a deletion that reached finishStreamId already took
+  // the prompt and the thread. A save into it would land behind the
+  // deletion's cursor and outlive the thread, so it is dropped.
+  const thread =
+    (!userId || (finishStreamId && !finishStream)) &&
+    (await ctx.db.get("threads", threadId));
   if (
     abandonIfPromptMissing &&
     ((promptMessageId && !promptMessage) ||
-      (finishStreamId &&
-        !(await ctx.db.get("streamingMessages", finishStreamId))))
+      (finishStreamId && !finishStream && !thread))
   ) {
     return { messages: [] };
   }
-  if (!userId && threadId) {
-    const thread = await ctx.db.get("threads", threadId);
+  if (finishStreamId && !finishStream) {
+    // The thread is live, so the stream ended on its own: timeoutStreamHandler
+    // aborts a stream with no heartbeat for 10 minutes (a long tool call) and
+    // scheduleStreamDeletion removes it 5 minutes later. The messages still
+    // save; only finishing the stream is skipped.
+    console.warn("Saving without finishing missing stream", finishStreamId);
+  }
+  if (!userId) {
     assert(thread, `Thread ${threadId} not found`);
     userId = thread.userId;
   }
@@ -484,16 +495,16 @@ async function addMessagesHandler(
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
   const failed = toReturn.find((m) => m.status === "failed");
-  if (finishStreamId && failed) {
+  if (finishStream && failed) {
     await abortById(ctx, {
-      streamId: finishStreamId,
+      streamId: finishStream._id,
       reason: failed.error ?? "The generation failed",
     });
-  } else if (finishStreamId) {
+  } else if (finishStream) {
     await finishHandler(ctx, {
-      streamId: finishStreamId,
+      streamId: finishStream._id,
     });
-    await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
+    await releaseStreamFileOwnershipByIds(ctx, [finishStream._id]);
   }
   return { messages: toReturn.map(publicMessage) };
 }

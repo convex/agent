@@ -2,7 +2,7 @@
 
 import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
-import { api } from "./_generated/api.js";
+import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import { getMaxMessage } from "./messages.js";
 import {
@@ -1840,7 +1840,65 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     expect(all.page).toHaveLength(0);
   });
 
-  test("abandons a failed save whose stream a thread deletion already removed", async () => {
+  test("a successful final save after its stream was deleted saves the answer and finalizes the pending message", async () => {
+    // timeoutStreamHandler aborts a stream with no heartbeat for 10 minutes
+    // (a long tool call), and scheduleStreamDeletion removes it 5 minutes
+    // later. The thread and prompt are still there, so the answer must land.
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hello" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const [prompt, pending] = messages;
+    const promptMessageId = prompt._id as Id<"messages">;
+    const pendingMessageId = pending._id as Id<"messages">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: pending.order,
+      stepOrder: pending.stepOrder,
+      format: "UIMessageChunk",
+    });
+    await t.run(async (ctx) => ctx.db.delete("streamingMessages", streamId));
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const saved = await t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId,
+        abandonIfPromptMissing: true,
+        pendingMessageId,
+        finishStreamId: streamId,
+        failPendingSteps: false,
+        messages: [{ message: { role: "assistant", content: "answer" } }],
+      });
+      expect(saved.messages.map((m) => [m._id, m.status, m.text])).toEqual([
+        [pendingMessageId, "success", "answer"],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+
+    const rows = await t.run(async (ctx) =>
+      ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+          q.eq("threadId", threadId),
+        )
+        .collect(),
+    );
+    expect(rows.map((m) => [m._id, m.status])).toEqual([
+      [promptMessageId, "success"],
+      [pendingMessageId, "success"],
+    ]);
+  });
+
+  test("abandons a save whose stream, prompt and thread a thread deletion removed", async () => {
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, { userId: "u" });
     const threadId = thread._id as Id<"threads">;
@@ -1857,7 +1915,8 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
       stepOrder: prompt.stepOrder + 1,
       format: "UIMessageChunk",
     });
-    await t.run(async (ctx) => ctx.db.delete("streamingMessages", streamId));
+    await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
+    await t.finishAllScheduledFunctions(() => {});
 
     const saved = await t.mutation(api.messages.addMessages, {
       threadId,
@@ -1882,7 +1941,50 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
         )
         .collect(),
     );
-    expect(rows.map((m) => m._id)).toEqual([promptMessageId]);
+    expect(rows).toEqual([]);
+  });
+
+  test("a thread deletion removes a generation's stream only after the thread's messages", async () => {
+    // With the stream deleted last, addMessagesHandler can read a missing
+    // finishStreamId stream on a live prompt as a timed-out stream, not a
+    // deletion whose cursor a failed save would land behind.
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "one" } },
+        { message: { role: "user", content: "two" } },
+      ],
+    });
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: messages[1].order,
+      stepOrder: messages[1].stepOrder + 1,
+      format: "UIMessageChunk",
+    });
+
+    const step = await t.mutation(internal.threads._deleteThreadStep, {
+      threadId,
+      limit: 1,
+    });
+    expect(step.isDone).toBe(false);
+    expect(
+      await t.run(async (ctx) => ctx.db.get("streamingMessages", streamId)),
+    ).not.toBeNull();
+
+    await t.mutation(api.threads.deleteAllForThreadIdAsync, {
+      threadId,
+      limit: 1,
+    });
+    await t.finishAllScheduledFunctions(() => {});
+    expect(
+      await t.run(async (ctx) => ({
+        stream: await ctx.db.get("streamingMessages", streamId),
+        thread: await ctx.db.get("threads", threadId),
+      })),
+    ).toEqual({ stream: null, thread: null });
   });
 
   test("still throws for a caller that did not opt in", async () => {

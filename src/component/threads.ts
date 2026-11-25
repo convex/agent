@@ -252,7 +252,10 @@ async function deleteThreadStep(
     streamOrder: args.streamOrder,
     deltaCursor: args.deltaCursor,
   };
-  if (!args.streamsDone) {
+  // Streams go only after every message and the thread itself, so
+  // addMessagesHandler can tell a stream this deletion removed (thread gone)
+  // from one that timed out on a live thread.
+  if (messagesResult.isDone && !args.streamsDone) {
     streamResult = await deleteStreamsPageForThreadId(ctx, {
       threadId: args.threadId,
       streamOrder: args.streamOrder,
