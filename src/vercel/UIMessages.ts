@@ -305,7 +305,24 @@ function groupAssistantMessages<METADATA = unknown>(
       // Assistant or tool message
 
       const previous = currentAssistantGroup.at(-1);
-      if (previous && !continuesReply(previous, message)) {
+      if (
+        previous &&
+        !continuesReply(
+          {
+            order: previous.order,
+            failed: currentAssistantGroup.some((m) => m.status === "failed"),
+          },
+          message,
+          () => {
+            const callIds = new Set(
+              currentAssistantGroup.flatMap((m) => toolPartIds(m, "tool-call")),
+            );
+            return toolPartIds(message, "tool-result").some((id) =>
+              callIds.has(id),
+            );
+          },
+        )
+      ) {
         groups.push({
           role: "assistant",
           messages: currentAssistantGroup,
@@ -335,6 +352,17 @@ function groupAssistantMessages<METADATA = unknown>(
   }
 
   return groups;
+}
+
+function toolPartIds(
+  message: MessageDoc,
+  type: "tool-call" | "tool-result",
+): string[] {
+  const content = message.message?.content;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((part) =>
+    part.type === type ? [part.toolCallId] : [],
+  );
 }
 
 function createSystemUIMessage<
@@ -450,11 +478,15 @@ function createAssistantUIMessage<
     userId: firstMessage.userId,
   };
 
-  // Get status from last message
+  // Get status from last message, except that a group holding a failed step
+  // stays failed: groupAssistantMessages only adds a step after a failed one
+  // when it carries a tool result for that failed attempt's call.
   const lastMessage = group[group.length - 1];
   const status = lastMessage.streaming
     ? ("streaming" as const)
-    : lastMessage.status;
+    : group.some((m) => m.status === "failed")
+      ? ("failed" as const)
+      : lastMessage.status;
 
   // Extract approval parts from raw message content for UI rendering
   type ApprovalPart =
@@ -1022,7 +1054,18 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
     if (
       previous.role !== message.role ||
       message.role !== "assistant" ||
-      !continuesReply(previous, message)
+      !continuesReply(
+        { order: previous.order, failed: previous.status === "failed" },
+        message,
+        () =>
+          message.parts.some((part) => {
+            const toolCallId = getToolCallId(part);
+            return (
+              toolCallId !== undefined &&
+              previous.parts.some((p) => getToolCallId(p) === toolCallId)
+            );
+          }),
+      )
     ) {
       acc.push(message);
       return acc;
@@ -1052,6 +1095,9 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
     acc.push({
       ...previous,
       ...pick(message, ["status", "metadata", "agentName"]),
+      // A failed bubble only takes in a later step that answers one of its
+      // tool calls (see continuesReply), and that attempt still failed.
+      ...(previous.status === "failed" ? { status: "failed" as const } : {}),
       parts: newParts,
       text: joinText(newParts),
     });
@@ -1060,15 +1106,20 @@ export function combineUIMessages(messages: UIMessage[]): UIMessage[] {
   return combined;
 }
 
-// A failed step ends its generation, so a step after it at the same order
-// that did not fail belongs to a retry or restart.
+// groupAssistantMessages and combineUIMessages use this to decide whether
+// `message` joins the bubble before it. A failed step ends its attempt, so
+// the next step at the same order belongs to a retry or restart and starts
+// its own bubble, even when that step failed too. The exception is a step
+// carrying a result for one of the failed bubble's tool calls, which stays
+// with its call.
 function continuesReply(
-  previous: { order: number; status: string },
-  message: { order: number; status: string },
+  previous: { order: number; failed: boolean },
+  message: { order: number },
+  answersPreviousToolCall: () => boolean,
 ) {
   return (
     message.order === previous.order &&
-    (previous.status !== "failed" || message.status === "failed")
+    (!previous.failed || answersPreviousToolCall())
   );
 }
 

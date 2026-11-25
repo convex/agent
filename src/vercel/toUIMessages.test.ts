@@ -479,6 +479,95 @@ describe("toUIMessages", () => {
     ]);
   });
 
+  it("keeps two failed attempts in a row apart", () => {
+    const failedCall = (_id: string, stepOrder: number, toolCallId: string) =>
+      baseMessageDoc({
+        _id,
+        stepOrder,
+        status: "failed",
+        error: "Restarting",
+        tool: true,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool-call", toolName: "myTool", toolCallId, input: "hi" },
+          ],
+        },
+      });
+    const uiMessages = toUIMessages([
+      failedCall("first", 1, "call1"),
+      failedCall("second", 2, "call2"),
+      baseMessageDoc({
+        _id: "third",
+        stepOrder: 3,
+        message: { role: "assistant", content: "reply 3" },
+        text: "reply 3",
+      }),
+    ]);
+    expect(uiMessages.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["first", "failed", ""],
+      ["second", "failed", ""],
+      ["third", "success", "reply 3"],
+    ]);
+  });
+
+  it("keeps a tool result with the failed call it answers", () => {
+    const uiMessages = toUIMessages([
+      baseMessageDoc({
+        _id: "first",
+        stepOrder: 1,
+        status: "failed",
+        error: "Restarting",
+        tool: true,
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool-call",
+              toolName: "myTool",
+              toolCallId: "call1",
+              input: "hi",
+            },
+          ],
+        },
+      }),
+      baseMessageDoc({
+        _id: "result",
+        stepOrder: 2,
+        tool: true,
+        message: {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call1",
+              toolName: "myTool",
+              output: { type: "text", value: "42" },
+            },
+          ],
+        },
+      }),
+      baseMessageDoc({
+        _id: "third",
+        stepOrder: 3,
+        message: { role: "assistant", content: "reply 3" },
+        text: "reply 3",
+      }),
+    ]);
+    expect(uiMessages.map((m) => [m.id, m.status, m.text])).toEqual([
+      ["first", "failed", ""],
+      ["third", "success", "reply 3"],
+    ]);
+    expect(uiMessages[0].parts).toContainEqual(
+      expect.objectContaining({
+        type: "tool-myTool",
+        toolCallId: "call1",
+        state: "output-available",
+        output: "42",
+      }),
+    );
+  });
+
   it("handles tool result", () => {
     const messages = [
       baseMessageDoc({
