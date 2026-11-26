@@ -2158,7 +2158,7 @@ describe("cloneThread", () => {
   });
 });
 
-test("the Agent's own finalize and abort return for a row a thread deletion removed", async () => {
+test("the Agent's own finalize and abort return for a row that's already gone", async () => {
   const t = initConvexTest();
   const thread = await t.mutation(api.threads.createThread, { userId: "u" });
   const threadId = thread._id as Id<"threads">;
@@ -2177,17 +2177,18 @@ test("the Agent's own finalize and abort return for a row a thread deletion remo
     stepOrder: pending.stepOrder,
     format: "UIMessageChunk",
   });
-  await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
-  await t.finishAllScheduledFunctions(() => {});
+  // A thread deletion takes both, an app can delete the message, and a stream
+  // that timed out is removed after 5 minutes.
+  await t.mutation(api.messages.deleteByIds, { messageIds: [messageId] });
+  await t.run(async (ctx) => ctx.db.delete("streamingMessages", streamId));
 
   expect(
     await t.mutation(api.messages.finalizeMessage, {
       messageId,
-      threadId,
       result: { status: "failed", error: "Stopped" },
     }),
   ).toBeNull();
   expect(
-    await t.mutation(api.streams.abort, { streamId, threadId, reason: "stop" }),
+    await t.mutation(api.streams.abort, { streamId, reason: "stop" }),
   ).toBe(false);
 });
