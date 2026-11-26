@@ -18,6 +18,7 @@ import type {
   EmbeddingModel,
   GenerateObjectResult,
   GenerateTextResult,
+  InferGenerateOutput,
   LanguageModel,
   Instructions,
   ModelMessage,
@@ -1651,7 +1652,10 @@ export class Agent<
    * @param spec Configuration for the agent acting as an action, including
    *   {@link ContextOptions}, {@link StorageOptions}, and {@link stopWhen}.
    */
-  asTextAction<DataModel extends GenericDataModel>(
+  asTextAction<
+    DataModel extends GenericDataModel,
+    OUTPUT extends AISDKOutput.Output = never,
+  >(
     spec: MaybeCustomCtx<CustomCtx, DataModel, AgentTools> & {
       /**
        * Whether to stream the text.
@@ -1666,6 +1670,11 @@ export class Agent<
        * Defaults to the {@link Agent["options"].stopWhen} option.
        */
       stopWhen?: StopCondition<AgentTools> | Array<StopCondition<AgentTools>>;
+      /**
+       * Structured output, such as `Output.object({ schema })`, which the
+       * action returns as `output`.
+       */
+      output?: OUTPUT;
     } & Options,
     overrides?: AgentCallSettings,
   ) {
@@ -1686,6 +1695,7 @@ export class Agent<
         const targetArgs = { userId, threadId };
         const llmArgs = {
           stopWhen: spec?.stopWhen,
+          output: spec?.output,
           ...overrides,
           ...omit(rest, ["storageOptions", "contextOptions", "stream"]),
           instructions: system,
@@ -1706,6 +1716,12 @@ export class Agent<
             ? { ...ctx_, ...spec.customCtx(ctx_, targetArgs, llmArgs) }
             : ctx_
         ) as GenericActionCtx<GenericDataModel> & CustomCtx;
+        const readOutput = async (output: () => unknown) =>
+          (spec?.output
+            ? convexToJson((await output()) as Value)
+            : undefined) as [OUTPUT] extends [never]
+            ? undefined
+            : InferGenerateOutput<OUTPUT>;
         if (stream) {
           const result = await this.streamText<any>(
             ctx,
@@ -1716,6 +1732,7 @@ export class Agent<
           await result.consumeStream();
           return {
             text: await result.text,
+            output: await readOutput(() => result.output),
             promptMessageId: result.promptMessageId,
             order: result.order,
             finishReason: await result.finishReason,
@@ -1731,6 +1748,7 @@ export class Agent<
           );
           return {
             text: res.text,
+            output: await readOutput(() => res.output),
             promptMessageId: res.promptMessageId,
             order: res.order,
             finishReason: res.finishReason,
