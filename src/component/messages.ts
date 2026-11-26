@@ -558,38 +558,85 @@ function orderedMessagesStream(
   );
 }
 
+const finalizeMessageArgs = {
+  messageId: v.id("messages"),
+  result: v.union(
+    v.object({ status: v.literal("success") }),
+    v.object({ status: v.literal("failed"), error: v.string() }),
+  ),
+};
+
 export const finalizeMessage = mutation({
-  args: {
-    messageId: v.id("messages"),
-    result: v.union(
-      v.object({ status: v.literal("success") }),
-      v.object({ status: v.literal("failed"), error: v.string() }),
-    ),
+  args: finalizeMessageArgs,
+  returns: v.null(),
+  handler: async (ctx, { messageId, result }) => {
+    const stored = await ctx.db.get("messages", messageId);
+    assert(stored, `Message ${messageId} not found`);
+    await finalizeStoredMessage(ctx, stored, result);
+    return null;
   },
+});
+
+// The Agent fails its pending message with this as a generation ends. A
+// thread deleted mid-generation has taken the message with it by then.
+export const finalizeMessageIfPresent = mutation({
+  args: finalizeMessageArgs,
   returns: v.null(),
   handler: async (ctx, { messageId, result }) => {
     const stored = await ctx.db.get("messages", messageId);
     if (!stored) {
       console.warn("Message not found", messageId);
-      return;
+      return null;
     }
-    const message = withText(stored);
-    if (message.status !== "pending") {
-      console.debug(
-        "Trying to finalize a message that's already",
-        message.status,
+    await finalizeStoredMessage(ctx, stored, result);
+    return null;
+  },
+});
+
+async function finalizeStoredMessage(
+  ctx: MutationCtx,
+  stored: Doc<"messages">,
+  result: ObjectType<typeof finalizeMessageArgs>["result"],
+) {
+  const message = withText(stored);
+  if (message.status !== "pending") {
+    console.debug(
+      "Trying to finalize a message that's already",
+      message.status,
+    );
+    return;
+  }
+  // See if we can add any in-progress data
+  if (!message.message?.content.length) {
+    const { messages, materializationFailures, streamsToRelease } =
+      await getStreamingMessagesWithMetadata(ctx, message, result);
+    if (materializationFailures.length > 0) {
+      console.error(
+        "Failed to materialize persisted assistant streams",
+        materializationFailures,
+      );
+      await markPendingMessageFailed(
+        ctx,
+        message,
+        result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
       );
       return;
     }
-    // See if we can add any in-progress data
-    if (!message.message?.content.length) {
-      const { messages, materializationFailures, streamsToRelease } =
-        await getStreamingMessagesWithMetadata(ctx, message, result);
-      if (materializationFailures.length > 0) {
-        console.error(
-          "Failed to materialize persisted assistant streams",
-          materializationFailures,
-        );
+    if (messages.length > 0) {
+      // Nested so an oversized recovered message rolls back on its own and
+      // the pending message is marked failed instead of stuck.
+      try {
+        await ctx.runMutation(api.messages.addMessages, {
+          messages,
+          threadId: message.threadId,
+          agentName: message.agentName,
+          failPendingSteps: false,
+          pendingMessageId: message._id,
+          userId: message.userId,
+          embeddings: undefined,
+        });
+      } catch (error) {
+        console.error("Failed to persist recovered assistant streams", error);
         await markPendingMessageFailed(
           ctx,
           message,
@@ -597,39 +644,16 @@ export const finalizeMessage = mutation({
         );
         return;
       }
-      if (messages.length > 0) {
-        // Nested so an oversized recovered message rolls back on its own and
-        // the pending message is marked failed instead of stuck.
-        try {
-          await ctx.runMutation(api.messages.addMessages, {
-            messages,
-            threadId: message.threadId,
-            agentName: message.agentName,
-            failPendingSteps: false,
-            pendingMessageId: messageId,
-            userId: message.userId,
-            embeddings: undefined,
-          });
-        } catch (error) {
-          console.error("Failed to persist recovered assistant streams", error);
-          await markPendingMessageFailed(
-            ctx,
-            message,
-            result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
-          );
-          return;
-        }
-        await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
-        return;
-      }
+      await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
+      return;
     }
-    if (result.status === "failed") {
-      await markPendingMessageFailed(ctx, message, result.error);
-    } else {
-      await ctx.db.patch("messages", messageId, { status: "success" });
-    }
-  },
-});
+  }
+  if (result.status === "failed") {
+    await markPendingMessageFailed(ctx, message, result.error);
+  } else {
+    await ctx.db.patch("messages", message._id, { status: "success" });
+  }
+}
 
 export const updateMessage = mutation({
   args: {

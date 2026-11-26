@@ -356,14 +356,30 @@ export const abortByOrder = mutation({
   handler: abortStreamsAtOrder,
 });
 
+const abortArgs = {
+  streamId: v.id("streamingMessages"),
+  reason: v.string(),
+  finalDelta: v.optional(deltaValidator),
+};
+
 export const abort = mutation({
-  args: {
-    streamId: v.id("streamingMessages"),
-    reason: v.string(),
-    finalDelta: v.optional(deltaValidator),
-  },
+  args: abortArgs,
   returns: v.boolean(),
   handler: abortById,
+});
+
+// DeltaStreamer aborts its stream with this. A thread deletion or
+// scheduleStreamDeletion may have removed it already.
+export const abortIfPresent = mutation({
+  args: abortArgs,
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    if (!(await ctx.db.get("streamingMessages", args.streamId))) {
+      console.warn("Stream not found", args.streamId);
+      return false;
+    }
+    return await abortById(ctx, args);
+  },
 });
 
 export async function abortById(
@@ -376,8 +392,7 @@ export async function abortById(
 ) {
   const stream = await ctx.db.get("streamingMessages", args.streamId);
   if (!stream) {
-    console.warn("Stream not found", args.streamId);
-    return false;
+    throw new Error(`Stream not found: ${args.streamId}`);
   }
   if (args.finalDelta) {
     await ctx.db.insert("streamDeltas", args.finalDelta);

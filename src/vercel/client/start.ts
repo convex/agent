@@ -319,7 +319,7 @@ export async function startGeneration<
         if (held) await saveHeld(held.error === undefined);
       } finally {
         if (pendingMessageId) {
-          await ctx.runMutation(component.messages.finalizeMessage, {
+          await ctx.runMutation(component.messages.finalizeMessageIfPresent, {
             messageId: pendingMessageId,
             result: { status: "failed", error },
           });
