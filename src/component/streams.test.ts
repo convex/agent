@@ -248,6 +248,33 @@ describe("streams", () => {
     ).toEqual([]);
   });
 
+  test("deleting a thread's streams keeps the thread and its messages", async () => {
+    vi.useFakeTimers();
+
+    const t = initConvexTest();
+    const { threadId, streamId } = await seedStream(t);
+    await insertDeltas(t, streamId, 0, 1, 1);
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "keep me" } }],
+    });
+
+    await t.mutation(api.streams.deleteAllStreamsForThreadIdAsync, {
+      threadId,
+    });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+
+    expect(await t.query(api.threads.getThread, { threadId })).not.toBeNull();
+    const messages = await t.query(api.messages.listMessagesByThreadId, {
+      threadId,
+      order: "asc",
+      paginationOpts: { cursor: null, numItems: 10 },
+    });
+    expect(messages.page).toHaveLength(1);
+    expect(await t.query(api.streams.list, { threadId })).toEqual([]);
+    expect(await countDeltas(t, streamId)).toBe(0);
+  });
+
   test.each([
     ["numbers", { parts: [{ type: "data", data: Array(1000).fill(0) }] }],
     [
