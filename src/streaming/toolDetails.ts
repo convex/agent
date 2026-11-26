@@ -31,14 +31,13 @@ export function toolPartDetails(part: { type: string }): ToolDetails {
 }
 
 /** The type and details of the UI part for a saved call or result. */
-export function toolPartFields(toolName: string, details: ToolDetails) {
+export function toolPartFields(toolName: string, part: object) {
+  const { title, toolMetadata, dynamic } = part as ToolDetails;
   return {
-    ...(details.dynamic
+    ...(dynamic
       ? { type: "dynamic-tool" as const, toolName }
       : { type: `tool-${toolName}` as const }),
-    ...(details.title != null ? { title: details.title } : {}),
-    ...(details.toolMetadata != null
-      ? { toolMetadata: details.toolMetadata }
-      : {}),
+    ...(title != null ? { title } : {}),
+    ...(toolMetadata != null ? { toolMetadata } : {}),
   };
 }

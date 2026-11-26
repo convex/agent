@@ -20,7 +20,13 @@ import {
   type ReasoningFilePart,
 } from "@ai-sdk/provider-utils";
 import type { Infer } from "convex/values";
-import { toModelMessage, fromModelMessage, toUIFilePart } from "./mapping.js";
+import {
+  type Content,
+  toModelMessage,
+  toModelMessageContent,
+  fromModelMessage,
+  toUIFilePart,
+} from "./mapping.js";
 import {
   deriveReasoning,
   extractText,
@@ -40,11 +46,7 @@ import {
   decodeToolJsonFields,
   encodeToolJsonFields,
 } from "../streaming/toolJson.js";
-import {
-  callDetails,
-  resultDetails,
-  toolPartFields,
-} from "../streaming/toolDetails.js";
+import { toolPartFields } from "../streaming/toolDetails.js";
 
 export type UIStatus = "streaming" | MessageStatus;
 
@@ -283,10 +285,10 @@ function groupAssistantMessages<METADATA = unknown>(
   let currentOrder: number | undefined;
 
   for (const message of messages) {
-    const coreMessage = message.message && toModelMessage(message.message);
-    if (!coreMessage) continue;
+    const role = message.message?.role;
+    if (!role) continue;
 
-    if (coreMessage.role === "user" || coreMessage.role === "system") {
+    if (role === "user" || role === "system") {
       // Finish any current assistant group
       if (currentAssistantGroup.length > 0) {
         groups.push({
@@ -298,7 +300,7 @@ function groupAssistantMessages<METADATA = unknown>(
       }
       // Add singleton group
       groups.push({
-        role: coreMessage.role,
+        role,
         message,
       });
     } else {
@@ -319,7 +321,7 @@ function groupAssistantMessages<METADATA = unknown>(
       currentAssistantGroup.push(message);
 
       // End group if this is an assistant message without tool calls
-      if (coreMessage.role === "assistant" && !message.tool) {
+      if (role === "assistant" && !message.tool) {
         groups.push({
           role: "assistant",
           messages: currentAssistantGroup,
@@ -515,35 +517,20 @@ function createAssistantUIMessage<
   const allParts: UIMessage<METADATA, DATA_PARTS, TOOLS>["parts"] = [];
 
   for (const message of group) {
-    const coreMessage = message.message && toModelMessage(message.message);
-    if (!coreMessage) continue;
-
-    const content = coreMessage.content;
-    const nonStringContent =
-      content && typeof content !== "string" ? content : [];
+    if (!message.message) continue;
+    const storedContent = message.message.content;
+    // Each stored part is read with the model part it is sent as, which drops
+    // what only the UI shows.
+    const parts =
+      typeof storedContent === "string"
+        ? []
+        : storedContent.flatMap((stored) =>
+            (toModelMessageContent([stored] as Content) as ModelPart[]).map(
+              (contentPart) => ({ stored, contentPart }),
+            ),
+          );
+    const nonStringContent = parts.map(({ contentPart }) => contentPart);
     const text = extractTextFromMessageDoc(message);
-    const storedContent = message.message!.content;
-    const storedTextParts = Array.isArray(storedContent)
-      ? storedContent.filter((part) => part.type === "text")
-      : [];
-    let textPartIndex = 0;
-    const storedToolParts = new Map(
-      Array.isArray(storedContent)
-        ? storedContent.flatMap((part) =>
-            part.type === "tool-call" || part.type === "tool-result"
-              ? [[`${part.type}:${part.toolCallId}`, part] as const]
-              : [],
-          )
-        : [],
-    );
-    const storedDetails = (type: "tool-call" | "tool-result", id: string) => {
-      const part = storedToolParts.get(`${type}:${id}`);
-      return !part
-        ? {}
-        : type === "tool-call"
-          ? callDetails(part)
-          : resultDetails(part);
-    };
 
     const state = message.streaming
       ? ("streaming" as const)
@@ -574,10 +561,10 @@ function createAssistantUIMessage<
     }
 
     // Add all structured content parts
-    for (const contentPart of nonStringContent) {
+    for (const { stored, contentPart } of parts) {
       switch (contentPart.type) {
         case "text": {
-          const citations = storedTextParts[textPartIndex++]?.citations;
+          const citations = stored.type === "text" && stored.citations;
           allParts.push({
             state,
             ...metadataOf(contentPart),
@@ -615,10 +602,7 @@ function createAssistantUIMessage<
           } satisfies StepStartUIPart);
           const callProviderMetadata = ownProviderMetadata(contentPart);
           const toolPart = {
-            ...toolPartFields(
-              contentPart.toolName,
-              storedDetails("tool-call", contentPart.toolCallId),
-            ),
+            ...toolPartFields(contentPart.toolName, stored),
             toolCallId: contentPart.toolCallId,
             input: contentPart.input as DeepPartial<
               TOOLS[keyof TOOLS & string]["input"]
@@ -711,10 +695,7 @@ function createAssistantUIMessage<
             }
           } else {
             // Tool call is on a previous page - create standalone tool part
-            const fields = toolPartFields(
-              contentPart.toolName,
-              storedDetails("tool-result", contentPart.toolCallId),
-            );
+            const fields = toolPartFields(contentPart.toolName, stored);
             if (hasError) {
               allParts.push({
                 ...fields,
@@ -932,6 +913,8 @@ function createAssistantUIMessage<
     metadata: group.find((m) => m.metadata)?.metadata,
   };
 }
+
+type ModelPart = Exclude<Content, string>[number];
 
 type ContentMetadata = {
   providerOptions?: ProviderOptions;
