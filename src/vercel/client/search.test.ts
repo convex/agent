@@ -1472,4 +1472,69 @@ describe("search.ts", () => {
       expect(result.messages[2].content).toBe("Default prompt"); // inputPrompt
     });
   });
+
+  it("treats a target message from another thread as missing", async () => {
+    const mine = await createTestThread("me");
+    const other = await createTestThread("someone else");
+    await createTestMessages(mine, "me", [
+      { role: "user", content: "banana bread", order: 0 },
+    ]);
+    const save = (content: string) =>
+      t.run((mutCtx) =>
+        saveMessages(mutCtx, components.agent, {
+          threadId: other,
+          userId: "someone else",
+          messages: [{ role: "user", content }],
+        }),
+      );
+    const { messages } = await save("banana");
+    const { messages: deleted } = await save("deleted");
+    await t.run((mutCtx) =>
+      mutCtx.runMutation(components.agent.messages.deleteByIds, {
+        messageIds: [deleted[0]._id],
+      }),
+    );
+    const fetch = (targetMessageId: string) =>
+      fetchContextMessages(ctx, components.agent, {
+        userId: "me",
+        threadId: mine,
+        targetMessageId,
+        contextOptions: {
+          recentMessages: 0,
+          searchOptions: { textSearch: true, limit: 5 },
+        },
+      }).then(
+        (found) => found.map((m) => m.text),
+        (e: Error) => e.message,
+      );
+
+    expect(await fetch(messages[0]._id)).toEqual(await fetch(deleted[0]._id));
+  });
+
+  it("searches by a target message from another of the user's threads", async () => {
+    const mine = await createTestThread("me");
+    const older = await createTestThread("me");
+    await createTestMessages(mine, "me", [
+      { role: "user", content: "banana bread", order: 0 },
+    ]);
+    const { messages } = await t.run((mutCtx) =>
+      saveMessages(mutCtx, components.agent, {
+        threadId: older,
+        userId: "me",
+        messages: [{ role: "user", content: "banana" }],
+      }),
+    );
+
+    const found = await fetchContextMessages(ctx, components.agent, {
+      userId: undefined,
+      threadId: mine,
+      targetMessageId: messages[0]._id,
+      contextOptions: {
+        recentMessages: 0,
+        searchOtherThreads: true,
+        searchOptions: { textSearch: true, limit: 5 },
+      },
+    });
+    expect(found.map((m) => m.text)).toContain("banana bread");
+  });
 });

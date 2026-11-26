@@ -186,6 +186,7 @@ export async function fetchRecentAndSearchMessages(
           (
             await ctx.runQuery(component.messages.getMessagesByIds, {
               messageIds: [targetMessageId],
+              threadId,
             })
           )[0]
         )?.order === oldest.order;
@@ -214,6 +215,21 @@ export async function fetchRecentAndSearchMessages(
     if (!("runAction" in ctx)) {
       throw new Error("searchUserMessages only works in an action");
     }
+    // The target is read in the scope the search runs in, so it is found
+    // exactly when the search would find it.
+    const scope = {
+      threadId,
+      searchAllMessagesForUserId: opts.searchOtherThreads
+        ? (args.userId ??
+          (threadId &&
+            (await ctx.runQuery(component.threads.getThread, { threadId }))
+              ?.userId))
+        : undefined,
+    };
+    assert(
+      scope.threadId || scope.searchAllMessagesForUserId,
+      "Specify userId or threadId",
+    );
     let text = args.searchText;
     let embedding: number[] | undefined;
     let embeddingModel: string | undefined;
@@ -234,9 +250,7 @@ export async function fetchRecentAndSearchMessages(
         } else {
           const targetSearchFields = await ctx.runQuery(
             component.messages.getMessageSearchFields,
-            {
-              messageId: targetMessageId,
-            },
+            { messageId: targetMessageId, ...scope },
           );
           text = targetSearchFields.text;
           embedding = targetSearchFields.embedding;
@@ -265,16 +279,7 @@ export async function fetchRecentAndSearchMessages(
     const searchResults = await ctx.runAction(
       component.messages.searchMessages,
       {
-        searchAllMessagesForUserId: opts?.searchOtherThreads
-          ? (args.userId ??
-            (args.threadId &&
-              (
-                await ctx.runQuery(component.threads.getThread, {
-                  threadId: args.threadId,
-                })
-              )?.userId))
-          : undefined,
-        threadId: args.threadId,
+        ...scope,
         targetMessageId,
         limit: opts.searchOptions?.limit ?? 10,
         messageRange: {

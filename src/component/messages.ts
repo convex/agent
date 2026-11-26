@@ -81,6 +81,32 @@ export async function deleteMessage(
 }
 
 /**
+ * The message, if it exists and is in the thread. Callers treat a message from
+ * another thread exactly as a missing one.
+ */
+async function getMessageInThread(
+  ctx: QueryCtx,
+  messageId: Id<"messages">,
+  threadId: Id<"threads">,
+) {
+  const message = await ctx.db.get("messages", messageId);
+  return message?.threadId === threadId ? message : null;
+}
+
+// A search's target is a message in the searched thread, or for a search
+// across a user's threads, one of that user's messages.
+function inSearchScope(
+  message: { threadId: string; userId?: string },
+  scope: { threadId?: string; searchAllMessagesForUserId?: string },
+) {
+  return (
+    message.threadId === scope.threadId ||
+    (!!scope.searchAllMessagesForUserId &&
+      message.userId === scope.searchAllMessagesForUserId)
+  );
+}
+
+/**
  * Deleting a message strands any generation still writing to its order, which
  * would otherwise only surface as a missing-parent failure when that generation
  * finalizes. Aborting the stream lets the in-flight run stop on its own.
@@ -261,7 +287,8 @@ async function addMessagesHandler(
   } = args;
   const promptMessage =
     prompt?.message ??
-    (promptMessageId && (await ctx.db.get("messages", promptMessageId)));
+    (promptMessageId &&
+      (await getMessageInThread(ctx, promptMessageId, threadId)));
   assert(
     requestedOrder === undefined ||
       requestedOrder === "next" ||
@@ -289,7 +316,12 @@ async function addMessagesHandler(
       .take(100);
     await Promise.all(
       pendingMessages
-        .filter((m) => !promptMessage || m.order === promptMessage.order)
+        // A missing prompt has no turn to fail.
+        .filter(
+          (m) =>
+            !promptMessageId ||
+            (!!promptMessage && m.order === promptMessage.order),
+        )
         .filter((m) => !pendingMessageId || m._id !== pendingMessageId)
         .map(async (m) => {
           if (m.embeddingId) {
@@ -336,7 +368,7 @@ async function addMessagesHandler(
       promptMessage.stepOrder;
   } else if (pendingMessageId) {
     // What fills a pending message stays in its turn.
-    pendingMessage = await ctx.db.get("messages", pendingMessageId);
+    pendingMessage = await getMessageInThread(ctx, pendingMessageId, threadId);
     assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
     order = pendingMessage.order;
     stepOrder =
@@ -392,7 +424,11 @@ async function addMessagesHandler(
     // If there is a pending message, we replace that one with the first message
     // and subsequent ones will follow the regular order/subOrder advancement.
     if (i === 0 && pendingMessageId) {
-      pendingMessage ??= await ctx.db.get("messages", pendingMessageId);
+      pendingMessage ??= await getMessageInThread(
+        ctx,
+        pendingMessageId,
+        threadId,
+      );
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
       if (pendingMessage.status === "success") {
         throw new ConvexError(
@@ -894,11 +930,11 @@ async function listMessagesByThreadIdHandler(
   const statuses = args.statuses ?? vMessageStatus.members.map((m) => m.value);
   const last =
     args.upToAndIncludingMessageId &&
-    (await ctx.db.get("messages", args.upToAndIncludingMessageId));
-  assert(
-    !last || last.threadId === args.threadId,
-    "upToAndIncludingMessageId must be a message in the thread",
-  );
+    (await getMessageInThread(
+      ctx,
+      args.upToAndIncludingMessageId,
+      args.threadId,
+    ));
   const toolOptions = args.excludeToolMessages ? [false] : [true, false];
   const order = args.order ?? "desc";
   const streams = toolOptions.flatMap((tool) =>
@@ -950,10 +986,21 @@ async function listMessagesByThreadIdHandler(
 }
 
 export const getMessagesByIds = query({
-  args: { messageIds: v.array(v.id("messages")) },
+  args: {
+    messageIds: v.array(v.id("messages")),
+    /** If given, a message outside the thread comes back as null. */
+    threadId: v.optional(v.id("threads")),
+  },
   handler: async (ctx, args) => {
+    const { threadId } = args;
     return (
-      await Promise.all(args.messageIds.map((id) => ctx.db.get("messages", id)))
+      await Promise.all(
+        args.messageIds.map((id) =>
+          threadId
+            ? getMessageInThread(ctx, id, threadId)
+            : ctx.db.get("messages", id),
+        ),
+      )
     ).map((m) => (m ? publicMessage(m) : null));
   },
   returns: v.array(v.union(v.null(), vMessageDoc)),
@@ -1001,6 +1048,8 @@ export const searchMessages = action({
             api.messages.getMessageSearchFields,
             {
               messageId: args.targetMessageId,
+              threadId: args.threadId,
+              searchAllMessagesForUserId: args.searchAllMessagesForUserId,
             },
           );
           assert(target, "Target message embedding not found.");
@@ -1065,9 +1114,10 @@ export const _fetchSearchMessages = internalQuery({
   },
   returns: v.array(vMessageDoc),
   handler: async (ctx, args): Promise<MessageDoc[]> => {
-    const beforeMessage =
+    const found =
       args.beforeMessageId &&
       (await ctx.db.get("messages", args.beforeMessageId));
+    const beforeMessage = found && inSearchScope(found, args) ? found : null;
     const { searchAllMessagesForUserId, threadId } = args;
     assert(
       searchAllMessagesForUserId || threadId,
@@ -1187,9 +1237,10 @@ export const textSearch = query({
       args.searchAllMessagesForUserId || args.threadId,
       "Specify userId or threadId",
     );
-    const targetMessage =
+    const found =
       args.targetMessageId &&
       (await ctx.db.get("messages", args.targetMessageId));
+    const targetMessage = found && inSearchScope(found, args) ? found : null;
     const text = args.text || targetMessage?.text;
     if (!text) {
       console.warn("No text to search", targetMessage, args.text);
@@ -1237,6 +1288,10 @@ export const textSearch = query({
 export const getMessageSearchFields = query({
   args: {
     messageId: v.id("messages"),
+    /** If given, a message outside the thread is treated as missing. */
+    threadId: v.optional(v.id("threads")),
+    /** If given, a message outside the user's messages is treated as missing. */
+    searchAllMessagesForUserId: v.optional(v.string()),
   },
   returns: v.object({
     text: v.optional(v.string()),
@@ -1251,7 +1306,10 @@ export const getMessageSearchFields = query({
     embedding?: number[] | undefined;
     embeddingModel?: string | undefined;
   }> => {
-    const message = await ctx.db.get("messages", args.messageId);
+    const found = await ctx.db.get("messages", args.messageId);
+    const scoped = args.threadId || args.searchAllMessagesForUserId;
+    const message =
+      found && (!scoped || inSearchScope(found, args)) ? found : null;
     const text = message?.text;
     let embedding = undefined;
     let embeddingModel = undefined;
