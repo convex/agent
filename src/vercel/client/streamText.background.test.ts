@@ -150,3 +150,49 @@ test("a failed background delta write is observed while the source is still open
     process.removeListener("unhandledRejection", onUnhandled);
   }
 });
+
+test("returnImmediately reports a source that throws when nobody reads the stream", async () => {
+  const t = initConvexTest();
+  const failure = new Error("The provider failed");
+  const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+  const agent = new Agent(components.agent, {
+    name: "background-stream-test",
+    languageModel: mockModel({
+      doStream: async () => ({
+        stream: new ReadableStream<LanguageModelV4StreamPart>({
+          async start(controller) {
+            controller.enqueue({ type: "stream-start", warnings: [] });
+            controller.enqueue({ type: "text-start", id: "text" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "text",
+              delta: "Partial response ",
+            });
+            await setTimeout(20);
+            controller.error(failure);
+          },
+        }),
+      }),
+    }),
+  });
+  try {
+    await t.action(async (ctx) => {
+      const threadId = await createThread(ctx, components.agent);
+      await agent.streamText(
+        ctx,
+        { threadId },
+        { prompt: "Test" },
+        { saveStreamDeltas: { returnImmediately: true } },
+      );
+      for (let i = 0; i < 100 && logError.mock.calls.length === 0; i++) {
+        await setTimeout(10);
+      }
+    });
+    expect(logError).toHaveBeenCalledWith(
+      "Failed to persist stream deltas:",
+      failure,
+    );
+  } finally {
+    logError.mockRestore();
+  }
+});

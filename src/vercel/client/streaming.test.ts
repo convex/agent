@@ -376,6 +376,53 @@ describe("DeltaStreamer", () => {
     });
   });
 
+  test("fail reports a write the stream refused while it drains the held parts", async () => {
+    await t.action(async (ctx) => {
+      const addDelta = getFunctionAddress(
+        components.agent.streams.addDelta,
+      ).reference;
+      let releaseWrite!: () => void;
+      const writeReleased = new Promise<void>(
+        (resolve) => (releaseWrite = resolve),
+      );
+      let writes = 0;
+      const gated = {
+        ...ctx,
+        runMutation: (async (reference, args) => {
+          if (getFunctionAddress(reference).reference === addDelta) {
+            writes++;
+            await writeReleased;
+          }
+          return ctx.runMutation(reference, args);
+        }) as typeof ctx.runMutation,
+      };
+      const asyncAborts: string[] = [];
+      const streamer = new DeltaStreamer<string>(
+        components.agent,
+        gated,
+        {
+          ...defaultTestOptions,
+          throttleMs: 60_000,
+          onAsyncAbort: async (reason) => {
+            asyncAborts.push(reason);
+          },
+        },
+        { ...testMetadata, format: undefined, threadId },
+      );
+      await streamer.addParts(["A partial "]);
+      await streamer.addParts(["answer"]);
+      await ctx.runMutation(components.agent.streams.abort, {
+        streamId: streamer.streamId!,
+        reason: "Stopped elsewhere",
+      });
+      const failed = streamer.fail("provider failed");
+      releaseWrite();
+      await failed.catch(() => {});
+      expect(asyncAborts).toEqual(["async abort"]);
+      expect(writes).toBe(1);
+    });
+  });
+
   test("preserves the public throwing behavior after an existing stream aborts", async () => {
     await t.action(async (ctx) => {
       const streamer = new DeltaStreamer<string>(
