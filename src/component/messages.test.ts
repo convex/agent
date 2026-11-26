@@ -1983,3 +1983,188 @@ describe("cloneThread", () => {
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
   });
 });
+
+describe("a message id from another thread is treated as missing", () => {
+  async function twoThreads() {
+    const t = initConvexTest();
+    const userThread = async (userId: string) =>
+      (await t.mutation(api.threads.createThread, { userId }))
+        ._id as Id<"threads">;
+    const threadId = await userThread("me");
+    const otherThreadId = await userThread("someone else");
+    const save = async (
+      threadId: Id<"threads">,
+      messages: Parameters<
+        typeof t.mutation<typeof api.messages.addMessages>
+      >[1]["messages"],
+      userId?: string,
+    ) =>
+      (
+        await t.mutation(api.messages.addMessages, {
+          threadId,
+          userId,
+          messages,
+        })
+      ).messages;
+    const user = (content: string) => ({
+      message: { role: "user" as const, content },
+    });
+    // An id that no longer exists, for the behaviour to match.
+    const deletedId = async () => {
+      const [m] = await save(otherThreadId, [user("deleted")]);
+      await t.run((ctx) => ctx.db.delete("messages", m._id as Id<"messages">));
+      return m._id as Id<"messages">;
+    };
+    return { t, threadId, otherThreadId, save, user, deletedId };
+  }
+
+  test("as pendingMessageId", async () => {
+    const { t, threadId, otherThreadId, save, user } = await twoThreads();
+    const [, pending] = await save(otherThreadId, [
+      user("q"),
+      { message: { role: "assistant", content: [] }, status: "pending" },
+    ]);
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        pendingMessageId: pending._id as Id<"messages">,
+        messages: [{ message: { role: "assistant", content: "answer" } }],
+      }),
+    ).rejects.toThrow(`Pending msg ${pending._id} not found`);
+  });
+
+  test("as promptMessageId", async () => {
+    const { t, threadId, otherThreadId, save, user } = await twoThreads();
+    const [prompt] = await save(otherThreadId, [
+      { ...user("q"), status: "failed", error: "its error" },
+    ]);
+    const [, pending] = await save(threadId, [
+      user("mine"),
+      { message: { role: "assistant", content: [] }, status: "pending" },
+    ]);
+    const reply = {
+      threadId,
+      promptMessageId: prompt._id as Id<"messages">,
+      messages: [{ message: { role: "assistant" as const, content: "a" } }],
+    };
+
+    await expect(t.mutation(api.messages.addMessages, reply)).rejects.toThrow(
+      `Parent message ${prompt._id} not found`,
+    );
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        ...reply,
+        abandonIfPromptMissing: true,
+        failPendingSteps: true,
+      }),
+    ).resolves.toEqual({ messages: [] });
+    expect(
+      await t.run((ctx) =>
+        ctx.db.get("messages", pending._id as Id<"messages">),
+      ),
+    ).toMatchObject({ status: "pending" });
+  });
+
+  test("as upToAndIncludingMessageId", async () => {
+    const { t, threadId, otherThreadId, save, user, deletedId } =
+      await twoThreads();
+    await save(threadId, [user("mine")]);
+    const [other] = await save(otherThreadId, [user("other")]);
+    const list = (upToAndIncludingMessageId: Id<"messages">) =>
+      t.query(api.messages.listMessagesByThreadId, {
+        threadId,
+        order: "desc",
+        upToAndIncludingMessageId,
+      });
+
+    expect(await list(other._id as Id<"messages">)).toEqual(
+      await list(await deletedId()),
+    );
+  });
+
+  test("as textSearch's targetMessageId, in a thread or across a user's threads", async () => {
+    const { t, threadId, otherThreadId, save, user, deletedId } =
+      await twoThreads();
+    await save(threadId, [user("banana bread")], "me");
+    const [other] = await save(otherThreadId, [user("banana")], "someone else");
+    const search = (
+      targetMessageId: Id<"messages">,
+      scope:
+        | { threadId: Id<"threads"> }
+        | { searchAllMessagesForUserId: string },
+    ) =>
+      t.query(api.messages.textSearch, {
+        ...scope,
+        targetMessageId,
+        limit: 10,
+      });
+
+    const missing = await deletedId();
+    for (const scope of [{ threadId }, { searchAllMessagesForUserId: "me" }]) {
+      expect(await search(other._id as Id<"messages">, scope)).toEqual(
+        await search(missing, scope),
+      );
+    }
+  });
+
+  test("as searchMessages' targetMessageId for a vector search", async () => {
+    const { t, threadId, otherThreadId, user, deletedId } = await twoThreads();
+    const vector = Array.from({ length: 128 }, () => 0.1);
+    const embedded = (threadId: Id<"threads">, content: string) =>
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [user(content)],
+        embeddings: { model: "test", dimension: 128, vectors: [vector] },
+      });
+    await embedded(threadId, "mine");
+    const { messages } = await embedded(otherThreadId, "other");
+    const search = (targetMessageId: Id<"messages">) =>
+      t
+        .action(api.messages.searchMessages, {
+          threadId,
+          targetMessageId,
+          vectorSearch: true,
+          limit: 10,
+        })
+        .then(
+          (found) => found.map((m) => m.text),
+          (e: Error) => e.message.split("\n")[0],
+        );
+
+    expect(await search(messages[0]._id as Id<"messages">)).toEqual(
+      await search(await deletedId()),
+    );
+  });
+
+  test("as searchMessages' targetMessageId bounding a search across a user's threads", async () => {
+    const { t, otherThreadId, save, user, deletedId } = await twoThreads();
+    const vector = Array.from({ length: 128 }, () => 0.1);
+    const [theirs] = await save(
+      otherThreadId,
+      [user("theirs")],
+      "someone else",
+    );
+    await t.mutation(api.messages.addMessages, {
+      threadId: otherThreadId,
+      userId: "me",
+      messages: [user("mine")],
+      embeddings: { model: "test", dimension: 128, vectors: [vector] },
+    });
+    const search = (targetMessageId: Id<"messages">) =>
+      t
+        .action(api.messages.searchMessages, {
+          searchAllMessagesForUserId: "me",
+          targetMessageId,
+          embedding: vector,
+          embeddingModel: "test",
+          vectorSearch: true,
+          limit: 10,
+        })
+        .then((found) => found.map((m) => m.text));
+
+    expect(await search(theirs._id as Id<"messages">)).toEqual(
+      await search(await deletedId()),
+    );
+  });
+});
