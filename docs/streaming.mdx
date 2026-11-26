@@ -264,8 +264,10 @@ for await (const textPart of result.textStream) {
 }
 ```
 
-With an `output`, such as `Output.object({ schema })`, read partial objects from
-`result.partialOutputStream`.
+`agent.streamObject` saves the object from the AI SDK's `onFinish`, which only
+runs once the stream has been read to the end. Read `result.partialObjectStream`
+to the end before the action returns: awaiting `result.object` alone does not
+read the stream.
 
 If you want to both iterate as the stream is happening, as well as save the
 deltas, you can pass `{ saveStreamDeltas: { returnImmediately: true } }` to

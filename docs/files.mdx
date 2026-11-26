@@ -73,12 +73,15 @@ const { fileId, url, storageId } = file;
 
 ```ts
 // in your mutation
-const { filePart } = await getFile(ctx, components.agent, fileId);
+const { filePart, imagePart } = await getFile(ctx, components.agent, fileId);
 const { messageId } = await fileAgent.saveMessage(ctx, {
   threadId,
   message: {
     role: "user",
-    content: [filePart, { type: "text", text: "What is this image?" }],
+    content: [
+      imagePart ?? filePart, // if it's an image, prefer that kind.
+      { type: "text", text: "What is this image?" },
+    ],
   },
   metadata: { fileIds: [fileId] }, // IMPORTANT: this tracks the file usage.
 });

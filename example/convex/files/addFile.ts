@@ -65,12 +65,16 @@ export const submitFileQuestion = mutation({
       throw new Error("Unauthorized");
     }
     const threadId = await createThread(ctx, components.agent, { userId });
-    const { filePart } = await getFile(ctx, components.agent, args.fileId);
+    const { filePart, imagePart } = await getFile(
+      ctx,
+      components.agent,
+      args.fileId,
+    );
     const { messageId } = await saveMessage(ctx, components.agent, {
       threadId,
       message: {
         role: "user",
-        content: [filePart, { type: "text", text: args.question }],
+        content: [imagePart ?? filePart, { type: "text", text: args.question }],
       },
       // This will track the usage of the file, so we can delete old ones
       metadata: { fileIds: [args.fileId] },

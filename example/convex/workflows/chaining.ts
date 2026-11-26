@@ -2,13 +2,12 @@
 import { WorkflowId, WorkflowManager } from "@convex-dev/workflow";
 import { createThread, saveMessage, stepCountIs } from "@convex-dev/agent";
 import { components, internal } from "../_generated/api";
-import { action, internalAction, mutation } from "../_generated/server";
+import { action, mutation } from "../_generated/server";
 import { v } from "convex/values";
 import { z } from "zod/v3";
 import { weatherAgent } from "../agents/weather";
 import { fashionAgent } from "../agents/fashion";
 import { getAuthUserId } from "../utils";
-import { Output } from "ai";
 
 /**
  * OPTION 1: Chain agent calls in a single action.
@@ -79,7 +78,7 @@ export const weatherAgentWorkflow = workflow.define({
       },
     );
     console.log("Weather forecast:", forecast);
-    console.log("Fashion advice:", fashion);
+    console.log("Fashion advice:", fashion.object);
   },
 });
 
@@ -115,24 +114,11 @@ export const startWorkflow = mutation({
 export const getForecast = weatherAgent.asTextAction({
   stopWhen: stepCountIs(3),
 });
-export const getFashionAdvice = internalAction({
-  args: { promptMessageId: v.string(), threadId: v.string() },
-  handler: async (ctx, { promptMessageId, threadId }) => {
-    const { output } = await fashionAgent.generateText(
-      ctx,
-      { threadId },
-      {
-        promptMessageId,
-        output: Output.object({
-          schema: z.object({
-            hat: z.string(),
-            tops: z.string(),
-            bottoms: z.string(),
-            shoes: z.string(),
-          }),
-        }),
-      },
-    );
-    return output;
-  },
+export const getFashionAdvice = fashionAgent.asObjectAction({
+  schema: z.object({
+    hat: z.string(),
+    tops: z.string(),
+    bottoms: z.string(),
+    shoes: z.string(),
+  }),
 });

@@ -627,8 +627,6 @@ export interface Thread<DefaultTools extends ToolSet> {
    * @param args The arguments to the generateObject function, along with extra controls
    * for the {@link ContextOptions} and {@link StorageOptions}.
    * @returns The result of the generateObject function.
-   * @deprecated Use {@link generateText} with `output`, such as
-   * `Output.object({ schema })`, as the AI SDK deprecated `generateObject`.
    */
   generateObject<
     SCHEMA extends FlexibleSchema<unknown> = FlexibleSchema<JSONValue>,
@@ -651,8 +649,6 @@ export interface Thread<DefaultTools extends ToolSet> {
    * @param args The arguments to the streamObject function, along with extra controls
    * for the {@link ContextOptions} and {@link StorageOptions}.
    * @returns The result of the streamObject function.
-   * @deprecated Use {@link streamText} with `output`, such as
-   * `Output.object({ schema })`, as the AI SDK deprecated `streamObject`.
    */
   streamObject<
     SCHEMA extends FlexibleSchema<unknown> = FlexibleSchema<JSONValue>,

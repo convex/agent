@@ -4,7 +4,6 @@ import { components } from "../_generated/api.js";
 import { defaultConfig } from "../agents/config.js";
 import z from "zod/v4";
 import { assert } from "convex-helpers";
-import { Output } from "ai";
 
 export const createObject = action({
   args: {},
@@ -14,16 +13,14 @@ export const createObject = action({
       name: "object-agent",
     });
     const threadId = await createThread(ctx, components.agent);
-    const { output: object } = await agent.generateText(
+    const { object } = await agent.generateObject(
       ctx,
       { threadId },
       {
         prompt: "Generate a plan to make a sandwich",
-        output: Output.object({
-          schema: z.object({
-            summary: z.string(),
-            steps: z.array(z.string()),
-          }),
+        schema: z.object({
+          summary: z.string(),
+          steps: z.array(z.string()),
         }),
       },
     );
@@ -43,12 +40,13 @@ export const createEnum = action({
       name: "object-agent",
     });
     const threadId = await createThread(ctx, components.agent);
-    const { output: object } = await agent.generateText(
+    const { object } = await agent.generateObject(
       ctx,
       { threadId },
       {
         prompt: "Generate a plan to make a sandwich",
-        output: Output.choice({ options: ["hello", "world"] }),
+        output: "enum",
+        enum: ["hello", "world"],
       },
     );
     assert(object === "hello" || object === "world");
@@ -64,12 +62,13 @@ export const createArray = action({
       name: "object-agent",
     });
     const threadId = await createThread(ctx, components.agent);
-    const { output: object } = await agent.generateText(
+    const { object } = await agent.generateObject(
       ctx,
       { threadId },
       {
         prompt: "Generate a plan to make a sandwich",
-        output: Output.array({ element: z.string() }),
+        output: "array",
+        schema: z.string(),
       },
     );
     for (const step of object) {
