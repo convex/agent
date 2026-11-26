@@ -20,6 +20,9 @@ import {
   type ToolApprovalResponse,
   type ProviderMetadata,
   type JSONValue,
+  type TextStreamPart,
+  type UIMessageChunk,
+  toUIMessageChunk,
 } from "ai";
 import {
   vMessageWithMetadata,
@@ -49,6 +52,11 @@ import { MAX_FILE_SIZE, storeFile } from "./client/files.js";
 import { materializeCanonicalToolResultContentFiles } from "./fileMaterialization.js";
 import type { Infer } from "convex/values";
 import { decodeToolJsonFields } from "../streaming/toolJson.js";
+import {
+  callDetails,
+  resultDetails,
+  type ToolDetails,
+} from "../streaming/toolDetails.js";
 import {
   convertUint8ArrayToBase64,
   type FileData,
@@ -302,8 +310,16 @@ export async function serializeResponseMessages<TOOLS extends ToolSet>(
   step: StepResult<TOOLS>,
   model: ModelOrMetadata | undefined,
   responseMessages: ModelMessage[],
+  tools?: ToolSet,
 ): Promise<{ messages: MessageWithMetadata[] }> {
-  return serializeStepMessages(ctx, component, step, model, responseMessages);
+  return serializeStepMessages(
+    ctx,
+    component,
+    step,
+    model,
+    responseMessages,
+    tools,
+  );
 }
 
 async function serializeStepMessages<TOOLS extends ToolSet>(
@@ -312,6 +328,7 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
   step: StepResult<TOOLS>,
   model: ModelOrMetadata | undefined,
   messagesToSerialize: ModelMessage[],
+  tools: ToolSet | undefined,
 ): Promise<{ messages: MessageWithMetadata[] }> {
   // If there are tool results, there's another message with the tool results
   // ref: https://github.com/vercel/ai/blob/main/packages/ai/src/generate-text/to-response-messages.ts#L120
@@ -329,7 +346,11 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     sources: hasToolMessage ? undefined : sources,
   } satisfies Omit<MessageWithMetadata, "message" | "text" | "fileIds">;
   const toolFields = { sources };
-  const toSerialize = withStepCitations(step, messagesToSerialize);
+  const toSerialize = withStepToolDetails(
+    step,
+    withStepCitations(step, messagesToSerialize),
+    tools,
+  );
 
   const messages: MessageWithMetadata[] = await Promise.all(
     toSerialize.map(async (msg): Promise<MessageWithMetadata> => {
@@ -343,6 +364,63 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     }),
   );
   return { messages };
+}
+
+// Keyed by the saved fields, so a field the SDK renames fails to compile.
+type UIToolDetails = Pick<
+  Extract<UIMessageChunk, { type: "tool-input-available" }>,
+  keyof ToolDetails
+>;
+
+/**
+ * Response messages leave out what the SDK shows on each tool's UI part, which
+ * it keeps on the step's own tool calls and results. It is put back on the
+ * saved call and result with the same id, as `toUIMessageChunk` derives it
+ * from the generation's tools. A result whose call was in an earlier step,
+ * such as one run after an approval, is derived from its own part.
+ */
+function withStepToolDetails<TOOLS extends ToolSet>(
+  step: StepResult<TOOLS>,
+  messages: ModelMessage[],
+  tools: ToolSet | undefined,
+): ModelMessage[] {
+  const details = (part: object): ToolDetails => {
+    const chunk = toUIMessageChunk(part as TextStreamPart<ToolSet>, { tools });
+    return (chunk ?? {}) as UIToolDetails;
+  };
+  const calls = new Map<string, { toolName: string } & ToolDetails>();
+  const results = new Map<string, ToolDetails>();
+  for (const part of step.content) {
+    if (part.type === "tool-call") {
+      calls.set(part.toolCallId, {
+        toolName: part.toolName,
+        ...callDetails(details(part)),
+      });
+    } else if (part.type === "tool-result" || part.type === "tool-error") {
+      results.set(part.toolCallId, resultDetails(details(part)));
+    }
+  }
+  return messages.map((message) => {
+    if (typeof message.content === "string" || message.role === "system") {
+      return message;
+    }
+    return {
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type === "tool-call") {
+          const { toolName, ...call } = calls.get(part.toolCallId) ?? {};
+          return toolName === part.toolName ? { ...part, ...call } : part;
+        }
+        if (part.type === "tool-result") {
+          return {
+            ...part,
+            ...(results.get(part.toolCallId) ?? resultDetails(details(part))),
+          };
+        }
+        return part;
+      }),
+    } as ModelMessage;
+  });
 }
 
 /**
@@ -593,9 +671,7 @@ export async function serializeContent(
             toolCallId: part.toolCallId,
             toolName: part.toolName,
             providerExecuted: part.providerExecuted,
-            title: "title" in part ? part.title : undefined,
-            toolMetadata:
-              "toolMetadata" in part ? part.toolMetadata : undefined,
+            ...callDetails(part),
             ...metadata,
           } satisfies Infer<typeof vToolCallPart>;
         }
@@ -944,6 +1020,7 @@ function serializeToolResult(
       : {}),
     // Preserve isError flag for error reporting
     ...("isError" in part && part.isError ? { isError: true } : {}),
+    ...resultDetails(part),
     ...metadata,
   } as Infer<typeof vToolResultPart>;
 }

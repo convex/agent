@@ -20,7 +20,13 @@ import {
   type ReasoningFilePart,
 } from "@ai-sdk/provider-utils";
 import type { Infer } from "convex/values";
-import { toModelMessage, fromModelMessage, toUIFilePart } from "./mapping.js";
+import {
+  type Content,
+  toModelMessage,
+  toModelMessageContent,
+  fromModelMessage,
+  toUIFilePart,
+} from "./mapping.js";
 import {
   deriveReasoning,
   extractText,
@@ -40,6 +46,7 @@ import {
   decodeToolJsonFields,
   encodeToolJsonFields,
 } from "../streaming/toolJson.js";
+import { toolPartFields } from "../streaming/toolDetails.js";
 
 export type UIStatus = "streaming" | MessageStatus;
 
@@ -278,10 +285,10 @@ function groupAssistantMessages<METADATA = unknown>(
   let currentOrder: number | undefined;
 
   for (const message of messages) {
-    const coreMessage = message.message && toModelMessage(message.message);
-    if (!coreMessage) continue;
+    const role = message.message?.role;
+    if (!role) continue;
 
-    if (coreMessage.role === "user" || coreMessage.role === "system") {
+    if (role === "user" || role === "system") {
       // Finish any current assistant group
       if (currentAssistantGroup.length > 0) {
         groups.push({
@@ -293,7 +300,7 @@ function groupAssistantMessages<METADATA = unknown>(
       }
       // Add singleton group
       groups.push({
-        role: coreMessage.role,
+        role,
         message,
       });
     } else {
@@ -314,7 +321,7 @@ function groupAssistantMessages<METADATA = unknown>(
       currentAssistantGroup.push(message);
 
       // End group if this is an assistant message without tool calls
-      if (coreMessage.role === "assistant" && !message.tool) {
+      if (role === "assistant" && !message.tool) {
         groups.push({
           role: "assistant",
           messages: currentAssistantGroup,
@@ -510,18 +517,20 @@ function createAssistantUIMessage<
   const allParts: UIMessage<METADATA, DATA_PARTS, TOOLS>["parts"] = [];
 
   for (const message of group) {
-    const coreMessage = message.message && toModelMessage(message.message);
-    if (!coreMessage) continue;
-
-    const content = coreMessage.content;
-    const nonStringContent =
-      content && typeof content !== "string" ? content : [];
+    if (!message.message) continue;
+    const storedContent = message.message.content;
+    // Each stored part is read with the model part it is sent as, which drops
+    // what only the UI shows.
+    const parts =
+      typeof storedContent === "string"
+        ? []
+        : storedContent.flatMap((stored) =>
+            (toModelMessageContent([stored] as Content) as ModelPart[]).map(
+              (contentPart) => ({ stored, contentPart }),
+            ),
+          );
+    const nonStringContent = parts.map(({ contentPart }) => contentPart);
     const text = extractTextFromMessageDoc(message);
-    const storedContent = message.message!.content;
-    const storedTextParts = Array.isArray(storedContent)
-      ? storedContent.filter((part) => part.type === "text")
-      : [];
-    let textPartIndex = 0;
 
     const state = message.streaming
       ? ("streaming" as const)
@@ -552,10 +561,10 @@ function createAssistantUIMessage<
     }
 
     // Add all structured content parts
-    for (const contentPart of nonStringContent) {
+    for (const { stored, contentPart } of parts) {
       switch (contentPart.type) {
         case "text": {
-          const citations = storedTextParts[textPartIndex++]?.citations;
+          const citations = stored.type === "text" && stored.citations;
           allParts.push({
             state,
             ...metadataOf(contentPart),
@@ -592,8 +601,8 @@ function createAssistantUIMessage<
             type: "step-start",
           } satisfies StepStartUIPart);
           const callProviderMetadata = ownProviderMetadata(contentPart);
-          const toolPart: ToolUIPart<TOOLS> = {
-            type: `tool-${contentPart.toolName as keyof TOOLS & string}`,
+          const toolPart = {
+            ...toolPartFields(contentPart.toolName, stored),
             toolCallId: contentPart.toolCallId,
             input: contentPart.input as DeepPartial<
               TOOLS[keyof TOOLS & string]["input"]
@@ -609,7 +618,7 @@ function createAssistantUIMessage<
                   callProviderMetadata:
                     metadataOf(contentPart).providerMetadata,
                 }),
-          };
+          } as ToolUIPart<TOOLS> | DynamicToolUIPart;
           allParts.push(toolPart);
           break;
         }
@@ -623,12 +632,7 @@ function createAssistantUIMessage<
 
           // Check if this is an execution-denied result
           if (typedPart.output?.type === "execution-denied") {
-            const call = allParts.find(
-              (part) =>
-                part.type === `tool-${contentPart.toolName}` &&
-                "toolCallId" in part &&
-                part.toolCallId === contentPart.toolCallId,
-            ) as ToolUIPart | undefined;
+            const call = findToolPart(allParts, contentPart);
 
             if (call) {
               call.state = "output-denied";
@@ -670,12 +674,7 @@ function createAssistantUIMessage<
                 ? JSON.stringify(output)
                 : String(output)
               : undefined);
-          const call = allParts.find(
-            (part) =>
-              part.type === `tool-${contentPart.toolName}` &&
-              "toolCallId" in part &&
-              part.toolCallId === contentPart.toolCallId,
-          ) as ToolUIPart | undefined;
+          const call = findToolPart(allParts, contentPart);
           const resultProviderMetadata =
             metadataOf(contentPart).providerMetadata;
           if (call) {
@@ -696,24 +695,25 @@ function createAssistantUIMessage<
             }
           } else {
             // Tool call is on a previous page - create standalone tool part
+            const fields = toolPartFields(contentPart.toolName, stored);
             if (hasError) {
               allParts.push({
-                type: `tool-${contentPart.toolName}`,
+                ...fields,
                 toolCallId: contentPart.toolCallId,
                 state: "output-error",
                 input: undefined,
                 errorText: errorText ?? "Unknown error",
                 ...(resultProviderMetadata ? { resultProviderMetadata } : {}),
-              } satisfies ToolUIPart<TOOLS>);
+              } as ToolUIPart<TOOLS> | DynamicToolUIPart);
             } else {
               allParts.push({
-                type: `tool-${contentPart.toolName}`,
+                ...fields,
                 toolCallId: contentPart.toolCallId,
                 state: "output-available",
                 input: undefined,
                 output,
                 ...(resultProviderMetadata ? { resultProviderMetadata } : {}),
-              } satisfies ToolUIPart<TOOLS>);
+              } as ToolUIPart<TOOLS> | DynamicToolUIPart);
             }
           }
           break;
@@ -914,6 +914,8 @@ function createAssistantUIMessage<
   };
 }
 
+type ModelPart = Exclude<Content, string>[number];
+
 type ContentMetadata = {
   providerOptions?: ProviderOptions;
   providerMetadata?: ProviderOptions;
@@ -1005,6 +1007,20 @@ function toSourcePart(
     filename: part.filename,
     providerMetadata: part.providerMetadata,
   } satisfies SourceDocumentUIPart;
+}
+
+function findToolPart(
+  parts: UIMessage["parts"],
+  { toolName, toolCallId }: { toolName: string; toolCallId: string },
+) {
+  return parts.find(
+    (part) =>
+      "toolCallId" in part &&
+      part.toolCallId === toolCallId &&
+      (part.type === "dynamic-tool"
+        ? part.toolName === toolName
+        : part.type === `tool-${toolName}`),
+  ) as ToolUIPart | undefined;
 }
 
 export function combineUIMessages(messages: UIMessage[]): UIMessage[] {

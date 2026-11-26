@@ -8,6 +8,7 @@ import {
 } from "../validators.js";
 import { validate } from "convex-helpers/validators";
 import { encodeToolJsonFields } from "./toolJson.js";
+import { resultDetails, toolPartDetails } from "./toolDetails.js";
 import {
   collectContiguousStreamParts,
   createPersistedUIMessageChunkState,
@@ -183,8 +184,7 @@ export function projectPersistedUIMessageChunkParts(
             toolName: getToolName(part),
             input,
             providerExecuted: part.providerExecuted,
-            ...(part.title ? { title: part.title } : {}),
-            ...(part.toolMetadata ? { toolMetadata: part.toolMetadata } : {}),
+            ...toolPartDetails(part),
             ...(part.callProviderMetadata
               ? { providerOptions: part.callProviderMetadata }
               : {}),
@@ -388,6 +388,7 @@ function toolResult(
       output?.type === "json" || output?.type === "error-json"
         ? encodeToolJsonFields(output, ["value"], "providerOptions")
         : output,
+    ...resultDetails(toolPartDetails(part)),
     ...(providerOptions ? { providerOptions } : {}),
   };
 }
