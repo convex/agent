@@ -2069,7 +2069,7 @@ describe("a message id from another thread is treated as missing", () => {
   test("as upToAndIncludingMessageId", async () => {
     const { t, threadId, otherThreadId, save, user, deletedId } =
       await twoThreads();
-    await save(threadId, [user("mine")]);
+    await save(threadId, [user("mine"), user("later")]);
     const [other] = await save(otherThreadId, [user("other")]);
     const list = (upToAndIncludingMessageId: Id<"messages">) =>
       t.query(api.messages.listMessagesByThreadId, {
