@@ -85,7 +85,7 @@ export const ideaSearch = createTool({
     query: z.string().describe("The query to search for"),
   }),
   execute: async (ctx, args, options): Promise<Array<Idea>> => {
-    // ctx has agent, userId, threadId, messageId
+    // ctx has agent, userId, threadId, promptMessageId
     // as well as ActionCtx properties like auth, storage, runMutation, and runAction
     const ideas = await ctx.runQuery(api.ideas.searchIdeas, {
       query: args.query,
@@ -130,7 +130,10 @@ By default, the context passed to a tool is a `ToolCtx` with:
 - `agent` - the Agent instance calling it
 - `userId` - the user ID associated with the call, if any
 - `threadId` - the thread ID, if any
-- `messageId` - the message ID of the prompt message passed to generate/stream.
+- `promptMessageId` - the message ID of the prompt message passed to
+  generate/stream. After a [tool approval](./tool-approval.mdx), the approved
+  tool runs in the continuation, so this is the approval response's message, not
+  the prompt that made the call.
 - Everything in `ActionCtx`, such as `auth`, `storage`, `runQuery`, etc. Note:
   in scheduled functions, workflows, etc, the auth user will be `null`.
 
