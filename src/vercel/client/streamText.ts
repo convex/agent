@@ -260,7 +260,7 @@ export async function streamText<
     },
     prepareStep: async (options) => {
       await call.beforeStep(options);
-      const result = await streamTextArgs.prepareStep?.(options);
+      const result = await args.prepareStep?.(options);
       if (result) {
         const model = result.model ?? options.model;
         call.updateModel(model);

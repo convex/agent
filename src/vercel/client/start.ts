@@ -4,6 +4,7 @@ import {
   type IdGenerator,
   type Instructions,
   type ModelMessage,
+  type PrepareStepFunction,
   type StepResult,
   type StopCondition,
   type ToolSet,
@@ -339,6 +340,15 @@ export async function startGeneration<
     agent: opts.agentForToolCtx,
   } satisfies ToolCtx;
   const tools = wrapTools(toolCtx, args.tools) as Tools;
+  const agentPrepareStep = opts.agentForToolCtx?.options.prepareStep;
+  const prepareStep =
+    agentPrepareStep &&
+    !(args as { prepareStep?: unknown }).prepareStep &&
+    _operation !== "generateObject" &&
+    _operation !== "streamObject"
+      ? (step: Parameters<PrepareStepFunction<Tools, RUNTIME_CONTEXT>>[0]) =>
+          agentPrepareStep(toolCtx, step)
+      : undefined;
   const argsWithoutSystem = omit(
     args as typeof args & { system?: Instructions },
     ["system"],
@@ -376,6 +386,7 @@ export async function startGeneration<
     ],
     tools,
     ...(include ? { include } : {}),
+    ...(prepareStep ? { prepareStep } : {}),
   } as unknown as WithoutModel<T> & {
     model: AgentLanguageModel;
     messages: ModelMessage[];

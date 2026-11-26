@@ -22,6 +22,7 @@ import type {
   Instructions,
   ModelMessage,
   Output as AISDKOutput,
+  PrepareStepFunction,
   StepResult,
   StopCondition,
   StreamTextResult,
@@ -118,6 +119,7 @@ import type {
   WithoutModel,
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
+import type { ToolCtx } from "./client/createTool.js";
 import { errorToString, hasSuccessfulToolCall } from "./client/utils.js";
 
 export { isStepCount, stepCountIs } from "ai";
@@ -220,6 +222,7 @@ export type {
 /** Configuration for an Agent, with a required language model. */
 export interface AgentOptions<
   AgentTools extends ToolSet = ToolSet,
+  CustomCtx extends object = object,
 > extends Config {
   /**
    * The name for the agent. This will be attributed on each message
@@ -253,6 +256,15 @@ export interface AgentOptions<
   stopWhen?:
     | StopCondition<NoInfer<AgentTools>>
     | Array<StopCondition<NoInfer<AgentTools>>>;
+  /**
+   * Called before each step of generateText and streamText, like the AI SDK's
+   * `prepareStep`, with the ctx the agent's tools get. A `prepareStep` passed
+   * to the call replaces it.
+   */
+  prepareStep?(
+    ctx: ToolCtx & CustomCtx,
+    step: Parameters<PrepareStepFunction<NoInfer<AgentTools>>>[0],
+  ): ReturnType<PrepareStepFunction<NoInfer<AgentTools>>>;
 }
 
 export class Agent<
@@ -280,7 +292,7 @@ export class Agent<
 > {
   constructor(
     public component: AgentComponent,
-    public options: AgentOptions<AgentTools>,
+    public options: AgentOptions<AgentTools, CustomCtx>,
   ) {
     if (this.options.textEmbeddingModel && !this.options.embeddingModel) {
       warnDeprecation(
@@ -573,7 +585,7 @@ export class Agent<
         ...args,
         prepareStep: async (options) => {
           await call.beforeStep(options);
-          const result = await generateTextArgs.prepareStep?.(options);
+          const result = await args.prepareStep?.(options);
           call.updateModel(result?.model ?? options.model);
           return result;
         },

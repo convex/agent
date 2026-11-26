@@ -208,7 +208,7 @@ import { tool, stepCountIs } from "ai";
 import { convexGateway } from "@convex-dev/ai-sdk-provider";
 import { z } from "zod/v3";
 import { Agent, createTool, type Config } from "@convex-dev/agent";
-import { components } from "./_generated/api";
+import { components, internal } from "./_generated/api";
 
 const sharedDefaults = {
   // The language model to use for the agent.
@@ -258,6 +258,15 @@ const supportAgent = new Agent(components.agent, {
   // NOTE: if you want tool calls to happen automatically with a single call,
   // you need to set this to something greater than 1 (the default).
   stopWhen: stepCountIs(5),
+  // Called before each step of generateText and streamText, like the AI SDK's
+  // prepareStep, with the ctx tools get (threadId, userId, promptMessageId).
+  // A prepareStep passed to the call replaces it.
+  prepareStep: async (ctx) => {
+    const plan = await ctx.runQuery(internal.users.plan, {
+      userId: ctx.userId,
+    });
+    return plan === "free" ? { activeTools: ["myTool"] } : undefined;
+  },
   ...sharedDefaults,
 });
 ```
