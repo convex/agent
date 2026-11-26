@@ -299,6 +299,7 @@ async function addMessagesHandler(
   }
   assert(!deleting, `Thread ${threadId} is being deleted`);
   if (finishStreamId && !finishStream) {
+    assert(thread, `Thread ${threadId} not found`);
     // The thread is live, so the stream ended on its own: timeoutStreamHandler
     // aborts a stream with no heartbeat for 10 minutes (a long tool call) and
     // scheduleStreamDeletion removes it 5 minutes later. The messages still
