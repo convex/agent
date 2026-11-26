@@ -376,8 +376,8 @@ describe("DeltaStreamer", () => {
 
     expect(runMutation).toHaveBeenNthCalledWith(
       2,
-      components.agent.streams.abortIfPresent,
-      { streamId: "stream-1", reason: "abortSignal" },
+      components.agent.streams.abort,
+      { streamId: "stream-1", threadId, reason: "abortSignal" },
     );
   });
 
@@ -419,8 +419,8 @@ describe("DeltaStreamer", () => {
     await expect(consuming).rejects.toBe(sourceError);
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abortIfPresent,
-      { streamId: "stream-1", reason: "abortSignal" },
+      components.agent.streams.abort,
+      { streamId: "stream-1", threadId, reason: "abortSignal" },
     );
   });
 
@@ -452,9 +452,10 @@ describe("DeltaStreamer", () => {
     expect(abortReason).toBe("provider_disconnected: Provider dropped");
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abortIfPresent,
+      components.agent.streams.abort,
       {
         streamId: "stream-1",
+        threadId,
         reason: "provider_disconnected: Provider dropped",
       },
     );
@@ -483,8 +484,8 @@ describe("DeltaStreamer", () => {
     await expect(streamer.finish()).resolves.toBeUndefined();
     expect(runMutation).toHaveBeenNthCalledWith(
       2,
-      components.agent.streams.abortIfPresent,
-      { streamId: "stream-1", reason: "storage failed" },
+      components.agent.streams.abort,
+      { streamId: "stream-1", threadId, reason: "storage failed" },
     );
   });
 
@@ -526,8 +527,8 @@ describe("DeltaStreamer", () => {
 
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abortIfPresent,
-      { streamId: "stream-1", reason: "delta failed" },
+      components.agent.streams.abort,
+      { streamId: "stream-1", threadId, reason: "delta failed" },
     );
   });
 
@@ -561,8 +562,8 @@ describe("DeltaStreamer", () => {
     await expect(failing).rejects.toBe(pendingMessageFailure);
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abortIfPresent,
-      { streamId: "stream-1", reason: "external abort" },
+      components.agent.streams.abort,
+      { streamId: "stream-1", threadId, reason: "external abort" },
     );
   });
   // TODO: test fetching partial stream data - syncStreams w/ cursors

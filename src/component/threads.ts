@@ -16,7 +16,7 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage, threadHasMessages } from "./messages.js";
+import { deleteMessage, getDeletionMark } from "./messages.js";
 import { schema, v } from "./schema.js";
 import {
   deleteStreamsPageForThreadId,
@@ -169,7 +169,7 @@ const deleteThreadArgs = {
 };
 export type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
-  cursor: v.optional(v.string()),
+  cursor: v.string(),
   isDone: v.boolean(),
 };
 type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
@@ -251,9 +251,6 @@ export async function deleteThreadStep(
       next: { ...args, cursor: messages.cursor, messagesDone: messages.isDone },
     };
   }
-  // Streams go only after every message and the thread itself, so
-  // addMessagesHandler can tell a stream this deletion removed (thread gone)
-  // from one that timed out on a live thread.
   const streams = args.streamsDone
     ? { isDone: true, streamOrder: undefined, deltaCursor: undefined }
     : await deleteStreamsPageForThreadId(ctx, {
@@ -277,6 +274,9 @@ async function deletePageForThreadIdHandler(
   args: DeleteThreadArgs,
   order: "asc" | "desc" = "asc",
 ): Promise<DeleteThreadReturns> {
+  const markId =
+    (await getDeletionMark(ctx, args.threadId))?._id ??
+    (await ctx.db.insert("deletingThreads", { threadId: args.threadId }));
   const messages = await ctx.db
     .query("messages")
     .withIndex("threadId_status_tool_order_stepOrder", (q) =>
@@ -288,15 +288,12 @@ async function deletePageForThreadIdHandler(
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-  if (!messages.isDone) {
-    return { cursor: messages.continueCursor, isDone: false };
+  if (messages.isDone) {
+    const thread = await ctx.db.get("threads", args.threadId);
+    if (thread) {
+      await ctx.db.delete("threads", args.threadId);
+    }
+    await ctx.db.delete("deletingThreads", markId);
   }
-  if (await threadHasMessages(ctx, args.threadId)) {
-    return { cursor: undefined, isDone: false };
-  }
-  const thread = await ctx.db.get("threads", args.threadId);
-  if (thread) {
-    await ctx.db.delete("threads", args.threadId);
-  }
-  return { cursor: messages.continueCursor, isDone: true };
+  return { cursor: messages.continueCursor, isDone: messages.isDone };
 }

@@ -771,8 +771,9 @@ export class DeltaStreamer<T> {
     }
     let abortFailure: { error: unknown } | undefined;
     try {
-      await this.ctx.runMutation(this.component.streams.abortIfPresent, {
+      await this.ctx.runMutation(this.component.streams.abort, {
         streamId: this.streamId,
+        threadId: this.metadata.threadId,
         reason,
       });
     } catch (error) {

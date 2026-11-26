@@ -1733,16 +1733,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           messageId: string;
           result: { status: "success" } | { error: string; status: "failed" };
-        },
-        null,
-        Name
-      >;
-      finalizeMessageIfPresent: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          messageId: string;
-          result: { status: "success" } | { error: string; status: "failed" };
+          threadId?: string;
         },
         null,
         Name
@@ -6163,6 +6154,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           };
           reason: string;
           streamId: string;
+          threadId?: string;
         },
         boolean,
         Name
@@ -6171,22 +6163,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         { order: number; reason: string; threadId: string },
-        boolean,
-        Name
-      >;
-      abortIfPresent: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          finalDelta?: {
-            end: number;
-            parts: Array<any>;
-            start: number;
-            streamId: string;
-          };
-          reason: string;
-          streamId: string;
-        },
         boolean,
         Name
       >;

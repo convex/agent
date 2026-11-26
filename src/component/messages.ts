@@ -80,20 +80,14 @@ export async function deleteMessage(
   }
 }
 
-// Thread and user deletion page a thread's messages by status, so a generation
-// still saving can add or move a message behind the cursor, such as a failed
-// step. They delete the thread only once this finds none left.
-export async function threadHasMessages(
-  ctx: MutationCtx,
-  threadId: Id<"threads">,
-) {
-  const message = await ctx.db
-    .query("messages")
-    .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-      q.eq("threadId", threadId),
-    )
+// Thread and user deletion mark a thread from their first page of messages
+// until the thread is gone, so a write that reads no mark is ordered before
+// that page.
+export async function getDeletionMark(ctx: QueryCtx, threadId: Id<"threads">) {
+  return await ctx.db
+    .query("deletingThreads")
+    .withIndex("threadId", (q) => q.eq("threadId", threadId))
     .first();
-  return message !== null;
 }
 
 /**
@@ -289,22 +283,21 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
+  const deleting = await getDeletionMark(ctx, threadId);
   const finishStream =
     finishStreamId && (await ctx.db.get("streamingMessages", finishStreamId));
-  // deleteThreadStep deletes a thread's messages, then the thread, and only
-  // then its streams, so a deletion that reached finishStreamId already took
-  // the prompt and the thread. A save into it would outlive the thread, so it
-  // is dropped.
   const thread =
     (!userId || (finishStreamId && !finishStream)) &&
     (await ctx.db.get("threads", threadId));
   if (
     abandonIfPromptMissing &&
-    ((promptMessageId && !promptMessage) ||
+    (deleting ||
+      (promptMessageId && !promptMessage) ||
       (finishStreamId && !finishStream && !thread))
   ) {
     return { messages: [] };
   }
+  assert(!deleting, `Thread ${threadId} is being deleted`);
   if (finishStreamId && !finishStream) {
     // The thread is live, so the stream ended on its own: timeoutStreamHandler
     // aborts a stream with no heartbeat for 10 minutes (a long tool call) and
@@ -557,6 +550,9 @@ function orderedMessagesStream(
 
 const finalizeMessageArgs = {
   messageId: v.id("messages"),
+  // The Agent passes its thread, which a deletion may have removed along with
+  // the message.
+  threadId: v.optional(v.id("threads")),
   result: v.union(
     v.object({ status: v.literal("success") }),
     v.object({ status: v.literal("failed"), error: v.string() }),
@@ -566,29 +562,28 @@ const finalizeMessageArgs = {
 export const finalizeMessage = mutation({
   args: finalizeMessageArgs,
   returns: v.null(),
-  handler: async (ctx, { messageId, result }) => {
+  handler: async (ctx, { messageId, threadId, result }) => {
     const stored = await ctx.db.get("messages", messageId);
+    if (await isThreadGone(ctx, stored?.threadId ?? threadId, !stored)) {
+      return null;
+    }
     assert(stored, `Message ${messageId} not found`);
     await finalizeStoredMessage(ctx, stored, result);
     return null;
   },
 });
 
-// The Agent fails its pending message with this as a generation ends. A
-// thread deleted mid-generation has taken the message with it by then.
-export const finalizeMessageIfPresent = mutation({
-  args: finalizeMessageArgs,
-  returns: v.null(),
-  handler: async (ctx, { messageId, result }) => {
-    const stored = await ctx.db.get("messages", messageId);
-    if (!stored) {
-      console.warn("Message not found", messageId);
-      return null;
-    }
-    await finalizeStoredMessage(ctx, stored, result);
-    return null;
-  },
-});
+// A row whose thread a deletion has marked or removed is gone or about to be,
+// so finalizing or aborting it has nothing left to do.
+export async function isThreadGone(
+  ctx: QueryCtx,
+  threadId: Id<"threads"> | undefined,
+  rowMissing: boolean,
+) {
+  if (!threadId) return false;
+  if (await getDeletionMark(ctx, threadId)) return true;
+  return rowMissing && !(await ctx.db.get("threads", threadId));
+}
 
 async function finalizeStoredMessage(
   ctx: MutationCtx,

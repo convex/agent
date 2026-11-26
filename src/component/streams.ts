@@ -30,6 +30,7 @@ import {
   projectPersistedUIMessageChunks,
 } from "../streaming/materializePersistedUIMessageChunks.js";
 import { changeRefcount } from "./files.js";
+import { isThreadGone } from "./messages.js";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -356,29 +357,25 @@ export const abortByOrder = mutation({
   handler: abortStreamsAtOrder,
 });
 
-const abortArgs = {
-  streamId: v.id("streamingMessages"),
-  reason: v.string(),
-  finalDelta: v.optional(deltaValidator),
-};
-
 export const abort = mutation({
-  args: abortArgs,
+  args: {
+    streamId: v.id("streamingMessages"),
+    // The Agent passes its thread, which a deletion may have removed along
+    // with the stream.
+    threadId: v.optional(v.id("threads")),
+    reason: v.string(),
+    finalDelta: v.optional(deltaValidator),
+  },
   returns: v.boolean(),
-  handler: abortById,
-});
-
-// DeltaStreamer aborts its stream with this. A thread deletion or
-// scheduleStreamDeletion may have removed it already.
-export const abortIfPresent = mutation({
-  args: abortArgs,
-  returns: v.boolean(),
-  handler: async (ctx, args) => {
-    if (!(await ctx.db.get("streamingMessages", args.streamId))) {
-      console.warn("Stream not found", args.streamId);
+  handler: async (ctx, { threadId, ...args }) => {
+    const stream = await ctx.db.get("streamingMessages", args.streamId);
+    if (await isThreadGone(ctx, stream?.threadId ?? threadId, !stream)) {
       return false;
     }
-    return await abortById(ctx, args);
+    if (!stream) {
+      throw new Error(`Stream not found: ${args.streamId}`);
+    }
+    return await abortStreamingMessage(ctx, stream, args);
   },
 });
 

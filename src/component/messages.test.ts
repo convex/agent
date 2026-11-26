@@ -2177,18 +2177,17 @@ test("the Agent's own finalize and abort return for a row a thread deletion remo
     stepOrder: pending.stepOrder,
     format: "UIMessageChunk",
   });
-  await t.run(async (ctx) => {
-    await ctx.db.delete("messages", messageId);
-    await ctx.db.delete("streamingMessages", streamId);
-  });
+  await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
+  await t.finishAllScheduledFunctions(() => {});
 
   expect(
-    await t.mutation(api.messages.finalizeMessageIfPresent, {
+    await t.mutation(api.messages.finalizeMessage, {
       messageId,
+      threadId,
       result: { status: "failed", error: "Stopped" },
     }),
   ).toBeNull();
   expect(
-    await t.mutation(api.streams.abortIfPresent, { streamId, reason: "stop" }),
+    await t.mutation(api.streams.abort, { streamId, threadId, reason: "stop" }),
   ).toBe(false);
 });
