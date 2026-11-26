@@ -3,4 +3,5 @@
 ---
 
 `streams.deleteAllStreamsForThreadIdAsync` deletes only the thread's streams and
-no longer deletes the thread row (#539).
+no longer deletes the thread row; use `threads.deleteAllForThreadIdAsync` to
+delete a thread (#539).
