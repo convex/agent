@@ -395,6 +395,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             input: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -413,6 +414,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args: any;
+                            dynamic?: boolean;
                             input?: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -431,6 +433,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             experimental_content?: Array<
                               | { text: string; type: "text" }
                               | {
@@ -668,6 +671,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   content: Array<
                     | {
                         args?: any;
+                        dynamic?: boolean;
                         experimental_content?: Array<
                           | { text: string; type: "text" }
                           | { data: string; mimeType?: string; type: "image" }
@@ -1161,6 +1165,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             input: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -1179,6 +1184,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args: any;
+                            dynamic?: boolean;
                             input?: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -1197,6 +1203,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             experimental_content?: Array<
                               | { text: string; type: "text" }
                               | {
@@ -1434,6 +1441,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   content: Array<
                     | {
                         args?: any;
+                        dynamic?: boolean;
                         experimental_content?: Array<
                           | { text: string; type: "text" }
                           | { data: string; mimeType?: string; type: "image" }
@@ -1953,6 +1961,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           input: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -1968,6 +1977,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args: any;
+                          dynamic?: boolean;
                           input?: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -1983,6 +1993,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           experimental_content?: Array<
                             | { text: string; type: "text" }
                             | { data: string; mimeType?: string; type: "image" }
@@ -2198,6 +2209,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                 content: Array<
                   | {
                       args?: any;
+                      dynamic?: boolean;
                       experimental_content?: Array<
                         | { text: string; type: "text" }
                         | { data: string; mimeType?: string; type: "image" }
@@ -2716,6 +2728,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             input: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -2734,6 +2747,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args: any;
+                            dynamic?: boolean;
                             input?: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -2752,6 +2766,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             experimental_content?: Array<
                               | { text: string; type: "text" }
                               | {
@@ -2989,6 +3004,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   content: Array<
                     | {
                         args?: any;
+                        dynamic?: boolean;
                         experimental_content?: Array<
                           | { text: string; type: "text" }
                           | { data: string; mimeType?: string; type: "image" }
@@ -3502,6 +3518,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           input: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -3517,6 +3534,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args: any;
+                          dynamic?: boolean;
                           input?: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -3532,6 +3550,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           experimental_content?: Array<
                             | { text: string; type: "text" }
                             | { data: string; mimeType?: string; type: "image" }
@@ -3747,6 +3766,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                 content: Array<
                   | {
                       args?: any;
+                      dynamic?: boolean;
                       experimental_content?: Array<
                         | { text: string; type: "text" }
                         | { data: string; mimeType?: string; type: "image" }
@@ -4220,6 +4240,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           input: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -4235,6 +4256,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args: any;
+                          dynamic?: boolean;
                           input?: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -4250,6 +4272,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           experimental_content?: Array<
                             | { text: string; type: "text" }
                             | { data: string; mimeType?: string; type: "image" }
@@ -4465,6 +4488,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                 content: Array<
                   | {
                       args?: any;
+                      dynamic?: boolean;
                       experimental_content?: Array<
                         | { text: string; type: "text" }
                         | { data: string; mimeType?: string; type: "image" }
@@ -4955,6 +4979,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             input: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -4973,6 +4998,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args: any;
+                            dynamic?: boolean;
                             input?: any;
                             providerExecuted?: boolean;
                             providerMetadata?: Record<
@@ -4991,6 +5017,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                           }
                         | {
                             args?: any;
+                            dynamic?: boolean;
                             experimental_content?: Array<
                               | { text: string; type: "text" }
                               | {
@@ -5228,6 +5255,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   content: Array<
                     | {
                         args?: any;
+                        dynamic?: boolean;
                         experimental_content?: Array<
                           | { text: string; type: "text" }
                           | { data: string; mimeType?: string; type: "image" }
@@ -5643,6 +5671,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           input: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -5658,6 +5687,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args: any;
+                          dynamic?: boolean;
                           input?: any;
                           providerExecuted?: boolean;
                           providerMetadata?: Record<
@@ -5673,6 +5703,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                         }
                       | {
                           args?: any;
+                          dynamic?: boolean;
                           experimental_content?: Array<
                             | { text: string; type: "text" }
                             | { data: string; mimeType?: string; type: "image" }
@@ -5888,6 +5919,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                 content: Array<
                   | {
                       args?: any;
+                      dynamic?: boolean;
                       experimental_content?: Array<
                         | { text: string; type: "text" }
                         | { data: string; mimeType?: string; type: "image" }

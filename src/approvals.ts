@@ -1,5 +1,6 @@
 import type { Infer } from "convex/values";
 import type { Message, MessageDoc, vToolResultOutput } from "./validators.js";
+import { resultDetails, type ToolDetails } from "./streaming/toolDetails.js";
 
 export type ToolCallApprovalDecision = {
   approvalId: string;
@@ -52,6 +53,7 @@ export async function planToolCallResponses(
     requestMessageId = doc._id;
   };
   const providerExecuted = new Set<string>();
+  const callDetails = new Map<string, ToolDetails>();
   const answeredApprovals = new Set<string>();
   const answeredCalls = new Set<string>();
   const continuedOrders = new Set<number>();
@@ -132,6 +134,7 @@ export async function planToolCallResponses(
           );
         }
         claim(doc);
+        callDetails.set(part.toolCallId, resultDetails(part));
         pendingCalls.delete(part.toolCallId);
       }
     }
@@ -169,6 +172,7 @@ export async function planToolCallResponses(
           toolCallId,
           toolName,
           output,
+          ...callDetails.get(toolCallId),
         })),
       ],
     },

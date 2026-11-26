@@ -40,6 +40,11 @@ import {
   decodeToolJsonFields,
   encodeToolJsonFields,
 } from "../streaming/toolJson.js";
+import {
+  callDetails,
+  resultDetails,
+  toolPartFields,
+} from "../streaming/toolDetails.js";
 
 export type UIStatus = "streaming" | MessageStatus;
 
@@ -522,13 +527,23 @@ function createAssistantUIMessage<
       ? storedContent.filter((part) => part.type === "text")
       : [];
     let textPartIndex = 0;
-    const storedToolCalls = new Map(
+    const storedToolParts = new Map(
       Array.isArray(storedContent)
         ? storedContent.flatMap((part) =>
-            part.type === "tool-call" ? [[part.toolCallId, part] as const] : [],
+            part.type === "tool-call" || part.type === "tool-result"
+              ? [[`${part.type}:${part.toolCallId}`, part] as const]
+              : [],
           )
         : [],
     );
+    const storedDetails = (type: "tool-call" | "tool-result", id: string) => {
+      const part = storedToolParts.get(`${type}:${id}`);
+      return !part
+        ? {}
+        : type === "tool-call"
+          ? callDetails(part)
+          : resultDetails(part);
+    };
 
     const state = message.streaming
       ? ("streaming" as const)
@@ -599,17 +614,16 @@ function createAssistantUIMessage<
             type: "step-start",
           } satisfies StepStartUIPart);
           const callProviderMetadata = ownProviderMetadata(contentPart);
-          const { title, toolMetadata } =
-            storedToolCalls.get(contentPart.toolCallId) ?? {};
-          const toolPart: ToolUIPart<TOOLS> = {
-            type: `tool-${contentPart.toolName as keyof TOOLS & string}`,
+          const toolPart = {
+            ...toolPartFields(
+              contentPart.toolName,
+              storedDetails("tool-call", contentPart.toolCallId),
+            ),
             toolCallId: contentPart.toolCallId,
             input: contentPart.input as DeepPartial<
               TOOLS[keyof TOOLS & string]["input"]
             >,
             providerExecuted: contentPart.providerExecuted,
-            ...(title != null ? { title } : {}),
-            ...(toolMetadata != null ? { toolMetadata } : {}),
             ...(message.streaming
               ? {
                   state: "input-streaming",
@@ -620,7 +634,7 @@ function createAssistantUIMessage<
                   callProviderMetadata:
                     metadataOf(contentPart).providerMetadata,
                 }),
-          };
+          } as ToolUIPart<TOOLS> | DynamicToolUIPart;
           allParts.push(toolPart);
           break;
         }
@@ -634,12 +648,7 @@ function createAssistantUIMessage<
 
           // Check if this is an execution-denied result
           if (typedPart.output?.type === "execution-denied") {
-            const call = allParts.find(
-              (part) =>
-                part.type === `tool-${contentPart.toolName}` &&
-                "toolCallId" in part &&
-                part.toolCallId === contentPart.toolCallId,
-            ) as ToolUIPart | undefined;
+            const call = findToolPart(allParts, contentPart);
 
             if (call) {
               call.state = "output-denied";
@@ -681,12 +690,7 @@ function createAssistantUIMessage<
                 ? JSON.stringify(output)
                 : String(output)
               : undefined);
-          const call = allParts.find(
-            (part) =>
-              part.type === `tool-${contentPart.toolName}` &&
-              "toolCallId" in part &&
-              part.toolCallId === contentPart.toolCallId,
-          ) as ToolUIPart | undefined;
+          const call = findToolPart(allParts, contentPart);
           const resultProviderMetadata =
             metadataOf(contentPart).providerMetadata;
           if (call) {
@@ -707,24 +711,28 @@ function createAssistantUIMessage<
             }
           } else {
             // Tool call is on a previous page - create standalone tool part
+            const fields = toolPartFields(
+              contentPart.toolName,
+              storedDetails("tool-result", contentPart.toolCallId),
+            );
             if (hasError) {
               allParts.push({
-                type: `tool-${contentPart.toolName}`,
+                ...fields,
                 toolCallId: contentPart.toolCallId,
                 state: "output-error",
                 input: undefined,
                 errorText: errorText ?? "Unknown error",
                 ...(resultProviderMetadata ? { resultProviderMetadata } : {}),
-              } satisfies ToolUIPart<TOOLS>);
+              } as ToolUIPart<TOOLS> | DynamicToolUIPart);
             } else {
               allParts.push({
-                type: `tool-${contentPart.toolName}`,
+                ...fields,
                 toolCallId: contentPart.toolCallId,
                 state: "output-available",
                 input: undefined,
                 output,
                 ...(resultProviderMetadata ? { resultProviderMetadata } : {}),
-              } satisfies ToolUIPart<TOOLS>);
+              } as ToolUIPart<TOOLS> | DynamicToolUIPart);
             }
           }
           break;
@@ -1016,6 +1024,20 @@ function toSourcePart(
     filename: part.filename,
     providerMetadata: part.providerMetadata,
   } satisfies SourceDocumentUIPart;
+}
+
+function findToolPart(
+  parts: UIMessage["parts"],
+  { toolName, toolCallId }: { toolName: string; toolCallId: string },
+) {
+  return parts.find(
+    (part) =>
+      "toolCallId" in part &&
+      part.toolCallId === toolCallId &&
+      (part.type === "dynamic-tool"
+        ? part.toolName === toolName
+        : part.type === `tool-${toolName}`),
+  ) as ToolUIPart | undefined;
 }
 
 export function combineUIMessages(messages: UIMessage[]): UIMessage[] {

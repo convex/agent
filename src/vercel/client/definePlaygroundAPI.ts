@@ -340,6 +340,7 @@ export function definePlaygroundActions<DataModel extends GenericDataModel>(
             provider: getProviderName(agent.options.languageModel),
           },
           step.response.messages,
+          agent.options.tools,
         );
         outputMessages.push(
           messages.map((messageWithMetadata, i) =>

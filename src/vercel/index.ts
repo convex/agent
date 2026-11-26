@@ -1339,6 +1339,7 @@ export class Agent<
       args.step.response.messages.length > 0
         ? args.step.response.messages
         : [{ role: "assistant", content: [] }],
+      this.options.tools,
     );
     const embeddings = await this.generateEmbeddings(
       ctx,

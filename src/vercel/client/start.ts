@@ -423,6 +423,7 @@ export async function startGeneration<
           toSave.step,
           activeModel,
           responseMessagesToSave,
+          tools,
         );
       }
       if (error !== undefined) {

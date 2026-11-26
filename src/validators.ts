@@ -158,6 +158,7 @@ export const vToolCallPart = v.union(
     providerExecuted: v.optional(v.boolean()),
     title: v.optional(v.string()),
     toolMetadata: v.optional(v.record(v.string(), v.any())),
+    dynamic: v.optional(v.boolean()),
     providerOptions,
     providerMetadata,
   }),
@@ -172,6 +173,7 @@ export const vToolCallPart = v.union(
     providerExecuted: v.optional(v.boolean()),
     title: v.optional(v.string()),
     toolMetadata: v.optional(v.record(v.string(), v.any())),
+    dynamic: v.optional(v.boolean()),
     providerOptions,
     providerMetadata,
   }),
@@ -375,6 +377,7 @@ export const vToolResultPart = v.object({
   providerOptions,
   providerMetadata,
   providerExecuted: v.optional(v.boolean()),
+  dynamic: v.optional(v.boolean()),
 
   // Deprecated in ai v5
   result: v.optional(v.any()), // either this or output will be present
