@@ -2,5 +2,6 @@
 "@convex-dev/agent": patch
 ---
 
-Saved tool parts keep the tool's `title` and `toolMetadata`, so `listUIMessages`
-returns them as the stream showed them (#527).
+Reloaded tool parts match the stream: they keep the tool's `title` and
+`toolMetadata`, and a dynamic tool's part is `dynamic-tool` (one-way: older
+component versions reject tool calls and results saved with `dynamic`) (#527).
