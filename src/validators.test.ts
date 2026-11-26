@@ -1,12 +1,22 @@
-import type { FinishReason } from "ai";
+import type {
+  experimental_decide,
+  Experimental_DecisionAnswer,
+  Experimental_DecisionQuestion,
+  FinishReason,
+  ProviderMetadata,
+} from "ai";
 import type { GenericId, Infer } from "convex/values";
 import { expectTypeOf, test } from "vitest";
 import type {
   ContextOptions,
   StorageOptions,
 } from "./vercel/client/types.js";
+import type { DecisionDoc } from "./vercel/client/decide.js";
 import {
   vContextOptions,
+  vDecisionAnswer,
+  vDecisionQuestion,
+  vDecisionSettings,
   vFinishReason,
   vMessageDoc,
   vStorageOptions,
@@ -27,7 +37,31 @@ type MessageBasedOnSchema = IdsToStrings<
 expectTypeOf<Infer<typeof vMessageDoc>>().toEqualTypeOf<MessageBasedOnSchema>();
 expectTypeOf<MessageBasedOnSchema>().toEqualTypeOf<Infer<typeof vMessageDoc>>();
 
+expectTypeOf<Infer<typeof vDecisionAnswer>>().toEqualTypeOf<
+  Experimental_DecisionAnswer<Experimental_DecisionQuestion>
+>();
+expectTypeOf<
+  Infer<typeof vDecisionQuestion>
+>().toExtend<Experimental_DecisionQuestion>();
+expectTypeOf<Mutable<Experimental_DecisionQuestion>>().toExtend<
+  Infer<typeof vDecisionQuestion>
+>();
+type DecideSettings = Pick<
+  Parameters<typeof experimental_decide>[0],
+  "maxOutputTokens" | "reasoning" | "providerOptions"
+>;
+expectTypeOf<Infer<typeof vDecisionSettings>>().toExtend<DecideSettings>();
+expectTypeOf<DecideSettings>().toExtend<Infer<typeof vDecisionSettings>>();
+expectTypeOf<DecisionDoc["providerMetadata"]>().toEqualTypeOf<
+  ProviderMetadata | undefined
+>();
+
 test("noop", () => {});
+
+// Convex validators infer mutable arrays where the AI SDK has readonly ones.
+type Mutable<T> = T extends unknown
+  ? { -readonly [K in keyof T]: T[K] extends readonly (infer E)[] ? E[] : T[K] }
+  : never;
 
 type IdsToStrings<T> =
   T extends GenericId<string>
