@@ -335,3 +335,53 @@ test("a missing model throws before the prompt is saved", async () => {
   expect(error).toContain("model is required");
   expect(rows).toEqual([]);
 });
+
+test("the agent's prepareStep gets the ctx its tools get, and a call's prepareStep replaces it", async () => {
+  const seen: unknown[] = [];
+  const agent: Agent<{ orgId: string }> = new Agent(components.agent, {
+    name: "prepare",
+    languageModel: mockModel({ content: [{ type: "text", text: "ok" }] }),
+    prepareStep: async (ctx, step) => {
+      seen.push({
+        orgId: ctx.orgId,
+        threadId: ctx.threadId,
+        userId: ctx.userId,
+        promptMessageId: ctx.promptMessageId,
+        agent: ctx.agent === agent,
+        stepNumber: step.stepNumber,
+      });
+      return undefined;
+    },
+  });
+  const turns = await initConvexTest().action(async (actionCtx) => {
+    const ctx = { ...actionCtx, orgId: "o1" };
+    const threadId = await createThread(ctx, components.agent, {
+      userId: "u1",
+    });
+    const generated = await agent.generateText(
+      ctx,
+      { threadId },
+      { prompt: "hello" },
+    );
+    const streamed = await agent.streamText(
+      ctx,
+      { threadId },
+      { prompt: "again" },
+    );
+    await streamed.consumeStream();
+    await agent.generateText(
+      ctx,
+      { threadId },
+      { prompt: "replaced", prepareStep: () => undefined },
+    );
+    return [generated, streamed].map(({ promptMessageId }) => ({
+      orgId: "o1",
+      threadId,
+      userId: "u1",
+      promptMessageId,
+      agent: true,
+      stepNumber: 0,
+    }));
+  });
+  expect(seen).toEqual(turns);
+});
