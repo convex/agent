@@ -175,10 +175,7 @@ export function projectPersistedUIMessageChunkParts(
             : {}),
         });
       } else if (isToolPart(part) && part.state !== "input-streaming") {
-        const input =
-          part.state === "output-error"
-            ? (part.input ?? part.rawInput ?? {})
-            : (part.input ?? {});
+        const input = part.input ?? {};
         const call = encodeToolJsonFields(
           {
             type: "tool-call" as const,

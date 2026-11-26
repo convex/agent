@@ -87,7 +87,6 @@ export type PersistedToolPart = {
     | "output-error"
     | "output-denied";
   input?: unknown;
-  rawInput?: unknown;
   output?: unknown;
   errorText?: string;
   providerExecuted?: boolean;
