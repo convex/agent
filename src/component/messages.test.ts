@@ -2057,6 +2057,28 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
       }),
     ).rejects.toThrow(`Thread ${threadId} is being deleted`);
   });
+  test("an app's save into a deleted thread whose stream is gone throws", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
+    await t.finishAllScheduledFunctions(() => {});
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        userId: "u",
+        finishStreamId: streamId,
+        messages: [{ message: { role: "user", content: "late" } }],
+      }),
+    ).rejects.toThrow(`Thread ${threadId} not found`);
+  });
 
   test("still throws for a caller that did not opt in", async () => {
     const t = initConvexTest();
