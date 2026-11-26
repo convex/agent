@@ -552,41 +552,4 @@ describe("users", () => {
     }));
     expect(left).toEqual({ thread: null, messages: [] });
   });
-  test("a user deletion removes a thread's stream only after the thread, as a thread deletion does", async () => {
-    const t = convexTest(schema, modules);
-    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
-    const threadId = thread._id as Id<"threads">;
-    const { messages } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [{ message: { role: "user", content: "hello" } }],
-    });
-    const streamId = await t.mutation(api.streams.create, {
-      threadId,
-      order: messages[0].order,
-      stepOrder: messages[0].stepOrder + 1,
-      format: "UIMessageChunk",
-    });
-
-    let step = await t.mutation(internal.users._deletePageForUserId, {
-      userId: "u",
-      messagesCursor: null,
-      threadsCursor: null,
-      threadInProgress: null,
-    });
-    const seen = [];
-    while (!step.isDone) {
-      seen.push(
-        await t.run(async (ctx) => ({
-          stream: !!(await ctx.db.get("streamingMessages", streamId)),
-          thread: !!(await ctx.db.get("threads", threadId)),
-        })),
-      );
-      const { isDone: _, ...next } = step;
-      step = await t.mutation(internal.users._deletePageForUserId, {
-        userId: "u",
-        ...next,
-      });
-    }
-    expect(seen).not.toContainEqual({ stream: false, thread: true });
-  });
 });

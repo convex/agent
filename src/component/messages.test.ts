@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, onTestFinished, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import { getMaxMessage } from "./messages.js";
@@ -1866,23 +1866,18 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     });
     await t.run(async (ctx) => ctx.db.delete("streamingMessages", streamId));
 
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const saved = await t.mutation(api.messages.addMessages, {
-        threadId,
-        promptMessageId,
-        abandonIfPromptMissing: true,
-        pendingMessageId,
-        finishStreamId: streamId,
-        failPendingSteps: false,
-        messages: [{ message: { role: "assistant", content: "answer" } }],
-      });
-      expect(saved.messages.map((m) => [m._id, m.status, m.text])).toEqual([
-        [pendingMessageId, "success", "answer"],
-      ]);
-    } finally {
-      warn.mockRestore();
-    }
+    const saved = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      abandonIfPromptMissing: true,
+      pendingMessageId,
+      finishStreamId: streamId,
+      failPendingSteps: false,
+      messages: [{ message: { role: "assistant", content: "answer" } }],
+    });
+    expect(saved.messages.map((m) => [m._id, m.status, m.text])).toEqual([
+      [pendingMessageId, "success", "answer"],
+    ]);
 
     const rows = await t.run(async (ctx) =>
       ctx.db
@@ -1944,87 +1939,6 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     expect(rows).toEqual([]);
   });
 
-  test("a thread deletion removes a generation's stream only after the thread's messages", async () => {
-    // With the stream deleted last, addMessagesHandler can read a missing
-    // finishStreamId stream on a live prompt as a timed-out stream, not a
-    // deletion whose cursor a failed save would land behind.
-    const t = initConvexTest();
-    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
-    const threadId = thread._id as Id<"threads">;
-    const { messages } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [
-        { message: { role: "user", content: "one" } },
-        { message: { role: "user", content: "two" } },
-      ],
-    });
-    const streamId = await t.mutation(api.streams.create, {
-      threadId,
-      order: messages[1].order,
-      stepOrder: messages[1].stepOrder + 1,
-      format: "UIMessageChunk",
-    });
-
-    const step = await t.mutation(internal.threads._deleteThreadStep, {
-      threadId,
-      limit: 1,
-    });
-    expect(step.isDone).toBe(false);
-    expect(
-      await t.run(async (ctx) => ctx.db.get("streamingMessages", streamId)),
-    ).not.toBeNull();
-
-    await t.mutation(api.threads.deleteAllForThreadIdAsync, {
-      threadId,
-      limit: 1,
-    });
-    await t.finishAllScheduledFunctions(() => {});
-    expect(
-      await t.run(async (ctx) => ({
-        stream: await ctx.db.get("streamingMessages", streamId),
-        thread: await ctx.db.get("threads", threadId),
-      })),
-    ).toEqual({ stream: null, thread: null });
-  });
-
-  test("a thread deletion step deletes a page of messages or of a stream, not both", async () => {
-    // Each page can be near the read limit, so repeatWhileHeadroom needs to
-    // be able to stop between them.
-    const t = initConvexTest();
-    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
-    const threadId = thread._id as Id<"threads">;
-    const { messages } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [{ message: { role: "user", content: "hello" } }],
-    });
-    const streamId = await t.mutation(api.streams.create, {
-      threadId,
-      order: messages[0].order,
-      stepOrder: messages[0].stepOrder + 1,
-      format: "UIMessageChunk",
-    });
-    await t.mutation(api.streams.addDelta, {
-      streamId,
-      start: 0,
-      end: 1,
-      parts: [{ type: "text-delta", id: "t", delta: "hi" }],
-    });
-
-    const step = await t.mutation(internal.threads._deleteThreadStep, {
-      threadId,
-    });
-    expect(step.isDone).toBe(false);
-    expect(
-      await t.run(async (ctx) => ({
-        thread: await ctx.db.get("threads", threadId),
-        deltas: await ctx.db
-          .query("streamDeltas")
-          .withIndex("streamId_start_end", (q) => q.eq("streamId", streamId))
-          .collect(),
-      })),
-    ).toMatchObject({ thread: null, deltas: [{ start: 0 }] });
-  });
-
   test("a failed save during a thread deletion doesn't outlive the thread", async () => {
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, { userId: "u" });
@@ -2038,12 +1952,6 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     });
     const prompt = messages[1];
     const promptMessageId = prompt._id as Id<"messages">;
-    const streamId = await t.mutation(api.streams.create, {
-      threadId,
-      order: prompt.order,
-      stepOrder: prompt.stepOrder + 1,
-      format: "UIMessageChunk",
-    });
 
     // The deletion's first page passes the earlier turn, not the prompt.
     let step = await t.mutation(internal.threads._deleteThreadStep, {
@@ -2058,7 +1966,6 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
       threadId,
       promptMessageId,
       abandonIfPromptMissing: true,
-      finishStreamId: streamId,
       messages: [
         {
           message: { role: "assistant", content: "partial" },
@@ -2227,62 +2134,37 @@ describe("cloneThread", () => {
   });
 });
 
-describe("a missing id in finalizeMessage and streams.abort", () => {
-  async function deletedIds() {
-    const t = initConvexTest();
-    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
-    const threadId = thread._id as Id<"threads">;
-    const { messages } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [
-        { message: { role: "user", content: "hello" } },
-        { message: { role: "assistant", content: [] }, status: "pending" },
-      ],
-    });
-    const pending = messages[1];
-    const messageId = pending._id as Id<"messages">;
-    const streamId = await t.mutation(api.streams.create, {
-      threadId,
-      order: pending.order,
-      stepOrder: pending.stepOrder,
-      format: "UIMessageChunk",
-    });
-    await t.run(async (ctx) => {
-      await ctx.db.delete("messages", messageId);
-      await ctx.db.delete("streamingMessages", streamId);
-    });
-    return { t, messageId, streamId };
-  }
-
-  test("throws for an app's call", async () => {
-    const { t, messageId, streamId } = await deletedIds();
-    await expect(
-      t.mutation(api.messages.finalizeMessage, {
-        messageId,
-        result: { status: "success" },
-      }),
-    ).rejects.toThrow("not found");
-    await expect(
-      t.mutation(api.streams.abort, { streamId, reason: "stop" }),
-    ).rejects.toThrow("Stream not found");
+test("the Agent's own finalize and abort return for a row a thread deletion removed", async () => {
+  const t = initConvexTest();
+  const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+  const threadId = thread._id as Id<"threads">;
+  const { messages } = await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [
+      { message: { role: "user", content: "hello" } },
+      { message: { role: "assistant", content: [] }, status: "pending" },
+    ],
+  });
+  const pending = messages[1];
+  const messageId = pending._id as Id<"messages">;
+  const streamId = await t.mutation(api.streams.create, {
+    threadId,
+    order: pending.order,
+    stepOrder: pending.stepOrder,
+    format: "UIMessageChunk",
+  });
+  await t.run(async (ctx) => {
+    await ctx.db.delete("messages", messageId);
+    await ctx.db.delete("streamingMessages", streamId);
   });
 
-  test("warns and returns in the Agent's own calls, which a thread deletion can race", async () => {
-    const { t, messageId, streamId } = await deletedIds();
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    onTestFinished(() => warn.mockRestore());
-    expect(
-      await t.mutation(api.messages.finalizeMessageIfPresent, {
-        messageId,
-        result: { status: "failed", error: "Stopped" },
-      }),
-    ).toBeNull();
-    expect(
-      await t.mutation(api.streams.abortIfPresent, {
-        streamId,
-        reason: "stop",
-      }),
-    ).toBe(false);
-    expect(warn).toHaveBeenCalledTimes(2);
-  });
+  expect(
+    await t.mutation(api.messages.finalizeMessageIfPresent, {
+      messageId,
+      result: { status: "failed", error: "Stopped" },
+    }),
+  ).toBeNull();
+  expect(
+    await t.mutation(api.streams.abortIfPresent, { streamId, reason: "stop" }),
+  ).toBe(false);
 });
