@@ -220,11 +220,10 @@ export const listDeltas = query({
     const deltas: StreamDelta[] = [];
     for (const cursor of args.cursors) {
       const stream = await ctx.db.get("streamingMessages", cursor.streamId);
-      // Clients can retain cursors after a stream has been cleaned up.
-      if (!stream) continue;
-      if (stream.threadId !== args.threadId) {
-        throw new Error("Stream does not belong to the given thread");
-      }
+      // Clients can retain cursors after a stream has been cleaned up. Another
+      // thread's stream is skipped the same way, before any of its deltas are
+      // read, so the result says nothing about it.
+      if (!stream || stream.threadId !== args.threadId) continue;
       // Uses paginator: queries may only call built-in .paginate() once per
       // transaction, and this reads one page per stream.
       const { page } = await paginator(ctx.db, schema)
