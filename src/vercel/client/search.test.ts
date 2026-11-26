@@ -1510,4 +1510,31 @@ describe("search.ts", () => {
 
     expect(await fetch(messages[0]._id)).toEqual(await fetch(deleted[0]._id));
   });
+
+  it("searches by a target message from another of the user's threads", async () => {
+    const mine = await createTestThread("me");
+    const older = await createTestThread("me");
+    await createTestMessages(mine, "me", [
+      { role: "user", content: "banana bread", order: 0 },
+    ]);
+    const { messages } = await t.run((mutCtx) =>
+      saveMessages(mutCtx, components.agent, {
+        threadId: older,
+        userId: "me",
+        messages: [{ role: "user", content: "banana" }],
+      }),
+    );
+
+    const found = await fetchContextMessages(ctx, components.agent, {
+      userId: undefined,
+      threadId: mine,
+      targetMessageId: messages[0]._id,
+      contextOptions: {
+        recentMessages: 0,
+        searchOtherThreads: true,
+        searchOptions: { textSearch: true, limit: 5 },
+      },
+    });
+    expect(found.map((m) => m.text)).toContain("banana bread");
+  });
 });
