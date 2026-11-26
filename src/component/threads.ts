@@ -167,7 +167,7 @@ const deleteThreadArgs = {
   deltaCursor: v.optional(v.string()),
   limit: v.optional(v.number()),
 };
-type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
+export type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
   cursor: v.optional(v.string()),
   isDone: v.boolean(),
@@ -176,7 +176,7 @@ type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
 
 export const _deletePageForThreadId = internalMutation({
   args: deleteThreadArgs,
-  handler: deletePageForThreadIdHandler,
+  handler: (ctx, args) => deletePageForThreadIdHandler(ctx, args),
   returns: deleteThreadReturns,
 });
 
@@ -236,42 +236,38 @@ async function deleteAllForThreadIdBatch(
   return { isDone: result.isDone };
 }
 
-async function deleteThreadStep(
+export async function deleteThreadStep(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
+  order: "asc" | "desc" = "asc",
 ): Promise<DeleteThreadStep> {
-  let messagesResult: DeleteThreadReturns = {
-    isDone: args.messagesDone ?? false,
-    cursor: args.cursor,
-  };
+  // One page per step: a page of messages and a page of deltas can each be
+  // near the read limit, so repeatWhileHeadroom has to be able to stop
+  // between them.
   if (!args.messagesDone) {
-    messagesResult = await deletePageForThreadIdHandler(ctx, args);
+    const messages = await deletePageForThreadIdHandler(ctx, args, order);
+    return {
+      isDone: false,
+      next: { ...args, cursor: messages.cursor, messagesDone: messages.isDone },
+    };
   }
-  let streamResult = {
-    isDone: args.streamsDone ?? false,
-    streamOrder: args.streamOrder,
-    deltaCursor: args.deltaCursor,
-  };
   // Streams go only after every message and the thread itself, so
   // addMessagesHandler can tell a stream this deletion removed (thread gone)
   // from one that timed out on a live thread.
-  if (messagesResult.isDone && !args.streamsDone) {
-    streamResult = await deleteStreamsPageForThreadId(ctx, {
-      threadId: args.threadId,
-      streamOrder: args.streamOrder,
-      deltaCursor: args.deltaCursor,
-    });
-  }
+  const streams = args.streamsDone
+    ? { isDone: true, streamOrder: undefined, deltaCursor: undefined }
+    : await deleteStreamsPageForThreadId(ctx, {
+        threadId: args.threadId,
+        streamOrder: args.streamOrder,
+        deltaCursor: args.deltaCursor,
+      });
   return {
-    isDone: messagesResult.isDone && streamResult.isDone,
+    isDone: streams.isDone,
     next: {
-      threadId: args.threadId,
-      limit: args.limit,
-      cursor: messagesResult.cursor,
-      messagesDone: messagesResult.isDone,
-      streamsDone: streamResult.isDone,
-      streamOrder: streamResult.streamOrder,
-      deltaCursor: streamResult.deltaCursor,
+      ...args,
+      streamsDone: streams.isDone,
+      streamOrder: streams.streamOrder,
+      deltaCursor: streams.deltaCursor,
     },
   };
 }
@@ -279,12 +275,14 @@ async function deleteThreadStep(
 async function deletePageForThreadIdHandler(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
+  order: "asc" | "desc" = "asc",
 ): Promise<DeleteThreadReturns> {
   const messages = await ctx.db
     .query("messages")
     .withIndex("threadId_status_tool_order_stepOrder", (q) =>
       q.eq("threadId", args.threadId),
     )
+    .order(order)
     .paginate({
       numItems: args.limit ?? 100,
       cursor: deletionCursor(args.cursor),

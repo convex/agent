@@ -12,12 +12,8 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage, threadHasMessages } from "./messages.js";
-import {
-  deleteStreamsPageForThreadId,
-  deletionCursor,
-  repeatWhileHeadroom,
-} from "./streams.js";
+import { deleteThreadStep } from "./threads.js";
+import { deletionCursor, repeatWhileHeadroom } from "./streams.js";
 import { schema } from "./schema.js";
 
 // Note: it only searches for users with threads
@@ -206,63 +202,34 @@ async function deletePageForUserId(
     }
   }
 
-  // Phase 2: Delete messages for the current thread
-  if (!streamsInProgress) {
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-        q.eq("threadId", threadInProgress!),
-      )
-      .order("desc")
-      .paginate({
-        numItems: 100,
-        cursor: deletionCursor(messagesCursor),
-      });
-    await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-
-    if (messages.isDone) {
-      // Messages are done, move to streams deletion phase
-      streamsInProgress = true;
-      messagesCursor = null;
-      streamOrder = undefined;
-      deltaCursor = undefined;
-    } else {
-      messagesCursor = messages.continueCursor;
-    }
-
-    return {
-      messagesCursor,
-      threadsCursor,
-      threadInProgress,
-      streamsInProgress,
+  // Phase 2: Delete the thread the way a thread deletion does. A step
+  // scheduled before this shared path holds a descending messagesCursor, or
+  // can be deleting streams with the thread still there, so pages go
+  // descending and such a thread goes back to its messages first.
+  const messagesDone =
+    streamsInProgress && !(await ctx.db.get("threads", threadInProgress!));
+  const step = await deleteThreadStep(
+    ctx,
+    {
+      threadId: threadInProgress!,
+      cursor: messagesCursor ?? undefined,
+      messagesDone,
       streamOrder,
       deltaCursor,
-      isDone: false,
-    };
-  }
-
-  // Phase 3: Delete streams for the current thread
-  const streamResult = await deleteStreamsPageForThreadId(ctx, {
-    threadId: threadInProgress!,
-    streamOrder,
-    deltaCursor,
-  });
-
-  if (streamResult.isDone) {
-    // Streams are done, delete the thread and reset for next thread, or go
-    // back to its messages if a save added one since.
-    if (!(await threadHasMessages(ctx, threadInProgress))) {
-      await ctx.db.delete("threads", threadInProgress);
-      threadInProgress = null;
-    }
+    },
+    "desc",
+  );
+  if (step.isDone) {
+    threadInProgress = null;
     messagesCursor = null;
     streamsInProgress = false;
     streamOrder = undefined;
     deltaCursor = undefined;
   } else {
-    // Continue with streams deletion
-    streamOrder = streamResult.streamOrder;
-    deltaCursor = streamResult.deltaCursor;
+    messagesCursor = step.next.messagesDone ? null : (step.next.cursor ?? null);
+    streamsInProgress = step.next.messagesDone ?? false;
+    streamOrder = step.next.streamOrder;
+    deltaCursor = step.next.deltaCursor;
   }
 
   return {
