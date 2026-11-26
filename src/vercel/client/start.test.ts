@@ -227,6 +227,44 @@ test("usage and raw request handlers get the prompt message id", async () => {
   });
 });
 
+test("tools get the prompt message id", async () => {
+  const seen: (string | undefined)[] = [];
+  const agent = new Agent(components.agent, {
+    name: "prompt-id",
+    languageModel: mockModel({
+      contentSteps: [
+        [
+          {
+            type: "tool-call",
+            toolCallId: "c1",
+            toolName: "promptId",
+            input: "{}",
+          },
+        ],
+        [{ type: "text", text: "done" }],
+      ],
+    }),
+    tools: {
+      promptId: createTool({
+        description: "promptId",
+        inputSchema: z.object({}),
+        execute: async (ctx) => {
+          seen.push(ctx.promptMessageId);
+          return "ok";
+        },
+      }),
+    },
+    stopWhen: stepCountIs(2),
+  });
+  const promptMessageId = await initConvexTest().action(async (ctx) => {
+    const threadId = await createThread(ctx, components.agent, {});
+    return (await agent.generateText(ctx, { threadId }, { prompt: "hi" }))
+      .promptMessageId;
+  });
+  expect(promptMessageId).toBeDefined();
+  expect(seen).toEqual([promptMessageId]);
+});
+
 async function threadRows(ctx: ActionCtx, threadId: string) {
   const { page } = await ctx.runQuery(
     components.agent.messages.listMessagesByThreadId,

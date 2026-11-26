@@ -30,7 +30,7 @@ export type ToolCtx<DataModel extends GenericDataModel = GenericDataModel> =
     agent?: Agent;
     userId?: string;
     threadId?: string;
-    messageId?: string;
+    promptMessageId?: string;
   };
 
 export type AgentToolExecutionOptions<TOOL_CONTEXT extends Context = Context> =
@@ -137,7 +137,7 @@ export type ToolInputProperties<INPUT> = {
 
 /**
  * This is a wrapper around the ai.tool function that adds extra context to the
- * tool call, including the action context, userId, threadId, and messageId.
+ * tool call, including the action context, userId, threadId, and promptMessageId.
  * @param tool The tool. See https://sdk.vercel.ai/docs/ai-sdk-core/tools-and-tool-calling
  * Currently contains deprecated parameters `args` and `handler` to maintain backwards compatibility
  * but these will be removed in the future. Use `inputSchema` and `execute` instead, respectively.
