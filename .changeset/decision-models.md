@@ -4,4 +4,4 @@
 
 Add experimental decision models: `experimental_decisionModel`,
 `agent.experimental_decide`, `experimental_listDecisions` and
-`experimental_correctDecision`, with decisions stored in the thread.
+`experimental_correctDecision`, with decisions stored in the thread (#537).
