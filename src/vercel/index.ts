@@ -184,7 +184,7 @@ export {
   embedMessages,
   embedMany,
 } from "./client/search.js";
-export { startGeneration } from "./client/start.js";
+export { GenerationStopped, startGeneration } from "./client/start.js";
 export {
   DEFAULT_STREAMING_OPTIONS,
   DeltaStreamer,

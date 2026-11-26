@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { v, type ObjectType } from "convex/values";
 import { isStepCount } from "ai";
 import { z } from "zod/v4";
@@ -181,6 +181,7 @@ const runArgs = {
     v.union(v.literal("afterFirstStep"), v.literal("beforeAnswer")),
   ),
   deletePromptInTool: v.optional(v.boolean()),
+  deleteThreadInTool: v.optional(v.boolean()),
   abortBeforeStepEnd: v.optional(v.boolean()),
   stopFromStepEnd: v.optional(v.boolean()),
   stopOnUsage: v.optional(v.boolean()),
@@ -251,6 +252,12 @@ const run = app.action({
               await ctx.runMutation(components.agent.messages.deleteByIds, {
                 messageIds: [await firstMessageId()],
               });
+            }
+            if (args.deleteThreadInTool) {
+              await ctx.runAction(
+                components.agent.threads.deleteAllForThreadIdSync,
+                { threadId: args.threadId },
+              );
             }
             if (args.abortInTool) abort.abort("Stopped");
             return { ok: true };
@@ -530,6 +537,11 @@ describe.each(["generateText", "streamText"] as const)(
       ]);
       expect(r.streams).toEqual(streamed ? ["aborted"] : []);
     });
+
+    test("a thread deleted during a step stops it as a deleted prompt does (#300)", async () => {
+      const r = await go({ runner, deleteThreadInTool: true });
+      expect(r.error).toBe("The prompt message was deleted");
+    });
   },
 );
 
@@ -725,6 +737,19 @@ describe("streamText", () => {
     expect(
       r.saved.filter((row) => row.parts.includes("tool-result")),
     ).toHaveLength(1);
+  });
+
+  test("a retry ends the attempt it replaced without logging an error", async () => {
+    const logError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await go({ runner: "streamText", restartAt: "afterFirstStep" });
+      expect(r.error).toBe("Restarting");
+      expect(logError.mock.calls.flat().map(errorToString)).not.toContain(
+        "Restarting",
+      );
+    } finally {
+      logError.mockRestore();
+    }
   });
 
   test("a retry during the answer fails the attempt it replaced", async () => {

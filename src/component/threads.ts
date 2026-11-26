@@ -8,7 +8,7 @@ import {
   vThreadDoc,
 } from "../validators.js";
 import { api, internal } from "./_generated/api.js";
-import type { Doc } from "./_generated/dataModel.js";
+import type { Doc, Id } from "./_generated/dataModel.js";
 import {
   action,
   internalMutation,
@@ -16,7 +16,7 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
+import { deleteMessage, getDeletionMark } from "./messages.js";
 import { schema, v } from "./schema.js";
 import {
   deleteStreamsPageForThreadId,
@@ -167,7 +167,7 @@ const deleteThreadArgs = {
   deltaCursor: v.optional(v.string()),
   limit: v.optional(v.number()),
 };
-type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
+export type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
   cursor: v.string(),
   isDone: v.boolean(),
@@ -176,7 +176,13 @@ type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
 
 export const _deletePageForThreadId = internalMutation({
   args: deleteThreadArgs,
-  handler: deletePageForThreadIdHandler,
+  handler: async (ctx, args) => {
+    const messages = await deletePageForThreadIdHandler(ctx, args);
+    if (messages.isDone) {
+      await deleteThreadAndMark(ctx, args.threadId);
+    }
+    return messages;
+  },
   returns: deleteThreadReturns,
 });
 
@@ -236,39 +242,39 @@ async function deleteAllForThreadIdBatch(
   return { isDone: result.isDone };
 }
 
-async function deleteThreadStep(
+export async function deleteThreadStep(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
+  order: "asc" | "desc" = "asc",
 ): Promise<DeleteThreadStep> {
-  let messagesResult = {
-    isDone: args.messagesDone ?? false,
-    cursor: args.cursor,
-  };
+  // One page per step: a page of messages and a page of deltas can each be
+  // near the read limit, so repeatWhileHeadroom has to be able to stop
+  // between them.
   if (!args.messagesDone) {
-    messagesResult = await deletePageForThreadIdHandler(ctx, args);
+    const messages = await deletePageForThreadIdHandler(ctx, args, order);
+    return {
+      isDone: false,
+      next: { ...args, cursor: messages.cursor, messagesDone: messages.isDone },
+    };
   }
-  let streamResult = {
-    isDone: args.streamsDone ?? false,
-    streamOrder: args.streamOrder,
-    deltaCursor: args.deltaCursor,
-  };
-  if (!args.streamsDone) {
-    streamResult = await deleteStreamsPageForThreadId(ctx, {
-      threadId: args.threadId,
-      streamOrder: args.streamOrder,
-      deltaCursor: args.deltaCursor,
-    });
+  const streams = args.streamsDone
+    ? { isDone: true, streamOrder: undefined, deltaCursor: undefined }
+    : await deleteStreamsPageForThreadId(ctx, {
+        threadId: args.threadId,
+        streamOrder: args.streamOrder,
+        deltaCursor: args.deltaCursor,
+      });
+  // The thread goes last, so a user deletion run again still finds it.
+  if (streams.isDone) {
+    await deleteThreadAndMark(ctx, args.threadId);
   }
   return {
-    isDone: messagesResult.isDone && streamResult.isDone,
+    isDone: streams.isDone,
     next: {
-      threadId: args.threadId,
-      limit: args.limit,
-      cursor: messagesResult.cursor,
-      messagesDone: messagesResult.isDone,
-      streamsDone: streamResult.isDone,
-      streamOrder: streamResult.streamOrder,
-      deltaCursor: streamResult.deltaCursor,
+      ...args,
+      streamsDone: streams.isDone,
+      streamOrder: streams.streamOrder,
+      deltaCursor: streams.deltaCursor,
     },
   };
 }
@@ -276,25 +282,31 @@ async function deleteThreadStep(
 async function deletePageForThreadIdHandler(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
+  order: "asc" | "desc" = "asc",
 ): Promise<DeleteThreadReturns> {
+  if (!(await getDeletionMark(ctx, args.threadId))) {
+    await ctx.db.insert("deletingThreads", { threadId: args.threadId });
+  }
   const messages = await ctx.db
     .query("messages")
     .withIndex("threadId_status_tool_order_stepOrder", (q) =>
       q.eq("threadId", args.threadId),
     )
+    .order(order)
     .paginate({
       numItems: args.limit ?? 100,
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-  if (messages.isDone) {
-    const thread = await ctx.db.get("threads", args.threadId);
-    if (thread) {
-      await ctx.db.delete("threads", args.threadId);
-    }
+  return { cursor: messages.continueCursor, isDone: messages.isDone };
+}
+
+async function deleteThreadAndMark(ctx: MutationCtx, threadId: Id<"threads">) {
+  if (await ctx.db.get("threads", threadId)) {
+    await ctx.db.delete("threads", threadId);
   }
-  return {
-    cursor: messages.continueCursor,
-    isDone: messages.isDone,
-  };
+  const mark = await getDeletionMark(ctx, threadId);
+  if (mark) {
+    await ctx.db.delete("deletingThreads", mark._id);
+  }
 }

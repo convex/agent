@@ -45,10 +45,10 @@ import { changeRefcount } from "./files.js";
 import { leaveOutText, withText } from "../messageText.js";
 import {
   getStreamingMessagesWithMetadata,
-  finishHandler,
+  finishStreamingMessage,
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
-  abortById,
+  abortStreamingMessage,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -78,6 +78,16 @@ export async function deleteMessage(
   if (messageDoc.fileIds) {
     await changeRefcount(ctx, messageDoc.fileIds, []);
   }
+}
+
+// Thread and user deletion mark a thread from their first page of messages
+// until the thread is gone, so a write that reads no mark is ordered before
+// that page.
+export async function getDeletionMark(ctx: QueryCtx, threadId: Id<"threads">) {
+  return await ctx.db
+    .query("deletingThreads")
+    .withIndex("threadId", (q) => q.eq("threadId", threadId))
+    .first();
 }
 
 /**
@@ -241,11 +251,6 @@ async function addMessagesHandler(
 ) {
   let userId = args.userId;
   const threadId = args.threadId;
-  if (!userId && args.threadId) {
-    const thread = await ctx.db.get("threads", args.threadId);
-    assert(thread, `Thread ${args.threadId} not found`);
-    userId = thread.userId;
-  }
   const {
     embeddings,
     failPendingSteps,
@@ -278,6 +283,33 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
+  const deleting = await getDeletionMark(ctx, threadId);
+  const finishStream =
+    finishStreamId && (await ctx.db.get("streamingMessages", finishStreamId));
+  const thread =
+    (!userId || (finishStreamId && !finishStream)) &&
+    (await ctx.db.get("threads", threadId));
+  if (
+    abandonIfPromptMissing &&
+    (deleting ||
+      (promptMessageId && !promptMessage) ||
+      (finishStreamId && !finishStream && !thread))
+  ) {
+    return { messages: [] };
+  }
+  assert(!deleting, `Thread ${threadId} is being deleted`);
+  if (finishStreamId && !finishStream) {
+    assert(thread, `Thread ${threadId} not found`);
+    // The thread is live, so the stream ended on its own: timeoutStreamHandler
+    // aborts a stream with no heartbeat for 10 minutes (a long tool call) and
+    // scheduleStreamDeletion removes it 5 minutes later. The messages still
+    // save; only finishing the stream is skipped.
+    console.warn("Saving without finishing missing stream", finishStreamId);
+  }
+  if (!userId) {
+    assert(thread, `Thread ${threadId} not found`);
+    userId = thread.userId;
+  }
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
     const pendingMessages = await ctx.db
@@ -320,9 +352,6 @@ async function addMessagesHandler(
     const maxMessage = await getMaxMessage(ctx, threadId, order);
     stepOrder = maxMessage?.stepOrder ?? -1;
   } else if (promptMessageId) {
-    if (!promptMessage && abandonIfPromptMissing) {
-      return { messages: [] };
-    }
     assert(promptMessage, `Parent message ${promptMessageId} not found`);
     if (promptMessage.status === "failed") {
       fail = true;
@@ -460,16 +489,13 @@ async function addMessagesHandler(
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
   const failed = toReturn.find((m) => m.status === "failed");
-  if (finishStreamId && failed) {
-    await abortById(ctx, {
-      streamId: finishStreamId,
+  if (finishStream && failed) {
+    await abortStreamingMessage(ctx, finishStream, {
       reason: failed.error ?? "The generation failed",
     });
-  } else if (finishStreamId) {
-    await finishHandler(ctx, {
-      streamId: finishStreamId,
-    });
-    await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
+  } else if (finishStream) {
+    await finishStreamingMessage(ctx, finishStream);
+    await releaseStreamFileOwnershipByIds(ctx, [finishStream._id]);
   }
   return { messages: toReturn.map(publicMessage) };
 }
@@ -523,35 +549,77 @@ function orderedMessagesStream(
   );
 }
 
+const finalizeMessageArgs = {
+  messageId: v.id("messages"),
+  result: v.union(
+    v.object({ status: v.literal("success") }),
+    v.object({ status: v.literal("failed"), error: v.string() }),
+  ),
+};
+
 export const finalizeMessage = mutation({
-  args: {
-    messageId: v.id("messages"),
-    result: v.union(
-      v.object({ status: v.literal("success") }),
-      v.object({ status: v.literal("failed"), error: v.string() }),
-    ),
-  },
+  args: finalizeMessageArgs,
   returns: v.null(),
   handler: async (ctx, { messageId, result }) => {
     const stored = await ctx.db.get("messages", messageId);
-    assert(stored, `Message ${messageId} not found`);
-    const message = withText(stored);
-    if (message.status !== "pending") {
-      console.debug(
-        "Trying to finalize a message that's already",
-        message.status,
+    if (!stored) {
+      console.warn("Message not found", messageId);
+      return null;
+    }
+    // A deletion pages messages by status, so finalizing one behind its
+    // cursor would outlive the thread.
+    if (await getDeletionMark(ctx, stored.threadId)) {
+      return null;
+    }
+    await finalizeStoredMessage(ctx, stored, result);
+    return null;
+  },
+});
+
+async function finalizeStoredMessage(
+  ctx: MutationCtx,
+  stored: Doc<"messages">,
+  result: ObjectType<typeof finalizeMessageArgs>["result"],
+) {
+  const message = withText(stored);
+  if (message.status !== "pending") {
+    console.debug(
+      "Trying to finalize a message that's already",
+      message.status,
+    );
+    return;
+  }
+  // See if we can add any in-progress data
+  if (!message.message?.content.length) {
+    const { messages, materializationFailures, streamsToRelease } =
+      await getStreamingMessagesWithMetadata(ctx, message, result);
+    if (materializationFailures.length > 0) {
+      console.error(
+        "Failed to materialize persisted assistant streams",
+        materializationFailures,
+      );
+      await markPendingMessageFailed(
+        ctx,
+        message,
+        result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
       );
       return;
     }
-    // See if we can add any in-progress data
-    if (!message.message?.content.length) {
-      const { messages, materializationFailures, streamsToRelease } =
-        await getStreamingMessagesWithMetadata(ctx, message, result);
-      if (materializationFailures.length > 0) {
-        console.error(
-          "Failed to materialize persisted assistant streams",
-          materializationFailures,
-        );
+    if (messages.length > 0) {
+      // Nested so an oversized recovered message rolls back on its own and
+      // the pending message is marked failed instead of stuck.
+      try {
+        await ctx.runMutation(api.messages.addMessages, {
+          messages,
+          threadId: message.threadId,
+          agentName: message.agentName,
+          failPendingSteps: false,
+          pendingMessageId: message._id,
+          userId: message.userId,
+          embeddings: undefined,
+        });
+      } catch (error) {
+        console.error("Failed to persist recovered assistant streams", error);
         await markPendingMessageFailed(
           ctx,
           message,
@@ -559,39 +627,16 @@ export const finalizeMessage = mutation({
         );
         return;
       }
-      if (messages.length > 0) {
-        // Nested so an oversized recovered message rolls back on its own and
-        // the pending message is marked failed instead of stuck.
-        try {
-          await ctx.runMutation(api.messages.addMessages, {
-            messages,
-            threadId: message.threadId,
-            agentName: message.agentName,
-            failPendingSteps: false,
-            pendingMessageId: messageId,
-            userId: message.userId,
-            embeddings: undefined,
-          });
-        } catch (error) {
-          console.error("Failed to persist recovered assistant streams", error);
-          await markPendingMessageFailed(
-            ctx,
-            message,
-            result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
-          );
-          return;
-        }
-        await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
-        return;
-      }
+      await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
+      return;
     }
-    if (result.status === "failed") {
-      await markPendingMessageFailed(ctx, message, result.error);
-    } else {
-      await ctx.db.patch("messages", messageId, { status: "success" });
-    }
-  },
-});
+  }
+  if (result.status === "failed") {
+    await markPendingMessageFailed(ctx, message, result.error);
+  } else {
+    await ctx.db.patch("messages", message._id, { status: "success" });
+  }
+}
 
 export const updateMessage = mutation({
   args: {

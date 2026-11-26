@@ -82,6 +82,13 @@ function rawRequestResponseInclude(
   };
 }
 
+/**
+ * Thrown into a generation that another writer ended: a retry, an abort, or a
+ * deleted prompt or thread. streamText's default onError skips logging it; an
+ * app passing its own onError can check `error instanceof GenerationStopped`.
+ */
+export class GenerationStopped extends Error {}
+
 export async function startGeneration<
   T,
   Tools extends ToolSet = ToolSet,
@@ -284,7 +291,7 @@ export async function startGeneration<
       error: toSave.error,
     })
       .then((stoppedBy) => {
-        if (stoppedBy) throw new Error(stoppedBy);
+        if (stoppedBy) throw new GenerationStopped(stoppedBy);
       })
       .catch((error: unknown) => {
         saveFailure ??= { error };
@@ -543,7 +550,7 @@ export async function startGeneration<
       }
       if (ending) {
         await ending;
-        throw new Error("The generation has ended");
+        throw new GenerationStopped("The generation has ended");
       }
       // A failed save rejects prepareStep, which fails the call through the
       // AI SDK.

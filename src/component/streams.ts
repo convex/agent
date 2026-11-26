@@ -30,6 +30,7 @@ import {
   projectPersistedUIMessageChunks,
 } from "../streaming/materializePersistedUIMessageChunks.js";
 import { changeRefcount } from "./files.js";
+import { getDeletionMark } from "./messages.js";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -363,7 +364,17 @@ export const abort = mutation({
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.boolean(),
-  handler: abortById,
+  handler: async (ctx, args) => {
+    const stream = await ctx.db.get("streamingMessages", args.streamId);
+    if (!stream) {
+      console.warn("Stream not found", args.streamId);
+      return false;
+    }
+    if (await getDeletionMark(ctx, stream.threadId)) {
+      return false;
+    }
+    return await abortStreamingMessage(ctx, stream, args);
+  },
 });
 
 export async function abortById(
@@ -378,6 +389,17 @@ export async function abortById(
   if (!stream) {
     throw new Error(`Stream not found: ${args.streamId}`);
   }
+  return await abortStreamingMessage(ctx, stream, args);
+}
+
+export async function abortStreamingMessage(
+  ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
+  args: {
+    reason: string;
+    finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
+  },
+) {
   if (args.finalDelta) {
     await ctx.db.insert("streamDeltas", args.finalDelta);
   }
@@ -385,8 +407,8 @@ export async function abortById(
     return false;
   }
   await cleanupTimeoutFn(ctx, stream);
-  const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
-  await ctx.db.patch("streamingMessages", args.streamId, {
+  const cleanupFnId = await scheduleStreamDeletion(ctx, stream._id);
+  await ctx.db.patch("streamingMessages", stream._id, {
     state: { kind: "aborted", reason: args.reason, cleanupFnId },
   });
   return true;
@@ -431,15 +453,22 @@ export async function finishHandler(
   if (!stream) {
     throw new Error(`Stream not found: ${args.streamId}`);
   }
+  await finishStreamingMessage(ctx, stream);
+}
+
+export async function finishStreamingMessage(
+  ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
+) {
   if (stream.state.kind !== "streaming") {
     console.warn(
-      `Stream trying to finish ${args.streamId} but is ${stream.state.kind}`,
+      `Stream trying to finish ${stream._id} but is ${stream.state.kind}`,
     );
     return;
   }
   await cleanupTimeoutFn(ctx, stream);
-  const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
-  await ctx.db.patch("streamingMessages", args.streamId, {
+  const cleanupFnId = await scheduleStreamDeletion(ctx, stream._id);
+  await ctx.db.patch("streamingMessages", stream._id, {
     state: { kind: "finished", endedAt: Date.now(), cleanupFnId },
   });
 }

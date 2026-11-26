@@ -28,6 +28,9 @@ export const schema = defineSchema({
   })
     .index("userId", ["userId"])
     .searchIndex("title", { searchField: "title", filterFields: ["userId"] }),
+  deletingThreads: defineTable({
+    threadId: v.id("threads"),
+  }).index("threadId", ["threadId"]),
   messages: defineTable({
     userId: v.optional(v.string()), // useful for searching across threads
     threadId: v.id("threads"),

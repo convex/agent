@@ -22,7 +22,7 @@ import type {
   StreamingTextArgs,
 } from "./types.js";
 import type { Output as AISDKOutput } from "ai";
-import { startGeneration } from "./start.js";
+import { GenerationStopped, startGeneration } from "./start.js";
 import type { Agent } from "../index.js";
 import { getModelName, getProviderName } from "../../shared.js";
 import { errorToString } from "./utils.js";
@@ -246,6 +246,13 @@ export async function streamText<
         )
       : args.abortSignal,
     experimental_transform: [...transforms, saveLastStep],
+    // The AI SDK logs every stream error by default. The caller still gets
+    // each one, from the result or the stream.
+    onError:
+      streamTextArgs.onError ??
+      (({ error }: { error: unknown }) => {
+        if (!(error instanceof GenerationStopped)) console.error(error);
+      }),
     onAbort: async (event) => {
       const reason =
         deltasFailed ??

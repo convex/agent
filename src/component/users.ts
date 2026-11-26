@@ -13,12 +13,8 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
-import {
-  deleteStreamsPageForThreadId,
-  deletionCursor,
-  repeatWhileHeadroom,
-} from "./streams.js";
+import { deleteThreadStep } from "./threads.js";
+import { deletionCursor, repeatWhileHeadroom } from "./streams.js";
 import { schema, v } from "./schema.js";
 
 // Note: it only searches for users with threads
@@ -207,60 +203,31 @@ async function deletePageForUserId(
     }
   }
 
-  // Phase 2: Delete messages for the current thread
-  if (!streamsInProgress) {
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-        q.eq("threadId", threadInProgress!),
-      )
-      .order("desc")
-      .paginate({
-        numItems: 100,
-        cursor: deletionCursor(messagesCursor),
-      });
-    await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-
-    if (messages.isDone) {
-      // Messages are done, move to streams deletion phase
-      streamsInProgress = true;
-      messagesCursor = null;
-      streamOrder = undefined;
-      deltaCursor = undefined;
-    } else {
-      messagesCursor = messages.continueCursor;
-    }
-
-    return {
-      messagesCursor,
-      threadsCursor,
-      threadInProgress,
-      streamsInProgress,
+  // Phase 2: Delete the thread the way a thread deletion does. A step
+  // scheduled before this shared path holds a descending messagesCursor, so
+  // pages go descending.
+  const step = await deleteThreadStep(
+    ctx,
+    {
+      threadId: threadInProgress!,
+      cursor: messagesCursor ?? undefined,
+      messagesDone: streamsInProgress,
       streamOrder,
       deltaCursor,
-      isDone: false,
-    };
-  }
-
-  // Phase 3: Delete streams for the current thread
-  const streamResult = await deleteStreamsPageForThreadId(ctx, {
-    threadId: threadInProgress!,
-    streamOrder,
-    deltaCursor,
-  });
-
-  if (streamResult.isDone) {
-    // Streams are done, delete the thread and reset for next thread
-    await ctx.db.delete("threads", threadInProgress);
+    },
+    "desc",
+  );
+  if (step.isDone) {
     threadInProgress = null;
     messagesCursor = null;
     streamsInProgress = false;
     streamOrder = undefined;
     deltaCursor = undefined;
   } else {
-    // Continue with streams deletion
-    streamOrder = streamResult.streamOrder;
-    deltaCursor = streamResult.deltaCursor;
+    messagesCursor = step.next.messagesDone ? null : (step.next.cursor ?? null);
+    streamsInProgress = step.next.messagesDone ?? false;
+    streamOrder = step.next.streamOrder;
+    deltaCursor = step.next.deltaCursor;
   }
 
   return {
