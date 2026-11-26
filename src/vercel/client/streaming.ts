@@ -288,9 +288,6 @@ export class DeltaStreamer<T> {
    * non-streaming row.
    */
   #stoppedAccepting: boolean = false;
-  #stepEnds = 0;
-  #sourceDone = false;
-  #progress: (() => void) | undefined;
 
   constructor(
     public readonly component: AgentComponent,
@@ -330,9 +327,6 @@ export class DeltaStreamer<T> {
     this.#keepAliveStopped = !("runAction" in ctx);
     this.#nextParts = [];
     this.abortController = new AbortController();
-    this.abortController.signal.addEventListener("abort", () =>
-      this.#progress?.(),
-    );
     if (config.abortSignal) {
       const abortFromSignal = () => {
         void this.#abort("abortSignal").catch(() => {
@@ -459,10 +453,6 @@ export class DeltaStreamer<T> {
     try {
       for await (const chunk of stream) {
         await this.addParts([chunk]);
-        if ((chunk as { type?: string }).type === "finish-step") {
-          this.#stepEnds++;
-          this.#progress?.();
-        }
       }
     } catch (error) {
       // A provider can throw while responding to an abort. Join the durable
@@ -470,9 +460,6 @@ export class DeltaStreamer<T> {
       // preserving the provider error for the caller.
       await this.#abort(errorToString(error)).catch(() => {});
       throw error;
-    } finally {
-      this.#sourceDone = true;
-      this.#progress?.();
     }
     this.#stopKeepAlive();
     // Abort cleanup owns the terminal component transition, so consumeStream
@@ -502,17 +489,15 @@ export class DeltaStreamer<T> {
   }
 
   /**
-   * Waits until `stepEnds` step ends have come through the source, writes
-   * every part before them, and stops taking parts, for the caller to finish
-   * the stream with its message save (issue #181). Resolves undefined if the
-   * stream was aborted or never created.
+   * Writes every buffered part and stops taking parts, for the caller to
+   * finish the stream with its message save (issue #181). Resolves undefined
+   * if the stream was aborted or never created.
+   *
+   * @deprecated Call {@link flushAndStopAccepting}, then finish the stream
+   * with `streamId`. It no longer waits for `stepEnds` step ends.
    */
-  public async handOver(stepEnds: number): Promise<string | undefined> {
+  public async handOver(_stepEnds?: number): Promise<string | undefined> {
     const signal = this.abortController.signal;
-    while (this.#stepEnds < stepEnds && !this.#sourceDone && !signal.aborted) {
-      await new Promise<void>((resolve) => (this.#progress = resolve));
-    }
-    this.#progress = undefined;
     this.#finishHandledExternally = true;
     await this.flushAndStopAccepting();
     if (signal.aborted) return undefined;
@@ -686,18 +671,20 @@ export class DeltaStreamer<T> {
   public async finish() {
     this.#stopKeepAlive();
     this.#cancelScheduledFlush();
+    if (this.#creatingStreamIdPromise) {
+      this.streamId ??= await this.#creatingStreamIdPromise;
+    }
     if (!this.streamId) {
       return;
     }
     try {
-      await this.#ongoingWrite;
+      await this.#flushPendingParts();
     } catch (error) {
       if (this.abortController.signal.aborted) {
         await this.#waitForAbortCleanup();
       }
       throw error;
     }
-    await this.#sendDelta(); // #sendDelta checks aborted internally
     if (this.abortController.signal.aborted) {
       await this.#waitForAbortCleanup();
       return;
@@ -728,14 +715,19 @@ export class DeltaStreamer<T> {
     if (callbackFailure) throw callbackFailure.error;
   }
 
+  // Parts held for the next delta are written before the stream ends, unless
+  // a failed write is what ends it.
   #abort(reason: string, waitForOngoingWrite = true): Promise<void> {
     if (!this.#abortPromise) {
       this.#stopKeepAlive();
       this.#cancelScheduledFlush();
-      this.abortController.abort();
+      const held = waitForOngoingWrite && this.#nextParts.length > 0;
+      if (held) this.#stoppedAccepting = true;
+      else this.abortController.abort();
       this.#abortPromise = this.#abortCreatedStream(
         reason,
         waitForOngoingWrite,
+        held,
       );
     }
     return this.#abortPromise;
@@ -756,13 +748,25 @@ export class DeltaStreamer<T> {
     if (writeFailure) throw writeFailure.error;
   }
 
-  async #abortCreatedStream(reason: string, waitForOngoingWrite: boolean) {
+  async #abortCreatedStream(
+    reason: string,
+    waitForOngoingWrite: boolean,
+    held: boolean,
+  ) {
+    let writeFailure: { error: unknown } | undefined;
+    if (held) {
+      try {
+        await this.#flushPendingParts();
+      } catch (error) {
+        writeFailure = { error };
+      }
+      this.abortController.abort();
+    }
     if (this.#creatingStreamIdPromise) {
       this.streamId ??= await this.#creatingStreamIdPromise;
     }
     if (!this.streamId) return;
-    let writeFailure: { error: unknown } | undefined;
-    if (waitForOngoingWrite) {
+    if (waitForOngoingWrite && !held) {
       try {
         await this.#ongoingWrite;
       } catch (error) {
