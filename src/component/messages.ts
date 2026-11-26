@@ -4,7 +4,7 @@ import {
   paginationOptsValidator,
   type WithoutSystemFields,
 } from "convex/server";
-import { ConvexError, v, type ObjectType } from "convex/values";
+import { ConvexError, type ObjectType } from "convex/values";
 import {
   DEFAULT_MESSAGE_RANGE,
   DEFAULT_RECENT_MESSAGES,
@@ -33,7 +33,7 @@ import {
   query,
   type QueryCtx,
 } from "./_generated/server.js";
-import { schema } from "./schema.js";
+import { schema, v } from "./schema.js";
 import { insertVector, searchVectors } from "./vector/index.js";
 import {
   getVectorIdInfo,

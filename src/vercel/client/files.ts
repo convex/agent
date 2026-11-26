@@ -70,17 +70,16 @@ export async function storeFile(
     mediaType: blob.type || undefined,
   });
   if (reused) {
-    const storageId = reused.storageId as Id<"_storage">;
-    const url = await ctx.storage.getUrl(storageId);
+    const url = await ctx.storage.getUrl(reused.storageId);
     if (!url) {
-      throw new Error(`File not found in storage: ${storageId}`);
+      throw new Error(`File not found in storage: ${reused.storageId}`);
     }
     return {
       ...getParts(url, blob.type, filename),
       file: {
         url,
         fileId: reused.fileId,
-        storageId,
+        storageId: reused.storageId as Id<"_storage">,
         hash,
         filename,
       },

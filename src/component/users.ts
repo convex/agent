@@ -1,6 +1,7 @@
 import { stream } from "convex-helpers/server/stream";
+import { nullable } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
-import { v, type ObjectType } from "convex/values";
+import type { ObjectType } from "convex/values";
 import { vPaginationResult } from "../validators.js";
 import { internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -14,7 +15,7 @@ import {
 } from "./_generated/server.js";
 import { deleteThreadStep } from "./threads.js";
 import { deletionCursor, repeatWhileHeadroom } from "./streams.js";
-import { schema } from "./schema.js";
+import { schema, v } from "./schema.js";
 
 // Note: it only searches for users with threads
 export const listUsersWithThreads = query({
@@ -95,9 +96,9 @@ export const deleteAllForUserIdAsync = mutation({
 
 const deleteAllArgs = {
   userId: v.string(),
-  messagesCursor: v.nullable(v.string()),
-  threadsCursor: v.nullable(v.string()),
-  threadInProgress: v.nullable(v.id("threads")),
+  messagesCursor: nullable(v.string()),
+  threadsCursor: nullable(v.string()),
+  threadInProgress: nullable(v.id("threads")),
   streamsInProgress: v.optional(v.boolean()),
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),
@@ -105,8 +106,8 @@ const deleteAllArgs = {
 type DeleteAllArgs = ObjectType<typeof deleteAllArgs>;
 const deleteAllReturns = {
   threadsCursor: v.string(),
-  threadInProgress: v.nullable(v.id("threads")),
-  messagesCursor: v.nullable(v.string()),
+  threadInProgress: nullable(v.id("threads")),
+  messagesCursor: nullable(v.string()),
   streamsInProgress: v.optional(v.boolean()),
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),

@@ -1,11 +1,11 @@
 import type { Doc, Id } from "./_generated/dataModel.js";
 import { mutation, type MutationCtx, query } from "./_generated/server.js";
-import { schema } from "./schema.js";
+import { v } from "./schema.js";
 import {
   paginationOptsValidator,
   paginationResultValidator,
 } from "convex/server";
-import { v, type Infer } from "convex/values";
+import type { Infer } from "convex/values";
 
 const FILE_CLEANUP_GRACE_MS = 24 * 60 * 60 * 1000;
 
@@ -89,7 +89,7 @@ export const get = query({
   args: {
     fileId: v.id("files"),
   },
-  returns: v.union(v.null(), schema.doc("files")),
+  returns: v.union(v.null(), v.doc("files")),
   handler: async (ctx, args) => {
     return ctx.db.get("files", args.fileId);
   },
@@ -223,7 +223,7 @@ export const getFilesToDelete = query({
       .paginate(args.paginationOpts);
     return files;
   },
-  returns: paginationResultValidator(schema.doc("files")),
+  returns: paginationResultValidator(v.doc("files")),
 });
 
 export const deleteFiles = mutation({

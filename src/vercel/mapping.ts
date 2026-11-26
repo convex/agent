@@ -1230,7 +1230,7 @@ export function guessMimeType(buf: ArrayBuffer | string): string {
     return "image/jpeg"; // JPEG
   if (startsWith("47494638")) return "image/gif"; // GIF
   if (startsWith("424d")) return "image/bmp"; // BMP
-  if (startsWith("52494646") && hex.slice(16, 24) === "57454250")
+  if (startsWith("52494646") && hex.substr(16, 8) === "57454250")
     return "image/webp"; // WEBP (RIFF....WEBP)
   if (startsWith("49492a00")) return "image/tiff"; // TIFF
   // <svg in hex is 3c 3f 78 6d 6c
@@ -1241,7 +1241,7 @@ export function guessMimeType(buf: ArrayBuffer | string): string {
   if (startsWith("494433")) return "audio/mpeg"; // MP3 (ID3)
   if (startsWith("000001ba") || startsWith("000001b3")) return "video/mpeg"; // MPEG container
   if (startsWith("1a45dfa3")) return "video/webm"; // WEBM / Matroska
-  if (startsWith("00000018") && hex.slice(16, 24) === "66747970")
+  if (startsWith("00000018") && hex.substr(16, 8) === "66747970")
     return "video/mp4"; // MP4
   if (startsWith("4f676753")) return "audio/ogg"; // OGG / Opus
 
