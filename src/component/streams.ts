@@ -691,8 +691,6 @@ async function deleteAllStreamsForThreadIdBatch(
         deltaCursor: result.deltaCursor,
       },
     );
-  } else {
-    await ctx.db.delete("threads", args.threadId);
   }
   return result;
 }
