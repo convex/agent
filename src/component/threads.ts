@@ -16,7 +16,7 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
+import { deleteMessage, threadHasMessages } from "./messages.js";
 import { schema } from "./schema.js";
 import {
   deleteStreamsPageForThreadId,
@@ -169,7 +169,7 @@ const deleteThreadArgs = {
 };
 type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
-  cursor: v.string(),
+  cursor: v.optional(v.string()),
   isDone: v.boolean(),
 };
 type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
@@ -240,7 +240,7 @@ async function deleteThreadStep(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
 ): Promise<DeleteThreadStep> {
-  let messagesResult = {
+  let messagesResult: DeleteThreadReturns = {
     isDone: args.messagesDone ?? false,
     cursor: args.cursor,
   };
@@ -290,14 +290,15 @@ async function deletePageForThreadIdHandler(
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-  if (messages.isDone) {
-    const thread = await ctx.db.get("threads", args.threadId);
-    if (thread) {
-      await ctx.db.delete("threads", args.threadId);
-    }
+  if (!messages.isDone) {
+    return { cursor: messages.continueCursor, isDone: false };
   }
-  return {
-    cursor: messages.continueCursor,
-    isDone: messages.isDone,
-  };
+  if (await threadHasMessages(ctx, args.threadId)) {
+    return { cursor: undefined, isDone: false };
+  }
+  const thread = await ctx.db.get("threads", args.threadId);
+  if (thread) {
+    await ctx.db.delete("threads", args.threadId);
+  }
+  return { cursor: messages.continueCursor, isDone: true };
 }

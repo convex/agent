@@ -80,6 +80,22 @@ export async function deleteMessage(
   }
 }
 
+// Thread and user deletion page a thread's messages by status, so a generation
+// still saving can add or move a message behind the cursor, such as a failed
+// step. They delete the thread only once this finds none left.
+export async function threadHasMessages(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+) {
+  const message = await ctx.db
+    .query("messages")
+    .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+      q.eq("threadId", threadId),
+    )
+    .first();
+  return message !== null;
+}
+
 /**
  * Deleting a message strands any generation still writing to its order, which
  * would otherwise only surface as a missing-parent failure when that generation
@@ -277,8 +293,8 @@ async function addMessagesHandler(
     finishStreamId && (await ctx.db.get("streamingMessages", finishStreamId));
   // deleteThreadStep deletes a thread's messages, then the thread, and only
   // then its streams, so a deletion that reached finishStreamId already took
-  // the prompt and the thread. A save into it would land behind the
-  // deletion's cursor and outlive the thread, so it is dropped.
+  // the prompt and the thread. A save into it would outlive the thread, so it
+  // is dropped.
   const thread =
     (!userId || (finishStreamId && !finishStream)) &&
     (await ctx.db.get("threads", threadId));
