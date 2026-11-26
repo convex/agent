@@ -281,24 +281,27 @@ async function addMessagesHandler(
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
     // Only the prompt's turn: a read of the thread's pending messages would
-    // conflict with every other turn's pending save.
-    const pendingMessages = promptMessage
-      ? (
-          await Promise.all(
-            [true, false].map((tool) =>
-              ctx.db
-                .query("messages")
-                .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-                  q
-                    .eq("threadId", threadId)
-                    .eq("status", "pending")
-                    .eq("tool", tool)
-                    .eq("order", promptMessage.order),
-                )
-                .take(100),
-            ),
-          )
-        ).flat()
+    // conflict with every other turn's pending save. A missing prompt has no
+    // turn to fail.
+    const pendingMessages = promptMessageId
+      ? promptMessage
+        ? (
+            await Promise.all(
+              [true, false].map((tool) =>
+                ctx.db
+                  .query("messages")
+                  .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+                    q
+                      .eq("threadId", threadId)
+                      .eq("status", "pending")
+                      .eq("tool", tool)
+                      .eq("order", promptMessage.order),
+                  )
+                  .take(100),
+              ),
+            )
+          ).flat()
+        : []
       : await ctx.db
           .query("messages")
           .withIndex("threadId_status_tool_order_stepOrder", (q) =>
