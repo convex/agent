@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { createThread } from "../../client/threads.js";
 import type { MutationCtx } from "../../client/types.js";
-import type { GenericSchema, SchemaDefinition } from "convex/server";
+import {
+  getFunctionAddress,
+  type GenericSchema,
+  type SchemaDefinition,
+} from "convex/server";
 import { streamText } from "ai";
 import { components, initConvexTest } from "./setup.test.js";
 import { mockModel } from "./mockModel.js";
@@ -280,6 +284,142 @@ describe("DeltaStreamer", () => {
       await expect(streamer.getStreamId()).rejects.toThrow(
         "Cannot create a stream after it has been aborted",
       );
+    });
+  });
+
+  test.each(["fail", "abortSignal", "source throws"] as const)(
+    "%s keeps the parts held for the next delta (#479)",
+    async (end) => {
+      await t.action(async (ctx) => {
+        const stop = new AbortController();
+        const streamer = new DeltaStreamer<string>(
+          components.agent,
+          ctx,
+          {
+            ...defaultTestOptions,
+            throttleMs: 60_000,
+            abortSignal: stop.signal,
+          },
+          { ...testMetadata, format: undefined, threadId },
+        );
+        const source = {
+          async *[Symbol.asyncIterator]() {
+            yield "A partial ";
+            yield "answer";
+            if (end === "source throws") throw new Error("provider failed");
+            if (end === "abortSignal") stop.abort();
+            else await streamer.fail("provider failed");
+          },
+        } as unknown as Parameters<typeof streamer.consumeStream>[0];
+        await streamer.consumeStream(source).catch(() => {});
+        const [stream] = await ctx.runQuery(components.agent.streams.list, {
+          threadId,
+          statuses: ["aborted"],
+        });
+        const deltas = await ctx.runQuery(components.agent.streams.listDeltas, {
+          threadId,
+          cursors: [{ streamId: stream.streamId, cursor: 0 }],
+        });
+        expect(deltas.flatMap((d) => d.parts)).toEqual([
+          "A partial ",
+          "answer",
+        ]);
+      });
+    },
+  );
+
+  test("fail does not write the held parts after the write before them fails", async () => {
+    await t.action(async (ctx) => {
+      const addDelta = getFunctionAddress(
+        components.agent.streams.addDelta,
+      ).reference;
+      let failWrite!: () => void;
+      const writeFails = new Promise<void>((resolve) => (failWrite = resolve));
+      let writes = 0;
+      const failing = {
+        ...ctx,
+        runMutation: (async (reference, args) => {
+          if (
+            getFunctionAddress(reference).reference === addDelta &&
+            ++writes === 1
+          ) {
+            await writeFails;
+            throw new Error("delta failed");
+          }
+          return ctx.runMutation(reference, args);
+        }) as typeof ctx.runMutation,
+      };
+      const streamer = new DeltaStreamer<string>(
+        components.agent,
+        failing,
+        {
+          ...defaultTestOptions,
+          throttleMs: 60_000,
+          onAsyncAbort: async () => {},
+        },
+        { ...testMetadata, format: undefined, threadId },
+      );
+      await streamer.addParts(["A partial "]);
+      await streamer.addParts(["answer"]);
+      const failed = streamer.fail("provider failed");
+      failWrite();
+      await failed.catch(() => {});
+      const [stream] = await ctx.runQuery(components.agent.streams.list, {
+        threadId,
+        statuses: ["aborted"],
+      });
+      const deltas = await ctx.runQuery(components.agent.streams.listDeltas, {
+        threadId,
+        cursors: [{ streamId: stream.streamId, cursor: 0 }],
+      });
+      expect(deltas).toEqual([]);
+    });
+  });
+
+  test("fail reports a write the stream refused while it drains the held parts", async () => {
+    await t.action(async (ctx) => {
+      const addDelta = getFunctionAddress(
+        components.agent.streams.addDelta,
+      ).reference;
+      let releaseWrite!: () => void;
+      const writeReleased = new Promise<void>(
+        (resolve) => (releaseWrite = resolve),
+      );
+      let writes = 0;
+      const gated = {
+        ...ctx,
+        runMutation: (async (reference, args) => {
+          if (getFunctionAddress(reference).reference === addDelta) {
+            writes++;
+            await writeReleased;
+          }
+          return ctx.runMutation(reference, args);
+        }) as typeof ctx.runMutation,
+      };
+      const asyncAborts: string[] = [];
+      const streamer = new DeltaStreamer<string>(
+        components.agent,
+        gated,
+        {
+          ...defaultTestOptions,
+          throttleMs: 60_000,
+          onAsyncAbort: async (reason) => {
+            asyncAborts.push(reason);
+          },
+        },
+        { ...testMetadata, format: undefined, threadId },
+      );
+      await streamer.addParts(["A partial "]);
+      await streamer.addParts(["answer"]);
+      await ctx.runMutation(components.agent.streams.abort, {
+        streamId: streamer.streamId!,
+        reason: "Stopped elsewhere",
+      });
+      const failed = streamer.fail("provider failed");
+      releaseWrite();
+      await failed.catch(() => {});
+      expect(asyncAborts).toEqual(["async abort"]);
+      expect(writes).toBe(1);
     });
   });
 

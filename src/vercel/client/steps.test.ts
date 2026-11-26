@@ -688,7 +688,10 @@ describe("streamText", () => {
       abortInStepEnd: true,
       failSave: "first",
     });
-    expect(r.saved).toEqual([USER, failed(EMPTY, "Stopped")]);
+    expect(r.saved).toEqual([
+      USER,
+      ...LOOKUP.map((row) => failed(row, "Stopped")),
+    ]);
     expect(r.error).toBe("first save failed");
   });
 

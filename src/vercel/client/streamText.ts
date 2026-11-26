@@ -3,10 +3,10 @@ import type {
   StreamTextTransform,
   TextStreamPart,
   ToolSet,
-  UIMessage as AIUIMessage,
+  UIMessageChunk,
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
-import { streamText as streamTextAi, toUIMessageStream } from "ai";
+import { streamText as streamTextAi, toUIMessageChunk } from "ai";
 import {
   compressUIMessageChunks,
   DEFAULT_STREAMING_OPTIONS,
@@ -144,7 +144,9 @@ export async function streamText<
             compress: compressUIMessageChunks,
             materialize: (parts) =>
               materializeUIMessageChunkFiles(ctx, component, parts),
-            abortSignal: args.abortSignal,
+            // The stream ends with the generation, after the parts the AI SDK
+            // still delivers once aborted.
+            abortSignal: undefined,
           },
           {
             threadId,
@@ -160,11 +162,61 @@ export async function streamText<
         )
       : undefined;
 
-  const failGeneration = (reason: string) =>
-    runStreamCleanup({
+  const sendSources =
+    typeof options.saveStreamDeltas === "object"
+      ? (options.saveStreamDeltas.sendSources ??
+        DEFAULT_STREAMING_OPTIONS.sendSources)
+      : DEFAULT_STREAMING_OPTIONS.sendSources;
+  const onWriteError = (error: unknown) => {
+    deltasFailed ??= errorToString(error);
+    deltasStopped.abort();
+  };
+  // Written where the generation ends, so it ends after the last of them.
+  // Parts reach the streamer one at a time, so while the stream is created
+  // the first part waits alone, as it did for a reader awaiting each part,
+  // until the generation's end hands over the rest at once.
+  const unwritten: UIMessageChunk[] = [];
+  let writing = false;
+  let wroteAny = false;
+  const writeInOrder = async () => {
+    writing = true;
+    try {
+      while (unwritten.length > 0) {
+        await streamer?.addParts(unwritten.splice(0, 1));
+      }
+    } catch (error) {
+      onWriteError(error);
+    } finally {
+      writing = false;
+    }
+  };
+  const write = (part: TextStreamPart<Tools>) => {
+    const chunk =
+      streamer && toUIMessageChunk(part, { tools: args.tools, sendSources });
+    if (!chunk) return;
+    // A generation aborted before its first part has no stream.
+    if (!wroteAny && args.abortSignal?.aborted) return;
+    wroteAny = true;
+    unwritten.push(chunk);
+    if (!writing) void writeInOrder();
+  };
+  const writeRest = () => {
+    if (unwritten.length === 0) return;
+    streamer?.addParts(unwritten.splice(0)).catch(onWriteError);
+  };
+  // What was written is read back into the failed message.
+  const failGeneration = async (
+    reason: string,
+    onAbort?: () => PromiseLike<void> | void,
+  ) => {
+    writeRest();
+    await streamer?.flushAndStopAccepting().catch(() => {});
+    await runStreamCleanup({
       failCall: () => call.fail(reason),
       failStreamer: async () => streamer?.fail(reason),
+      onAbort,
     });
+  };
   const endGeneration = (options?: Parameters<typeof call.end>[0]) =>
     call.end(options).catch(async (error) => {
       await streamer?.fail(errorToString(error)).catch(() => {});
@@ -173,7 +225,14 @@ export async function streamText<
   let stepError: string | undefined;
   let finished = false;
   let stopped = false;
-  let stepEnds = 0;
+  let aborted: { onAbort: () => PromiseLike<void> | void } | undefined;
+  // The caller's onAbort runs once, wherever the aborted generation ends.
+  const onAbortOnce = () => {
+    const onAbort = aborted?.onAbort;
+    if (aborted) aborted.onAbort = () => {};
+    return onAbort?.();
+  };
+  let abortFailure: { error: unknown } | undefined;
   const transforms = mergeTransforms(
     options?.saveStreamDeltas,
     streamTextArgs.experimental_transform,
@@ -188,11 +247,38 @@ export async function streamText<
           },
         }),
   );
-  // The generation ends where its stream does, before the result resolves:
-  // at `finish`, after the last onStepEnd, the last step is saved and its
-  // stream finished before passing it on. A stream that ends without `finish`
-  // on an error part (one the SDK did not retry), or because a transform
-  // stopped it, cut its step off. It ends without either between retries.
+  // At `finish`, after the last onStepEnd, the last step is saved and its
+  // stream finished before passing it on.
+  const endAtFinish = async (part?: TextStreamPart<Tools>) => {
+    finished = true;
+    if (stepError !== undefined) await failGeneration(stepError);
+    else if (savesMessages) {
+      writeRest();
+      await streamer?.flushAndStopAccepting();
+      const writeFailed = streamer?.abortController.signal.aborted;
+      await endGeneration({
+        finishStreamId: writeFailed ? undefined : streamer?.streamId,
+      });
+      // A failed last write aborted the stream, which the caller sees fail.
+      if (writeFailed) {
+        await streamer
+          ?.fail(deltasFailed ?? "The last delta failed")
+          .catch((error) => {
+            abortFailure ??= { error };
+          });
+      }
+    } else {
+      if (part) write(part);
+      writeRest();
+      await endGeneration();
+      await streamer?.finish();
+    }
+  };
+  // The generation ends where its stream does, before the result resolves,
+  // after every part before it is written. A stream that ends without
+  // `finish` was aborted, or cut its step off on an error part (one the SDK
+  // did not retry) or because a transform stopped it. It ends without any of
+  // them between retries, and where a transform drops `finish`.
   const saveLastStep: StreamTextTransform<Tools> = () => {
     let errorPart: { error: unknown } | undefined;
     let error: string | undefined;
@@ -203,7 +289,6 @@ export async function streamText<
           error = errorToString(part.error);
         }
         if (part.type === "finish-step") {
-          stepEnds++;
           stepError =
             error ??
             (part.finishReason === "error"
@@ -211,20 +296,28 @@ export async function streamText<
               : undefined);
         }
         if (part.type === "finish") {
-          finished = true;
-          if (stepError !== undefined) await failGeneration(stepError);
-          else {
-            await endGeneration({
-              finishStreamId: savesMessages
-                ? await streamer?.handOver(stepEnds)
-                : undefined,
-            });
-          }
+          await endAtFinish(part);
+        } else if (part.type !== "abort") {
+          // The stream's status says it was aborted.
+          write(part);
         }
         controller.enqueue(part);
       },
       flush: async () => {
+        if (aborted) {
+          const reason =
+            deltasFailed ??
+            (args.abortSignal?.reason
+              ? errorToString(args.abortSignal.reason)
+              : "streamText aborted");
+          // The caller's stream ends on the abort, as the AI SDK ends it.
+          await failGeneration(reason, onAbortOnce).catch((error) => {
+            abortFailure = { error };
+          });
+          return;
+        }
         if (!finished && (error !== undefined || stopped)) {
+          finished = true;
           await failGeneration(
             error ?? "The generation stopped before its step ended",
           ).catch((cleanupError) => {
@@ -246,17 +339,9 @@ export async function streamText<
         )
       : args.abortSignal,
     experimental_transform: [...transforms, saveLastStep],
-    onAbort: async (event) => {
-      const reason =
-        deltasFailed ??
-        (args.abortSignal?.reason
-          ? errorToString(args.abortSignal.reason)
-          : "streamText aborted");
-      await runStreamCleanup({
-        failCall: () => call.fail(reason),
-        failStreamer: async () => streamer?.fail(reason),
-        onAbort: () => streamTextArgs.onAbort?.(event),
-      });
+    // Ended in saveLastStep's flush, after the parts the abort releases.
+    onAbort: (event) => {
+      aborted = { onAbort: () => streamTextArgs.onAbort?.(event) };
     },
     prepareStep: async (options) => {
       await call.beforeStep(options);
@@ -273,23 +358,13 @@ export async function streamText<
       return (streamTextArgs.onStepEnd ?? streamTextArgs.onStepFinish)?.(step);
     },
     onEnd: async (event) => {
-      await endGeneration();
+      // Without `finish`, which a transform dropped, it ends here.
+      await (finished ? endGeneration() : endAtFinish());
       return (streamTextArgs.onEnd ?? streamTextArgs.onFinish)?.(event);
     },
   } as Parameters<
     typeof streamTextAi<Tools, RUNTIME_CONTEXT, OUTPUT>
   >[0]) as StreamTextResult<Tools, RUNTIME_CONTEXT, OUTPUT>;
-  const stream = streamer?.consumeStream(
-    toUIMessageStream<Tools, AIUIMessage<Tools>>({
-      stream: result.stream,
-      tools: args.tools,
-      sendSources:
-        typeof options.saveStreamDeltas === "object"
-          ? (options.saveStreamDeltas.sendSources ??
-            DEFAULT_STREAMING_OPTIONS.sendSources)
-          : DEFAULT_STREAMING_OPTIONS.sendSources,
-    }),
-  );
   // The generation runs to its end whoever reads the stream.
   let streamError: { error: unknown } | undefined;
   const ended = Promise.resolve(
@@ -299,27 +374,20 @@ export async function streamText<
       },
     }),
   ).then(async () => {
-    if (streamError) await failGeneration(errorToString(streamError.error));
+    if (abortFailure) throw abortFailure.error;
+    if (streamError) {
+      await failGeneration(errorToString(streamError.error), onAbortOnce);
+      throw streamError.error;
+    }
     await endGeneration();
   });
-  void ended.catch(() => {});
-  if (willAwaitStream) {
-    try {
-      await stream;
-    } catch (e) {
-      await failGeneration(errorToString(e)).catch(() => {});
-      throw e;
-    }
-    await ended;
-  } else {
-    // The caller consumes the provider stream, but this separate background
-    // consumer can still reject (e.g. if durable abort cleanup fails, or the
-    // stream errored).
-    void stream?.catch((error) => {
+  // Unless the caller awaits it, a failure to save is only reported.
+  void ended.catch((error) => {
+    if (!willAwaitStream) {
       console.error("Failed to persist stream deltas:", error);
-      deltasFailed ??= errorToString(error);
-    });
-  }
+    }
+  });
+  if (willAwaitStream) await ended;
 
   const metadata: GenerationOutputMetadata = {
     promptMessageId,
