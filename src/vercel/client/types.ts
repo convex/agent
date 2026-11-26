@@ -182,9 +182,12 @@ export type Config = {
    * that save. Each thread's report is its own scheduled function, so a save
    * can report at most 1,000 threads; if the hook throws, its run fails like
    * any scheduled function and isn't retried. Reports can arrive out of
-   * order: read messages by id for their current state. Writes made without
-   * this Agent, such as the standalone `saveMessage` or calls to the
-   * component, aren't reported.
+   * order: re-read messages that still exist by id for their current state.
+   * A `delete` entry's message is gone, and the report carries its `order`,
+   * `stepOrder` and `status`. If the Agent can't resolve this mutation, for
+   * example after a deploy removed it, the call fails before it saves. Writes
+   * made without this Agent, such as the standalone `saveMessage` or calls to
+   * the component, aren't reported.
    */
   onSaveMessages?: FunctionReference_future<
     "mutation",

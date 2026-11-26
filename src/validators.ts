@@ -33,9 +33,10 @@ export type MessageStatus = Infer<typeof vMessageStatus>;
 
 /**
  * The args of an Agent's `onSaveMessages` mutation: the messages one save
- * wrote to a thread, and how. Reports can arrive out of order, so read the
- * messages by id for their current state, and place them by `order` and
- * `stepOrder` rather than by arrival.
+ * wrote to a thread, and how. Reports can arrive out of order, so re-read
+ * messages that still exist by id for their current state, and place them by
+ * `order` and `stepOrder` rather than by arrival. A `delete` entry's message
+ * is gone, and the entry carries its `order`, `stepOrder` and `status`.
  */
 export const vOnSaveMessagesArgs = v.object({
   threadId: v.string(),

@@ -335,7 +335,10 @@ Pass an internal mutation as `onSaveMessages` to run it after each save the
 Agent makes to a thread's messages, with each message's id, `order`,
 `stepOrder`, `status` and whether it was an `insert`, `update` or `delete`. It
 is scheduled atomically with the save and runs in its own transaction per
-thread. Reports can arrive out of order, so read messages by id, and writes made
+thread. Reports can arrive out of order, so re-read messages that still exist by
+id. A `delete` entry's message is already gone, and the report carries its
+`order`, `stepOrder` and `status`. If the Agent can't resolve the mutation, for
+example after a deploy removed it, the call fails before it saves. Writes made
 without the Agent aren't reported.
 
 ```ts
