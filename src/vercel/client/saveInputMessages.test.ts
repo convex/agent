@@ -12,7 +12,7 @@ const { mockSaveMessages, mockEmbedMessages } = vi.hoisted(() => ({
 }));
 
 vi.mock("./messages.js", () => ({
-  saveMessages: mockSaveMessages,
+  saveAgentMessages: mockSaveMessages,
 }));
 
 vi.mock("./search.js", async () => {

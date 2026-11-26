@@ -7,7 +7,7 @@ import type {
   Config,
   MutationCtx,
 } from "./types.js";
-import { saveMessages } from "./messages.js";
+import { saveAgentMessages } from "./messages.js";
 import type { Message } from "../../validators.js";
 import { assert } from "convex-helpers";
 import type { VectorDimension } from "../../component/vector/tables.js";
@@ -28,6 +28,7 @@ export async function saveInputMessages(
     userId: string | undefined;
     threadId: string;
     agentName?: string;
+    onSaveMessagesHandle?: string;
     storageOptions?: {
       saveMessages?: "all" | "promptAndOutput";
     };
@@ -82,7 +83,7 @@ export async function saveInputMessages(
       embeddings.vectors.push(null);
     }
   }
-  const saved = await saveMessages(ctx, component, {
+  const saved = await saveAgentMessages(ctx, component, {
     threadId,
     userId,
     messages: [...toSave, { role: "assistant", content: [] }],
@@ -93,6 +94,7 @@ export async function saveInputMessages(
     failPendingSteps: !!args.promptMessageId,
     promptMessageId: args.promptMessageId,
     embeddings,
+    onSaveMessages: args.onSaveMessagesHandle,
   });
   return {
     promptMessageId: toSave.length

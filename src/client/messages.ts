@@ -119,6 +119,8 @@ export async function saveMessages(
      * The agent name to associate with the messages.
      */
     agentName?: string;
+    /** A handle to the Agent's `onSaveMessages`. */
+    onSaveMessages?: string;
   },
 ): Promise<{ messages: MessageDoc[] }> {
   let embeddings: MessageEmbeddingsWithDimension | undefined;
@@ -152,6 +154,7 @@ export async function saveMessages(
         embeddings,
         messages,
         failPendingSteps: args.failPendingSteps ?? false,
+        onSaveMessages: args.onSaveMessages,
       }),
   );
   return { messages: result.messages };

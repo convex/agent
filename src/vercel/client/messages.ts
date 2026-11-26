@@ -118,6 +118,19 @@ export async function saveMessages(
     agentName?: string;
   },
 ): Promise<{ messages: MessageDoc[] }> {
+  return saveAgentMessages(ctx, component, args);
+}
+
+// Not exported from the package: only an Agent reports its saves.
+export async function saveAgentMessages(
+  ctx: MutationCtx | ActionCtx,
+  component: AgentComponent,
+  args: SaveMessagesArgs & {
+    agentName?: string;
+    /** A handle to the Agent's `onSaveMessages`. */
+    onSaveMessages?: string;
+  },
+): Promise<{ messages: MessageDoc[] }> {
   const serialized = await Promise.all(
     args.messages.map((message) => serializeMessage(ctx, component, message)),
   );
@@ -140,6 +153,7 @@ export async function saveMessages(
       };
     }),
     failPendingSteps: args.failPendingSteps ?? false,
+    onSaveMessages: args.onSaveMessages,
   });
 }
 
