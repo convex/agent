@@ -204,17 +204,14 @@ async function deletePageForUserId(
   }
 
   // Phase 2: Delete the thread the way a thread deletion does. A step
-  // scheduled before this shared path holds a descending messagesCursor, or
-  // can be deleting streams with the thread still there, so pages go
-  // descending and such a thread goes back to its messages first.
-  const messagesDone =
-    streamsInProgress && !(await ctx.db.get("threads", threadInProgress!));
+  // scheduled before this shared path holds a descending messagesCursor, so
+  // pages go descending.
   const step = await deleteThreadStep(
     ctx,
     {
       threadId: threadInProgress!,
       cursor: messagesCursor ?? undefined,
-      messagesDone,
+      messagesDone: streamsInProgress,
       streamOrder,
       deltaCursor,
     },

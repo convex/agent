@@ -8,7 +8,7 @@ import {
   vThreadDoc,
 } from "../validators.js";
 import { api, internal } from "./_generated/api.js";
-import type { Doc } from "./_generated/dataModel.js";
+import type { Doc, Id } from "./_generated/dataModel.js";
 import {
   action,
   internalMutation,
@@ -176,7 +176,13 @@ type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
 
 export const _deletePageForThreadId = internalMutation({
   args: deleteThreadArgs,
-  handler: (ctx, args) => deletePageForThreadIdHandler(ctx, args),
+  handler: async (ctx, args) => {
+    const messages = await deletePageForThreadIdHandler(ctx, args);
+    if (messages.isDone) {
+      await deleteThreadAndMark(ctx, args.threadId);
+    }
+    return messages;
+  },
   returns: deleteThreadReturns,
 });
 
@@ -258,6 +264,10 @@ export async function deleteThreadStep(
         streamOrder: args.streamOrder,
         deltaCursor: args.deltaCursor,
       });
+  // The thread goes last, so a user deletion run again still finds it.
+  if (streams.isDone) {
+    await deleteThreadAndMark(ctx, args.threadId);
+  }
   return {
     isDone: streams.isDone,
     next: {
@@ -274,9 +284,9 @@ async function deletePageForThreadIdHandler(
   args: DeleteThreadArgs,
   order: "asc" | "desc" = "asc",
 ): Promise<DeleteThreadReturns> {
-  const markId =
-    (await getDeletionMark(ctx, args.threadId))?._id ??
-    (await ctx.db.insert("deletingThreads", { threadId: args.threadId }));
+  if (!(await getDeletionMark(ctx, args.threadId))) {
+    await ctx.db.insert("deletingThreads", { threadId: args.threadId });
+  }
   const messages = await ctx.db
     .query("messages")
     .withIndex("threadId_status_tool_order_stepOrder", (q) =>
@@ -288,12 +298,15 @@ async function deletePageForThreadIdHandler(
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-  if (messages.isDone) {
-    const thread = await ctx.db.get("threads", args.threadId);
-    if (thread) {
-      await ctx.db.delete("threads", args.threadId);
-    }
-    await ctx.db.delete("deletingThreads", markId);
-  }
   return { cursor: messages.continueCursor, isDone: messages.isDone };
+}
+
+async function deleteThreadAndMark(ctx: MutationCtx, threadId: Id<"threads">) {
+  if (await ctx.db.get("threads", threadId)) {
+    await ctx.db.delete("threads", threadId);
+  }
+  const mark = await getDeletionMark(ctx, threadId);
+  if (mark) {
+    await ctx.db.delete("deletingThreads", mark._id);
+  }
 }
