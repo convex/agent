@@ -177,24 +177,24 @@ message as it is generated asynchronously.
 
 ### Generating an object
 
-Similar to the AI SDK, you can generate or stream an object. The same arguments
-apply, except you don't have to provide a model. It will use the agent's default
-language model.
+As with the AI SDK, pass an `output` to `generateText` or `streamText` to get
+structured data. The object's JSON is saved as the assistant message.
 
 ```ts
+import { Output } from "ai";
 import { z } from "zod/v3";
 
-const result = await thread.generateObject({
+const { output } = await thread.generateText({
   prompt: "Generate a plan based on the conversation so far",
-  schema: z.object({...}),
+  output: Output.object({ schema: z.object({...}) }),
 });
 ```
 
-Unfortunately, object generation doesn't support using tools. One, however, is
-to structure your object as arguments to a tool call that returns the object.
-You can use a custom `stopWhen` to stop the generation when the tool call
-produces the result and use `toolChoice: "required"` to prevent the LLM from
-returning a text response.
+With `streamText`, read partial objects from `result.partialOutputStream`.
+`Output.array`, `Output.choice` and `Output.json` replace the `array`, `enum`
+and `no-schema` modes. `asTextAction({ output })` replaces `asObjectAction`.
+`generateObject`, `streamObject`, `saveObject` and `asObjectAction` are
+deprecated, as the AI SDK deprecated `generateObject` and `streamObject`.
 
 ## Customizing the agent
 

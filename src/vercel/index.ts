@@ -686,6 +686,8 @@ export class Agent<
    * resulting messages to the thread, if specified.
    * Use {@link continueThread} to get a version of this function already scoped
    * to a thread (and optionally userId).
+   * @deprecated Use {@link generateText} with `output`, such as
+   * `Output.object({ schema })`, as the AI SDK deprecated `generateObject`.
    */
   async generateObject<
     SCHEMA extends FlexibleSchema<unknown> = FlexibleSchema<JSONValue>,
@@ -742,6 +744,8 @@ export class Agent<
    * resulting messages to the thread, if specified.
    * Use {@link continueThread} to get a version of this function already scoped
    * to a thread (and optionally userId).
+   * @deprecated Use {@link streamText} with `output`, such as
+   * `Output.object({ schema })`, as the AI SDK deprecated `streamObject`.
    */
   async streamObject<
     SCHEMA extends FlexibleSchema<unknown> = FlexibleSchema<JSONValue>,
@@ -1365,6 +1369,8 @@ export class Agent<
    * from the `thread` object created by {@link continueThread} or {@link createThread}.
    * @param ctx The context passed from the mutation or action function calling this.
    * @param args The arguments to the saveObject function.
+   * @deprecated Use {@link generateText} or {@link streamText} with `output`,
+   * which save their own messages.
    */
   async saveObject(
     ctx: ActionCtx,
@@ -1765,6 +1771,7 @@ export class Agent<
    * @param spec Configuration for the agent acting as an action, including
    * the normal parameters to {@link generateObject}, plus {@link ContextOptions}
    * and stopWhen.
+   * @deprecated Use {@link asTextAction} with `output`.
    */
   asObjectAction<T, DataModel extends GenericDataModel>(
     objectArgs: GenerateObjectArgs<FlexibleSchema<T>> & Partial<AgentPrompt>,

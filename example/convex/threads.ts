@@ -20,6 +20,7 @@ import {
 import { getAuthUserId } from "./utils";
 import { agent } from "./agents/simple";
 import { z } from "zod/v3";
+import { Output } from "ai";
 
 export const listThreads = query({
   args: {
@@ -70,14 +71,16 @@ export const updateThreadTitle = action({
     await authorizeThreadAccess(ctx, threadId);
     const { thread } = await agent.continueThread(ctx, { threadId });
     const {
-      object: { title, summary },
-    } = await thread.generateObject(
+      output: { title, summary },
+    } = await thread.generateText(
       {
-        schemaDescription:
-          "Generate a title and summary for the thread. The title should be a single sentence that captures the main topic of the thread. The summary should be a short description of the thread that could be used to describe it to someone who hasn't read it.",
-        schema: z.object({
-          title: z.string().describe("The new title for the thread"),
-          summary: z.string().describe("The new summary for the thread"),
+        output: Output.object({
+          description:
+            "Generate a title and summary for the thread. The title should be a single sentence that captures the main topic of the thread. The summary should be a short description of the thread that could be used to describe it to someone who hasn't read it.",
+          schema: z.object({
+            title: z.string().describe("The new title for the thread"),
+            summary: z.string().describe("The new summary for the thread"),
+          }),
         }),
         prompt: "Generate a title and summary for this thread.",
       },

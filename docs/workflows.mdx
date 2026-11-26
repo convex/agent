@@ -209,14 +209,17 @@ export const getSupport = supportAgent.asTextAction({
 });
 ```
 
-You can also expose a standalone action that generates an object.
+Pass an `output` to generate an object. The action returns it as `output`.
 
 ```ts
-// Similar to thread.generateObject / thread.streamObject
-export const getStructuredSupport = supportAgent.asObjectAction({
-  schema: z.object({
-    analysis: z.string().describe("A detailed analysis of the user's request."),
-    instruction: z.string().describe("A suggested action to take."),
+export const getStructuredSupport = supportAgent.asTextAction({
+  output: Output.object({
+    schema: z.object({
+      analysis: z
+        .string()
+        .describe("A detailed analysis of the user's request."),
+      instruction: z.string().describe("A suggested action to take."),
+    }),
   }),
 });
 ```
