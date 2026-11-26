@@ -1326,6 +1326,12 @@ export class Agent<
        * Defaults to the chat provider for the Agent.
        */
       provider?: string;
+      /**
+       * The tools the step was generated with, when they were passed to the
+       * generation instead of set on the agent. Like a generation's `tools`,
+       * they replace the agent's tools.
+       */
+      tools?: ToolSet;
     },
   ): Promise<{ messages: MessageDoc[] }> {
     const { messages } = await serializeResponseMessages(
@@ -1339,7 +1345,7 @@ export class Agent<
       args.step.response.messages.length > 0
         ? args.step.response.messages
         : [{ role: "assistant", content: [] }],
-      this.options.tools,
+      args.tools ?? this.options.tools,
     );
     const embeddings = await this.generateEmbeddings(
       ctx,
