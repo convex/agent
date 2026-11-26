@@ -928,13 +928,6 @@ export const cloneThread = action({
   },
 });
 
-// A page stops early, short and not done, once the messages it read reach
-// this. Half the 16 MiB transaction read limit, so the message that crossed
-// it (up to the 1 MiB document limit) still fits. A page bound by `endCursor`
-// reads to it: paginated hooks only continue from the last page's cursor, so
-// rows a bound page skipped would never show.
-const MAX_PAGE_BYTES = 8 * 1024 * 1024;
-
 export const listMessagesByThreadIdArgs = {
   threadId: v.id("threads"),
   excludeToolMessages: v.optional(v.boolean()),
@@ -1006,21 +999,16 @@ async function listMessagesByThreadIdHandler(
       ),
     );
   }
-  const paginationOpts = args.paginationOpts ?? {
-    numItems: DEFAULT_RECENT_MESSAGES,
-    cursor: null,
-  };
-  return await mergedStream(streams, ["order", "stepOrder"]).paginate(
-    paginationOpts.endCursor
-      ? paginationOpts
-      : {
-          ...paginationOpts,
-          maximumBytesRead: Math.min(
-            paginationOpts.maximumBytesRead ?? Infinity,
-            MAX_PAGE_BYTES,
-          ),
-        },
+  const messages = await mergedStream(streams, ["order", "stepOrder"]).paginate(
+    args.paginationOpts ?? {
+      numItems: DEFAULT_RECENT_MESSAGES,
+      cursor: null,
+    },
   );
+  if (messages.page.length === 0) {
+    messages.isDone = true;
+  }
+  return messages;
 }
 
 export const getMessagesByIds = query({
