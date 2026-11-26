@@ -1987,6 +1987,44 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     ).toEqual({ stream: null, thread: null });
   });
 
+  test("a thread deletion step deletes a page of messages or of a stream, not both", async () => {
+    // Each page can be near the read limit, so repeatWhileHeadroom needs to
+    // be able to stop between them.
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: messages[0].order,
+      stepOrder: messages[0].stepOrder + 1,
+      format: "UIMessageChunk",
+    });
+    await t.mutation(api.streams.addDelta, {
+      streamId,
+      start: 0,
+      end: 1,
+      parts: [{ type: "text-delta", id: "t", delta: "hi" }],
+    });
+
+    const step = await t.mutation(internal.threads._deleteThreadStep, {
+      threadId,
+    });
+    expect(step.isDone).toBe(false);
+    expect(
+      await t.run(async (ctx) => ({
+        thread: await ctx.db.get("threads", threadId),
+        deltas: await ctx.db
+          .query("streamDeltas")
+          .withIndex("streamId_start_end", (q) => q.eq("streamId", streamId))
+          .collect(),
+      })),
+    ).toMatchObject({ thread: null, deltas: [{ start: 0 }] });
+  });
+
   test("a failed save during a thread deletion doesn't outlive the thread", async () => {
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, { userId: "u" });
