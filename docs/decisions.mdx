@@ -77,8 +77,9 @@ that breaks this throws before the model is called.
 ## Stored decisions
 
 With a thread, each call the model answers stores a decision with what the model
-saw (the context message IDs, your `state` as JSON text with file bytes replaced
-by their SHA-256, and a hash of the whole state), the exact questions, the
+saw: the IDs of the stored messages its context was built from, your `state` as
+JSON text with file bytes replaced by their SHA-256, and a hash of the whole
+state exactly as the model saw it. It also stores the exact questions, the
 requested and resolved model, the `maxOutputTokens`, `reasoning` and
 `providerOptions` it was called with as `settings`, usage and provider metadata.
 It is anchored to the turn by `promptMessageId` and `order`. A cache hit returns
@@ -174,6 +175,8 @@ Keep thresholds per question and per model, since models calibrate differently.
 They are keyed by `requestedModel`, the model ID as requested:
 
 ```ts
+import type { DecisionDoc } from "@convex-dev/agent";
+
 const minConfidence: Record<string, Record<string, number>> = {
   "typesafe/jev-1.14": { team: 0.65 },
   "cloudflare/clef-flash": { team: 0.9 },
@@ -311,7 +314,9 @@ for (const decision of page) {
 }
 ```
 
-File bytes aren't stored, so a state with files can't be replayed exactly.
+File bytes aren't stored, so a state with files can't be replayed exactly. Nor
+can a call whose `contextHandler` changed the context, or that passed `prompt`
+or `messages`, since only the stored messages' IDs are kept.
 
 ### React
 
