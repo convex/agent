@@ -45,10 +45,10 @@ import { changeRefcount } from "./files.js";
 import { leaveOutText, withText } from "../messageText.js";
 import {
   getStreamingMessagesWithMetadata,
-  finishHandler,
+  finishStreamingMessage,
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
-  abortById,
+  abortStreamingMessage,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -496,14 +496,11 @@ async function addMessagesHandler(
   // from separate mutations for message save and stream finish (issue #181).
   const failed = toReturn.find((m) => m.status === "failed");
   if (finishStream && failed) {
-    await abortById(ctx, {
-      streamId: finishStream._id,
+    await abortStreamingMessage(ctx, finishStream, {
       reason: failed.error ?? "The generation failed",
     });
   } else if (finishStream) {
-    await finishHandler(ctx, {
-      streamId: finishStream._id,
-    });
+    await finishStreamingMessage(ctx, finishStream);
     await releaseStreamFileOwnershipByIds(ctx, [finishStream._id]);
   }
   return { messages: toReturn.map(publicMessage) };
