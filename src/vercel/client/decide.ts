@@ -10,11 +10,7 @@ import {
   type ModelMessage,
   type ProviderMetadata,
 } from "ai";
-import type {
-  Experimental_DecisionModelV4,
-  Experimental_DecisionModelV4Result,
-  JSONValue,
-} from "@ai-sdk/provider";
+import type { JSONValue } from "@ai-sdk/provider";
 import type { PaginationOptions, PaginationResult } from "convex/server";
 import {
   convexToJson,
@@ -260,24 +256,6 @@ function toUsage(
   };
 }
 
-// The AI SDK throws a refusal or an invalid answer without the usage it was
-// billed for, so the model's last result is kept to report it.
-function recordingResults(model: Exclude<Experimental_DecisionModel, string>) {
-  let last: Experimental_DecisionModelV4Result | undefined;
-  const call: Experimental_DecisionModelV4["doDecide"] =
-    "doDecide" in model
-      ? (options) => model.doDecide(options)
-      : (options) => model.doEvaluate(options);
-  const recording: Experimental_DecisionModelV4 = {
-    specificationVersion: "v4",
-    provider: model.provider,
-    modelId: model.modelId,
-    supportedQuestionTypes: model.supportedQuestionTypes,
-    doDecide: async (options) => (last = await call(options)),
-  };
-  return { model: recording, last: () => last };
-}
-
 // Convex validators infer mutable arrays where the AI SDK has readonly ones.
 function toStoredQuestions(
   questions: DecisionQuestions,
@@ -495,55 +473,23 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
     }
   }
 
-  const report = (
-    usage: LanguageModelUsage,
-    modelId: string,
-    providerMetadata: ProviderMetadata | undefined,
-  ) =>
-    opts.usageHandler?.(ctx, {
-      userId,
-      threadId,
-      agentName: opts.agentName,
-      model: modelId,
-      provider,
-      usage,
-      providerMetadata,
-      promptMessageId,
-    });
-  // A refusal reports no usage and the AI SDK doesn't export how it resolves a
-  // model ID string, so only a model object can be wrapped:
-  // https://github.com/vercel/ai/issues/25546
-  const recording =
-    typeof model === "string" ? undefined : recordingResults(model);
-  let result: Experimental_DecisionResult<QUESTIONS>;
-  try {
-    result = await experimental_decide({
-      ...settings,
-      model: recording?.model ?? model,
-      state,
-      questions,
-    });
-  } catch (error) {
-    const last = recording?.last();
-    if (last) {
-      try {
-        await report(
-          toUsage(last.usage),
-          last.response?.modelId ?? requestedModel,
-          last.providerMetadata,
-        );
-      } catch (reportError) {
-        // The caller gets the SDK's error, not the handler's.
-        console.error(
-          "usageHandler failed after a decision failed",
-          reportError,
-        );
-      }
-    }
-    throw error;
-  }
+  const result = await experimental_decide({
+    ...settings,
+    model,
+    state,
+    questions,
+  });
   const usage = toUsage(result.usage);
-  await report(usage, result.response.modelId, result.providerMetadata);
+  await opts.usageHandler?.(ctx, {
+    userId,
+    threadId,
+    agentName: opts.agentName,
+    model: result.response.modelId,
+    provider,
+    usage,
+    providerMetadata: result.providerMetadata,
+    promptMessageId,
+  });
   const decisionId = await store(
     {
       model: result.response.modelId,

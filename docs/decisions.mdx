@@ -157,15 +157,11 @@ counts from when the model made it. The cache never reads other threads.
 The agent's `usageHandler` gets each decision's usage. A cache hit reports none,
 though a vector search for the context still reports its embedding usage.
 Decision models often report input tokens alone, so `totalTokens` is the input
-tokens then, and [rate limits](./rate-limiting.mdx) count them. When `model` is
-a model object, such as `convexGateway.decisionModel(...)`, a call the model
-answered still reports its usage when the AI SDK then throws, as it does for a
-refusal. A model ID string doesn't: the AI SDK doesn't export how it resolves
-one, so there is no model to record.
+tokens then, and [rate limits](./rate-limiting.mdx) count them. A refusal
+currently reports no usage: https://github.com/vercel/ai/issues/25546.
 
 Errors reach the caller unchanged, such as a provider with no endpoint for a
-zero-data-retention policy, even when the `usageHandler` throws while reporting
-them.
+zero-data-retention policy.
 
 ## Recipes
 
