@@ -283,6 +283,47 @@ describe("DeltaStreamer", () => {
     });
   });
 
+  test.each(["fail", "abortSignal", "source throws"] as const)(
+    "%s keeps the parts held for the next delta (#479)",
+    async (end) => {
+      await t.action(async (ctx) => {
+        const stop = new AbortController();
+        const streamer = new DeltaStreamer<string>(
+          components.agent,
+          ctx,
+          {
+            ...defaultTestOptions,
+            throttleMs: 60_000,
+            abortSignal: stop.signal,
+          },
+          { ...testMetadata, format: undefined, threadId },
+        );
+        const source = {
+          async *[Symbol.asyncIterator]() {
+            yield "A partial ";
+            yield "answer";
+            if (end === "source throws") throw new Error("provider failed");
+            if (end === "abortSignal") stop.abort();
+            else await streamer.fail("provider failed");
+          },
+        } as unknown as Parameters<typeof streamer.consumeStream>[0];
+        await streamer.consumeStream(source).catch(() => {});
+        const [stream] = await ctx.runQuery(components.agent.streams.list, {
+          threadId,
+          statuses: ["aborted"],
+        });
+        const deltas = await ctx.runQuery(components.agent.streams.listDeltas, {
+          threadId,
+          cursors: [{ streamId: stream.streamId, cursor: 0 }],
+        });
+        expect(deltas.flatMap((d) => d.parts)).toEqual([
+          "A partial ",
+          "answer",
+        ]);
+      });
+    },
+  );
+
   test("preserves the public throwing behavior after an existing stream aborts", async () => {
     await t.action(async (ctx) => {
       const streamer = new DeltaStreamer<string>(
