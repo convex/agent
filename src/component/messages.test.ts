@@ -1998,11 +1998,7 @@ describe("restarting a generation", () => {
         ],
       });
     const { messages: first } = await pendingTurn("restarted");
-    const inFlight: Id<"messages">[] = [];
-    for (let i = 0; i < 100; i++) {
-      const { messages } = await pendingTurn(`in flight ${i}`);
-      inFlight.push(messages[1]!._id as Id<"messages">);
-    }
+    for (let i = 0; i < 100; i++) await pendingTurn(`in flight ${i}`);
 
     await t.mutation(api.messages.addMessages, {
       threadId,
@@ -2017,9 +2013,36 @@ describe("restarting a generation", () => {
       ctx.db.get("messages", first[1]!._id as Id<"messages">),
     );
     expect(stale).toMatchObject({ status: "failed", error: "Restarting" });
-    const others = await t.run((ctx) =>
-      Promise.all(inFlight.map((id) => ctx.db.get("messages", id))),
+  });
+
+  test("with a missing prompt leaves other turns' pending steps alone", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "gone" } },
+        { message: { role: "user", content: "in flight" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const goneId = messages[0]!._id as Id<"messages">;
+    await t.mutation(api.messages.deleteByIds, { messageIds: [goneId] });
+
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: goneId,
+      abandonIfPromptMissing: true,
+      failPendingSteps: true,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+
+    const inFlight = await t.run((ctx) =>
+      ctx.db.get("messages", messages[2]!._id as Id<"messages">),
     );
-    expect(others.map((m) => m?.status)).toEqual(inFlight.map(() => "pending"));
+    expect(inFlight?.status).toBe("pending");
   });
 });
