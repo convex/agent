@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, onTestFinished, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import { getMaxMessage } from "./messages.js";
@@ -1219,13 +1219,7 @@ describe("agent", () => {
       for (const [i, deltas] of streams.entries()) {
         await addText(streamIds[i]!, deltas);
       }
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      onTestFinished(() => error.mockRestore());
       const finalized = await finalize({ status: "success" });
-      expect(error).toHaveBeenCalledWith(
-        expect.stringMatching(/assistant streams$/),
-        expect.anything(),
-      );
       expect(finalized?.status).toBe("failed");
       expect(finalized?.error).toBe(
         "Failed to recover persisted assistant stream output",

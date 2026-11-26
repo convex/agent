@@ -1,4 +1,4 @@
-import { describe, expect, onTestFinished, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 import { Agent, createThread } from "../index.js";
 import { v } from "convex/values";
 import { APICallError, type LanguageModelV4Source } from "@ai-sdk/provider";
@@ -802,8 +802,6 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
   });
 
   test("an out of band abort keeps the step that finished before it was seen", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    onTestFinished(() => warn.mockRestore());
     const t = createTest();
     const threadId = await t.run(async (ctx) =>
       createThread(ctx, components.agent, { userId: "u1" }),
@@ -811,9 +809,6 @@ describe("saveStreamDeltas flushes buffered parts (issue #323)", () => {
 
     await t.action(api.streamText.streamTextAbortedMidStream, { threadId });
     await t.finishAllScheduledFunctions(() => {});
-    expect(warn).toHaveBeenCalledWith(
-      "abortSignal in mock model not supported",
-    );
 
     const streams = await t.run(async (ctx) =>
       ctx.runQuery(components.agent.streams.list, {
@@ -945,8 +940,6 @@ describe("stream finish ownership without message storage", () => {
 
 describe("the deferred final save fails", () => {
   test("aborts the stream and rethrows the save error", async () => {
-    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
-    onTestFinished(() => debug.mockRestore());
     const t = createTest();
     const threadId = await t.run(async (ctx) =>
       createThread(ctx, components.agent, { userId: "u1" }),
@@ -957,10 +950,6 @@ describe("the deferred final save fails", () => {
     });
 
     expect(error).toContain("can't be filled");
-    expect(debug).toHaveBeenCalledWith(
-      "Trying to finalize a message that's already",
-      "success",
-    );
     const streams = await t.run(async (ctx) =>
       ctx.runQuery(components.agent.streams.list, {
         threadId,

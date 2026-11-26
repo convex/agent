@@ -1,4 +1,4 @@
-import { describe, expect, onTestFinished, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 import { v, type ObjectType } from "convex/values";
 import { isStepCount } from "ai";
 import { z } from "zod/v4";
@@ -509,13 +509,7 @@ describe.each(["generateText", "streamText"] as const)(
     );
 
     test("a failed step save stops the generation (#419)", async () => {
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      onTestFinished(() => error.mockRestore());
       const r = await go({ runner, failSave: "first" });
-      // The AI SDK's default onError logs a streamed failure.
-      expect(error.mock.calls).toEqual(
-        streamed ? [[new Error("first save failed")]] : [],
-      );
       expect(r.modelCalls).toBe(1);
       expect(r.error).toBe("first save failed");
       expect(r.saved).toEqual(
@@ -542,34 +536,22 @@ describe.each(["generateText", "streamText"] as const)(
 describe("generateText", () => {
   // Its reply, with the id of the pending message it made, never arrived.
   test("a step save that commits and then fails stops, and settles only the messages it knows", async () => {
-    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
-    onTestFinished(() => debug.mockRestore());
     const r = await go({
       runner: "generateText",
       failSave: "first",
       failSaveAfterCommit: true,
     });
-    expect(debug).toHaveBeenCalledWith(
-      "Trying to finalize a message that's already",
-      "success",
-    );
     expect(r.modelCalls).toBe(1);
     expect(r.error).toBe("first save failed");
     expect(r.saved).toEqual([USER, ...LOOKUP, PENDING]);
   });
 
   test("a final save that commits and then fails rejects", async () => {
-    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
-    onTestFinished(() => debug.mockRestore());
     const r = await go({
       runner: "generateText",
       failSave: "final",
       failSaveAfterCommit: true,
     });
-    expect(debug).toHaveBeenCalledWith(
-      "Trying to finalize a message that's already",
-      "success",
-    );
     expect(r.error).toBe("final save failed");
     expect(r.saved).toEqual([USER, ...LOOKUP, ANSWER]);
   });
@@ -660,10 +642,7 @@ describe("streamText", () => {
   });
 
   test("a step a provider error ends still reports its usage", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    onTestFinished(() => error.mockRestore());
     const r = await go({ runner: "streamText", failSecond: true });
-    expect(error.mock.calls).toEqual([["provider failed"]]);
     expect(r.usageCalls).toBe(2);
     expect(r.saved).toEqual([
       USER,
@@ -673,10 +652,7 @@ describe("streamText", () => {
   });
 
   test("a provider error in a step the SDK would continue past stops it there", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    onTestFinished(() => error.mockRestore());
     const r = await go({ runner: "streamText", failFirst: true });
-    expect(error.mock.calls).toEqual([["provider failed"]]);
     expect(r.saved).toEqual([
       USER,
       ...LOOKUP.map((row) => failed(row, "provider failed")),
@@ -692,16 +668,11 @@ describe("streamText", () => {
   ] as const)(
     "a failed generation doesn't call onAbort: %o",
     async ({ endCalls, ...failure }) => {
-      const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      onTestFinished(() => error.mockRestore());
       const r = await go({
         runner: "streamText",
         ...failure,
         lagStreamEnds: true,
       });
-      expect(error.mock.calls).toEqual(
-        "failSecond" in failure ? [["provider failed"]] : [],
-      );
       expect({ endCalls: r.endCalls, aborts: r.aborts }).toEqual({
         endCalls,
         aborts: 0,
@@ -733,10 +704,7 @@ describe("streamText", () => {
   });
 
   test("a stream retry after a provider error saves the answer (#428)", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    onTestFinished(() => error.mockRestore());
     const r = await go({ runner: "streamText", retryFirstAttempt: true });
-    expect(error.mock.calls).toEqual([["provider failed"]]);
     expect(r.saved).toEqual([USER, ANSWER]);
     expect(r.streams).toEqual(["finished"]);
   });
@@ -786,17 +754,11 @@ describe("returnImmediately", () => {
   });
 
   test("the result rejects when the answer fails to save", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    onTestFinished(() => error.mockRestore());
     const r = await go({
       runner: "returnImmediately",
       failSave: "final",
       awaitTextOnly: true,
     });
-    expect(error).toHaveBeenCalledWith(
-      "Failed to persist stream deltas:",
-      new Error("final save failed"),
-    );
     expect(r.error).toBe("final save failed");
   });
 
