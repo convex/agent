@@ -1990,6 +1990,30 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     expect(left).toEqual({ thread: null, messages: [] });
   });
 
+  test("an app's save into a thread mid-deletion throws", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "earlier" } },
+        { message: { role: "user", content: "hello" } },
+      ],
+    });
+    await t.mutation(internal.threads._deleteThreadStep, {
+      threadId,
+      limit: 1,
+    });
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [{ message: { role: "user", content: "late" } }],
+      }),
+    ).rejects.toThrow(`Thread ${threadId} is being deleted`);
+  });
+
   test("still throws for a caller that did not opt in", async () => {
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, { userId: "u" });
