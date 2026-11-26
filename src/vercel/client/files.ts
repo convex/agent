@@ -45,6 +45,7 @@ export async function storeFile(
 ): Promise<{
   file: File;
   filePart: FilePart;
+  /** @deprecated Use `filePart`, which has the image `mediaType`. */
   imagePart: ImagePart | undefined;
 }> {
   if (!("runAction" in ctx) || !("storage" in ctx)) {
@@ -140,13 +141,12 @@ export async function storeFile(
 
 /**
  * Get file metadata from the component.
- * This also returns filePart (and imagePart if the file is an image),
- * which are useful to construct a ModelMessage like
+ * This also returns filePart, which is useful to construct a ModelMessage like
  * ```ts
- * const { filePart, imagePart } = await getFile(ctx, components.agent, fileId);
+ * const { filePart } = await getFile(ctx, components.agent, fileId);
  * const message: UserMessage = {
  *   role: "user",
- *   content: [imagePart ?? filePart],
+ *   content: [filePart],
  * };
  * ```
  * @param ctx A ctx object from an action or query.
@@ -185,7 +185,11 @@ function getParts(
   url: string,
   mediaType: string,
   filename: string | undefined,
-): { filePart: FilePart; imagePart: ImagePart | undefined } {
+): {
+  filePart: FilePart;
+  /** @deprecated Use `filePart`, which has the image `mediaType`. */
+  imagePart: ImagePart | undefined;
+} {
   const filePart: FilePart = {
     type: "file",
     data: new URL(url),

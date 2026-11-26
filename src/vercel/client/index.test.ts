@@ -9,7 +9,7 @@ import {
   type MessageDoc,
 } from "../index.js";
 import { v } from "convex/values";
-import { stepCountIs } from "ai";
+import { Output, stepCountIs } from "ai";
 import { app, components } from "./setup.test.js";
 import { z } from "zod/v4";
 import { MockLanguageModel, mockModel } from "./mockModel.js";
@@ -159,6 +159,12 @@ const generateObjectAction = agent.asObjectAction({
 });
 const generateTextAction = agent.asTextAction({});
 const streamTextAction = agent.asTextAction({ stream: true });
+const helloOutput = Output.object({ schema: z.object({ hello: z.string() }) });
+const generateOutputAction = agent.asTextAction({ output: helloOutput });
+const streamOutputAction = agent.asTextAction({
+  output: helloOutput,
+  stream: true,
+});
 const saveMessageMutation = agent.asSaveMessagesMutation();
 
 const createAndGenerate = app.action({
@@ -251,6 +257,8 @@ const { api, internal, createTest } = app.defineModules({
     generateObjectAction,
     generateTextAction,
     streamTextAction,
+    generateOutputAction,
+    streamOutputAction,
     saveMessageMutation,
     createAndGenerate,
     continueThreadAction,
@@ -545,6 +553,22 @@ describe("Agent-generated mutations/actions/queries", () => {
     });
     expect(objResult.object).toBeDefined();
   });
+
+  test.each(["generateOutputAction", "streamOutputAction"] as const)(
+    "asTextAction with an output returns it: %s",
+    async (action) => {
+      const t = createTest();
+      const threadId = await t.run(async (ctx) =>
+        createThread(ctx, components.agent, { userId: "8" }),
+      );
+      const result = await t.action(internal.index[action], {
+        threadId,
+        prompt: "Give object",
+      });
+      const hello: string = result.output.hello;
+      expect(hello).toBe("world");
+    },
+  );
 
   test("asTextAction maps its system wire field to AI SDK instructions", async () => {
     const t = createTest();

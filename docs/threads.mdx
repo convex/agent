@@ -45,9 +45,8 @@ but for now it's a convenience that helps organize threads in the
 ## Generating a message in a thread
 
 You can generate a message in a thread via the agent functions:
-`agent.generateText`, `agent.generateObject`, `agent.streamText`, and
-`agent.streamObject`. Any agent can generate a message in a thread created by
-any other agent.
+`agent.generateText` and `agent.streamText`. Any agent can generate a message in
+a thread created by any other agent.
 
 ```ts
 const agent = new Agent(components.agent, { languageModel, instructions });
@@ -86,10 +85,6 @@ is a `Thread` object, which has convenience methods that are thread-specific:
   `agent.generateText(ctx, { threadId }, { prompt, ... })`
 - `thread.streamText({ prompt, ... })` - equivalent to
   `agent.streamText(ctx, { threadId }, { prompt, ... })`
-- `thread.generateObject({ prompt, ... })` - equivalent to
-  `agent.generateObject(ctx, { threadId }, { prompt, ... })`
-- `thread.streamObject({ prompt, ... })` - equivalent to
-  `agent.streamObject(ctx, { threadId }, { prompt, ... })`
 
 See [Messages docs](./messages.mdx) for more details on generating messages.
 
