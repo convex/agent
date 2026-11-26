@@ -93,6 +93,42 @@ describe("streams", () => {
     ).resolves.toEqual([]);
   });
 
+  test("listDeltas never reads deltas of another thread's or a deleted stream", async () => {
+    const t = convexTest({
+      schema,
+      modules,
+      transactionLimits: { bytesRead: 256 * 1024 },
+    });
+    const foreign = await seedStream(t);
+    const deleted = await seedStream(t);
+    const otherThread = await t.mutation(api.threads.createThread, {});
+    const threadId = otherThread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    // Either stream's deltas alone are past the read limit.
+    await insertDeltas(t, foreign.streamId, 0, 10, 40_000);
+    await insertDeltas(t, deleted.streamId, 0, 10, 40_000);
+    await t.run((ctx) => ctx.db.delete("streamingMessages", deleted.streamId));
+    await insertDeltas(t, streamId, 0, 2, 10);
+
+    const deltas = await t.query(api.streams.listDeltas, {
+      threadId,
+      cursors: [
+        { streamId: foreign.streamId, cursor: 0 },
+        { streamId: deleted.streamId, cursor: 0 },
+        { streamId, cursor: 0 },
+      ],
+    });
+    expect(deltas.map((d) => [d.streamId, d.start])).toEqual([
+      [streamId, 0],
+      [streamId, 1],
+    ]);
+  });
+
   test("listDeltas skips deleted streams even if deltas remain", async () => {
     const t = initConvexTest();
     const { threadId, streamId } = await seedStream(t);
