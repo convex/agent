@@ -11,6 +11,9 @@ import {
   vProviderOptions,
   vProviderMetadata,
   vReasoningDetails,
+  vDecisionAnswer,
+  vDecisionQuestion,
+  vDecisionSettings,
 } from "../validators.js";
 import { typedV } from "convex-helpers/validators";
 import vectorTables, { vVectorId } from "./vector/tables.js";
@@ -166,6 +169,53 @@ export const schema = defineSchema({
   })
     .index("hash", ["hash"])
     .index("refcount_lastTouchedAt", ["refcount", "lastTouchedAt"]),
+
+  // One experimental_decide call, and what its model saw.
+  decisions: defineTable({
+    threadId: v.id("threads"),
+    agentName: v.optional(v.string()),
+    promptMessageId: v.optional(v.id("messages")),
+    order: v.optional(v.number()),
+    contextMessageIds: v.array(v.id("messages")),
+    // JSON text, as the caller's keys needn't be valid Convex field names.
+    // File bytes are replaced by their SHA-256.
+    state: v.optional(v.string()),
+    // Of the context, then the caller's state, as the model saw them.
+    stateHash: v.string(),
+    // Of the state hash, requested model, provider and settings: what the cache
+    // matches.
+    cacheKey: v.string(),
+    questions: v.record(v.string(), vDecisionQuestion),
+    requestedModel: v.string(),
+    model: v.string(),
+    provider: v.string(),
+    settings: v.optional(vDecisionSettings),
+    usage: v.optional(vUsage),
+    providerMetadata: v.optional(vProviderMetadata),
+  })
+    .index("threadId", ["threadId"])
+    .index("cacheKey_threadId", ["cacheKey", "threadId"]),
+
+  // A question's identity is its ID. definitionHash is its version, and
+  // shapeHash what types its answer: the type, a choice's option keys and a
+  // score's number of levels.
+  decisionAnswers: defineTable({
+    decisionId: v.id("decisions"),
+    threadId: v.id("threads"),
+    questionId: v.string(),
+    definitionHash: v.string(),
+    shapeHash: v.string(),
+    answer: vDecisionAnswer,
+    correction: v.optional(
+      v.object({ answer: vDecisionAnswer, by: v.optional(v.string()) }),
+    ),
+  })
+    .index("decisionId_questionId", ["decisionId", "questionId"])
+    .index("threadId_questionId_shapeHash", [
+      "threadId",
+      "questionId",
+      "shapeHash",
+    ]),
   ...vectorTables,
   // To authenticate playground usage
   // Delete a key to invalidate it

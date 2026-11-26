@@ -17,6 +17,7 @@ import {
   query,
 } from "./_generated/server.js";
 import {
+  deleteDecisionsPage,
   deleteMessage,
   reportSavedMessages,
   vOnSaveMessages,
@@ -307,7 +308,11 @@ async function deletePageForThreadIdHandler(
     args.onSaveMessages,
     messages.page.map((doc) => ({ kind: "delete", doc })),
   );
-  if (messages.isDone) {
+  let isDone = messages.isDone;
+  if (isDone) {
+    isDone = await deleteDecisionsPage(ctx, args.threadId, args.limit);
+  }
+  if (isDone) {
     const thread = await ctx.db.get("threads", args.threadId);
     if (thread) {
       await ctx.db.delete("threads", args.threadId);
@@ -315,6 +320,6 @@ async function deletePageForThreadIdHandler(
   }
   return {
     cursor: messages.continueCursor,
-    isDone: messages.isDone,
+    isDone,
   };
 }

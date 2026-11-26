@@ -121,6 +121,12 @@ import type {
 } from "./client/types.js";
 import { streamText } from "./client/streamText.js";
 import type { ToolCtx } from "./client/createTool.js";
+import {
+  decide,
+  type DecideArgs,
+  type DecideResult,
+  type DecisionQuestions,
+} from "./client/decide.js";
 import { errorToString, hasSuccessfulToolCall } from "./client/utils.js";
 
 export { isStepCount, stepCountIs } from "ai";
@@ -142,6 +148,7 @@ export {
   vAssistantMessage,
   vContent,
   vContextOptions,
+  vDecisionDoc,
   vMessage,
   vMessageDoc,
   vOnSaveMessagesArgs,
@@ -190,6 +197,11 @@ export {
   embedMany,
 } from "./client/search.js";
 export { startGeneration } from "./client/start.js";
+export {
+  listDecisions as experimental_listDecisions,
+  correctDecision as experimental_correctDecision,
+  type DecisionDoc,
+} from "./client/decide.js";
 export {
   DEFAULT_STREAMING_OPTIONS,
   DeltaStreamer,
@@ -978,6 +990,26 @@ export class Agent<
     },
   ): Promise<SyncStreamsReturnValue | undefined> {
     return syncStreams(ctx, this.component, args);
+  }
+
+  /**
+   * Like `experimental_decide` from the "ai" package, over the thread's
+   * context as generateText builds it, followed by `state`. With a thread,
+   * the decision is stored in it; `prompt` and `messages` are context only.
+   * Experimental: may change in patch releases.
+   */
+  async experimental_decide<const QUESTIONS extends DecisionQuestions>(
+    ctx: ActionCtx & CustomCtx,
+    threadOpts: { userId?: string | null; threadId?: string },
+    decideArgs: DecideArgs<QUESTIONS>,
+    options?: Options,
+  ): Promise<DecideResult<QUESTIONS>> {
+    return decide(ctx, this.component, decideArgs, {
+      ...this.options,
+      ...threadOpts,
+      ...options,
+      agentName: this.options.name,
+    });
   }
 
   /**

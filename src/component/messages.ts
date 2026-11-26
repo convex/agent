@@ -5,7 +5,7 @@ import {
   type FunctionHandle,
   type WithoutSystemFields,
 } from "convex/server";
-import { ConvexError, type ObjectType } from "convex/values";
+import { ConvexError, getDocumentSize, type ObjectType } from "convex/values";
 import {
   DEFAULT_MESSAGE_RANGE,
   DEFAULT_RECENT_MESSAGES,
@@ -51,6 +51,7 @@ import {
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
   abortById,
+  MAX_BYTES_READ_PER_DELETE,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -120,6 +121,46 @@ export async function deleteMessage(
   if (messageDoc.fileIds) {
     await changeRefcount(ctx, messageDoc.fileIds, []);
   }
+}
+
+// Decisions and their answers are deleted a page at a time, bounded by rows and
+// bytes read rather than by decisions, so a page fits in any transaction that
+// called it however large the decisions are.
+const MAX_DECISION_ROWS_PER_DELETE = 1000;
+
+/**
+ * Deletes a page of the thread's decisions and answers, at most `limit` rows.
+ * True once none are left.
+ */
+export async function deleteDecisionsPage(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+  limit = MAX_DECISION_ROWS_PER_DELETE,
+): Promise<boolean> {
+  let rows = limit;
+  let bytes = MAX_BYTES_READ_PER_DELETE;
+  while (rows > 0 && bytes > 0) {
+    const decision = await ctx.db
+      .query("decisions")
+      .withIndex("threadId", (q) => q.eq("threadId", threadId))
+      .first();
+    if (!decision) return true;
+    const answers = await ctx.db
+      .query("decisionAnswers")
+      .withIndex("decisionId_questionId", (q) =>
+        q.eq("decisionId", decision._id),
+      )
+      .paginate({ numItems: rows, maximumBytesRead: bytes, cursor: null });
+    for (const row of answers.page) {
+      await ctx.db.delete("decisionAnswers", row._id);
+      bytes -= getDocumentSize(row);
+    }
+    rows -= answers.page.length + 1;
+    bytes -= getDocumentSize(decision);
+    if (!answers.isDone) return false;
+    await ctx.db.delete("decisions", decision._id);
+  }
+  return false;
 }
 
 /**

@@ -13,7 +13,7 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
+import { deleteDecisionsPage, deleteMessage } from "./messages.js";
 import {
   deleteStreamsPageForThreadId,
   deletionCursor,
@@ -249,7 +249,9 @@ async function deletePageForUserId(
     deltaCursor,
   });
 
-  if (streamResult.isDone) {
+  const decisionsDone =
+    streamResult.isDone && (await deleteDecisionsPage(ctx, threadInProgress!));
+  if (decisionsDone) {
     // Streams are done, delete the thread and reset for next thread
     await ctx.db.delete("threads", threadInProgress);
     threadInProgress = null;
