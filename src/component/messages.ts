@@ -318,32 +318,16 @@ async function addMessagesHandler(
   }
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
-    const pendingMessages = promptMessage
-      ? (
-          await Promise.all(
-            [true, false].map((tool) =>
-              ctx.db
-                .query("messages")
-                .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-                  q
-                    .eq("threadId", threadId)
-                    .eq("status", "pending")
-                    .eq("tool", tool)
-                    .eq("order", promptMessage.order),
-                )
-                .take(100),
-            ),
-          )
-        ).flat()
-      : await ctx.db
-          .query("messages")
-          .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-            q.eq("threadId", threadId).eq("status", "pending"),
-          )
-          .order("desc")
-          .take(100);
+    const pendingMessages = await ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+        q.eq("threadId", threadId).eq("status", "pending"),
+      )
+      .order("desc")
+      .take(100);
     await Promise.all(
       pendingMessages
+        .filter((m) => !promptMessage || m.order === promptMessage.order)
         .filter((m) => !pendingMessageId || m._id !== pendingMessageId)
         .map(async (m) => {
           if (m.embeddingId) {

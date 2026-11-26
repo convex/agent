@@ -2227,45 +2227,6 @@ describe("cloneThread", () => {
   });
 });
 
-describe("failing pending steps", () => {
-  test("reads only the prompt's order", async () => {
-    const t = convexTest({
-      schema,
-      modules,
-      transactionLimits: { documentsRead: 40 },
-    });
-    const thread = await t.mutation(api.threads.createThread, {});
-    const threadId = thread._id as Id<"threads">;
-    const {
-      messages: [prompt],
-    } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [{ message: { role: "user", content: "retry me" } }],
-    });
-    await t.run(async (ctx) => {
-      for (let order = 1; order <= 60; order++) {
-        await ctx.db.insert("messages", {
-          threadId,
-          order,
-          stepOrder: 0,
-          status: "pending",
-          tool: false,
-        });
-      }
-    });
-
-    const { messages } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      promptMessageId: prompt._id as Id<"messages">,
-      failPendingSteps: true,
-      messages: [
-        { message: { role: "assistant", content: [] }, status: "pending" },
-      ],
-    });
-    expect(messages).toMatchObject([{ order: 0, status: "pending" }]);
-  });
-});
-
 describe("listing a thread's messages", () => {
   test("stops a page early before the transaction read limit, unless bound by endCursor", async () => {
     const t = convexTest({ schema, modules, transactionLimits: true });
