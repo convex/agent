@@ -611,8 +611,9 @@ export class DeltaStreamer<T> {
       // A #sendDelta racing the inline save on the returnImmediately path
       // will get `success === false` because the stream row is already
       // "finished". That's a benign late-write miss, not a failure —
-      // don't convert it into an abort.
-      if (this.#stoppedAccepting) {
+      // don't convert it into an abort. An abort writing its held parts
+      // stops accepting too, but there a refusal means the row ended elsewhere.
+      if (this.#stoppedAccepting && !this.#abortPromise) {
         return;
       }
       await this.#abortDelta("async abort");

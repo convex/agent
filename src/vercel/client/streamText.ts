@@ -377,6 +377,7 @@ export async function streamText<
     if (abortFailure) throw abortFailure.error;
     if (streamError) {
       await failGeneration(errorToString(streamError.error), onAbortOnce);
+      throw streamError.error;
     }
     await endGeneration();
   });
@@ -386,10 +387,7 @@ export async function streamText<
       console.error("Failed to persist stream deltas:", error);
     }
   });
-  if (willAwaitStream) {
-    await ended;
-    if (streamError) throw streamError.error;
-  }
+  if (willAwaitStream) await ended;
 
   const metadata: GenerationOutputMetadata = {
     promptMessageId,
