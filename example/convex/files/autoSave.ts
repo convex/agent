@@ -31,7 +31,7 @@ export const askAboutImage = action({
             content: [
               // You can pass the data in directly. It will automatically store
               // it in file storage and pass around the URL.
-              { type: "image", image, mediaType },
+              { type: "file", data: image, mediaType },
               { type: "text", text: prompt },
             ],
           },

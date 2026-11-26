@@ -115,6 +115,29 @@ describe("mapping", () => {
     expect(round).toEqual(message);
   });
 
+  test("stored images reach the model as image file parts", () => {
+    const bytes = new Uint8Array([1, 2]).buffer;
+    const message = toModelMessage({
+      role: "user",
+      content: [
+        {
+          type: "image",
+          image: "https://example.com/cat.png",
+          mediaType: "image/png",
+        },
+        { type: "image", image: bytes },
+      ],
+    });
+    expect(message.content).toEqual([
+      {
+        type: "file",
+        data: new URL("https://example.com/cat.png"),
+        mediaType: "image/png",
+      },
+      { type: "file", data: bytes, mediaType: "image" },
+    ]);
+  });
+
   test("tool output round-trips", async () => {
     const toolResult = {
       type: "tool-result" as const,

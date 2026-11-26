@@ -631,7 +631,7 @@ describe("mergeDeltas", () => {
         type: "tool-weather",
         toolCallId: "static-error",
         state: "output-error",
-        rawInput: { city: "Boston" },
+        input: { city: "Boston" },
         errorText: "Invalid weather request",
         providerExecuted: true,
         resultProviderMetadata: { openai: { result: "static" } },
@@ -648,7 +648,7 @@ describe("mergeDeltas", () => {
     ]);
   });
 
-  it("applyUIMessageChunksIncremental: tool-input-error sets rawInput and clears input for static tools", async () => {
+  it("applyUIMessageChunksIncremental: tool-input-error keeps a static tool's input", async () => {
     const streamMessage = {
       streamId: "s-tool-err",
       status: "streaming" as const,
@@ -697,10 +697,8 @@ describe("mergeDeltas", () => {
     expect((toolPart as { errorText?: string }).errorText).toBe(
       "validation failed",
     );
-    expect(toolPart?.input).toBeUndefined();
-    expect((toolPart as { rawInput?: unknown }).rawInput).toEqual({
-      bad: "args",
-    });
+    expect(toolPart?.input).toEqual({ bad: "args" });
+    expect(toolPart).not.toHaveProperty("rawInput");
     expect(toolPart).toMatchObject({
       providerExecuted: true,
       title: "My tool",

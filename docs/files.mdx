@@ -116,7 +116,7 @@ await thread.generateText({
     {
       role: "user",
       content: [
-        { type: "image", image: imageBytes, mediaType: "image/png" },
+        { type: "file", data: imageBytes, mediaType: "image/png" },
         { type: "text", text: "What is this image?" },
       ],
     },
@@ -158,7 +158,7 @@ await thread.generateText({
     {
       role: "user",
       content: [
-        { type: "image", image: url, mediaType: blob.type },
+        { type: "file", data: url, mediaType: blob.type },
         { type: "text", text: "What is this image?" },
       ],
     },
@@ -213,7 +213,7 @@ export const ask = internalAction({
         {
           role: "user",
           content: [
-            { type: "image", image, mediaType },
+            { type: "file", data: image, mediaType },
             { type: "text", text: prompt },
           ],
         },
