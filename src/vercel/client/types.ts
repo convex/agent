@@ -27,12 +27,14 @@ import type {
 } from "ai";
 
 import type {
+  FunctionReference_future,
   GenericActionCtx,
   GenericDataModel,
   WithoutSystemFields,
 } from "convex/server";
 import type {
   MessageDoc,
+  OnSaveMessagesArgs,
   ProviderMetadata,
   StreamDelta,
   StreamMessage,
@@ -171,6 +173,24 @@ export type Config = {
    * log the raw request body or response headers to a table, or logs.
    */
   rawRequestResponseHandler?: RawRequestResponseHandler;
+  /**
+   * An internal mutation to run after each save this Agent makes to a
+   * thread's messages: generations, saves, approvals, updates and deletions.
+   * Use `vOnSaveMessagesArgs` as its args. A report is atomic with its save:
+   * if the save commits, its report is scheduled; if the report can't be
+   * scheduled, the save doesn't commit, and fails like any other failure of
+   * that save. Each thread's report is its own scheduled function, so a save
+   * can report at most 1,000 threads; if the hook throws, its run fails like
+   * any scheduled function and isn't retried. Reports can arrive out of
+   * order: read messages by id for their current state. Writes made without
+   * this Agent, such as the standalone `saveMessage` or calls to the
+   * component, aren't reported.
+   */
+  onSaveMessages?: FunctionReference_future<
+    "mutation",
+    "internal",
+    OnSaveMessagesArgs
+  >;
   /**
    * @deprecated Reach out if you use this. Otherwise will be removed soon.
    * Default provider options to pass for the LLM calls.
