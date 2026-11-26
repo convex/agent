@@ -474,4 +474,82 @@ describe("users", () => {
 
     // Should complete successfully without errors
   });
+  test("a step saved during a user deletion doesn't outlive its thread", async () => {
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    // A full page of tool results, so the first page stops before the prompt.
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: Array.from({ length: 100 }, (_, i) => ({
+        message: {
+          role: "tool" as const,
+          content: [
+            {
+              type: "tool-result" as const,
+              toolCallId: `call${i}`,
+              toolName: "lookup",
+              output: { type: "text" as const, value: "ok" },
+            },
+          ],
+        },
+      })),
+    });
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const prompt = messages[0];
+
+    let step = await t.mutation(internal.users._deletePageForUserId, {
+      userId: "u",
+      messagesCursor: null,
+      threadsCursor: null,
+      threadInProgress: null,
+    });
+    expect(
+      await t.run(async (ctx) =>
+        ctx.db.get("messages", prompt._id as Id<"messages">),
+      ),
+    ).not.toBeNull();
+
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: prompt._id as Id<"messages">,
+      abandonIfPromptMissing: true,
+      messages: [
+        {
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "next",
+                toolName: "lookup",
+                input: {},
+              },
+            ],
+          },
+        },
+      ],
+    });
+    while (!step.isDone) {
+      const { isDone: _, ...next } = step;
+      step = await t.mutation(internal.users._deletePageForUserId, {
+        userId: "u",
+        ...next,
+      });
+    }
+
+    const left = await t.run(async (ctx) => ({
+      thread: await ctx.db.get("threads", threadId),
+      messages: await ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+          q.eq("threadId", threadId),
+        )
+        .collect(),
+    }));
+    expect(left).toEqual({ thread: null, messages: [] });
+  });
 });
