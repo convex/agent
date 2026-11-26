@@ -8,12 +8,17 @@ import type { vDecisionAnswer } from "./validators.js";
 
 const inUnitRange = (n: number) => n >= 0 && n <= 1;
 
+// A distribution has a probability for every option or level, as the AI SDK
+// requires of the model's answers.
 function isDistributionOver(
   keys: string[],
   probabilities: Record<string, number> | undefined,
 ) {
-  return Object.entries(probabilities ?? {}).every(
-    ([key, p]) => keys.includes(key) && inUnitRange(p),
+  if (!probabilities) return true;
+  const entries = Object.entries(probabilities);
+  return (
+    entries.length === keys.length &&
+    entries.every(([key, p]) => keys.includes(key) && inUnitRange(p))
   );
 }
 

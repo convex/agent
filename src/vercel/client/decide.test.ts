@@ -1022,6 +1022,11 @@ test("a correction must answer the question as it was asked", async () => {
           type: "box",
           box: { top: 0.8, bottom: 0.2, left: 0, right: 1 },
         }),
+        await correct("intent", {
+          type: "choice",
+          choice: "status",
+          probabilities: { status: 1 },
+        }),
         await correct("many", {
           type: "choice",
           choice: "o0",
@@ -1035,7 +1040,7 @@ test("a correction must answer the question as it was asked", async () => {
     };
   });
   expect(out.refused).toEqual(
-    Array(8).fill(expect.stringMatching(/isn't an answer to/)),
+    Array(9).fill(expect.stringMatching(/isn't an answer to/)),
   );
   expect(out.accepted).toBe("corrected");
   expect(out.corrections).toEqual({
