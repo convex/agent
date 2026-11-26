@@ -2037,7 +2037,16 @@ describe("listing a thread's messages", () => {
     expect(await read(null)).toEqual(newestFirst());
 
     const first = await list(null);
+    expect(first).toMatchObject({
+      pageStatus: "SplitRequired",
+      splitCursor: expect.any(String),
+    });
     await add(40);
+    expect(await list(null, first.continueCursor)).toMatchObject({
+      pageStatus: "SplitRequired",
+      splitCursor: expect.any(String),
+      continueCursor: first.continueCursor,
+    });
     expect([
       ...(await read(null, first.continueCursor)),
       ...(await read(first.continueCursor)),
