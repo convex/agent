@@ -124,7 +124,8 @@ test.each(["error", "throw", "abort"] as const)(
         .filter((p) => p.type === "text-delta")
         .map((p) => p.delta)
         .join("");
-      expect(seen).toMatch(/^A partial /);
+      // A throw drops the word the default chunking still held.
+      expect(seen).toBe(end === "throw" ? "A partial " : "A partial answer");
       expect(stream.status).toBe("aborted");
       expect(streamed).toBe(seen);
       expect((await s.rows()).at(-1)).toMatchObject({

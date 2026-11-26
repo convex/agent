@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { createThread } from "../../client/threads.js";
 import type { MutationCtx } from "../../client/types.js";
-import type { GenericSchema, SchemaDefinition } from "convex/server";
+import {
+  getFunctionAddress,
+  type GenericSchema,
+  type SchemaDefinition,
+} from "convex/server";
 import { streamText } from "ai";
 import { components, initConvexTest } from "./setup.test.js";
 import { mockModel } from "./mockModel.js";
@@ -323,6 +327,54 @@ describe("DeltaStreamer", () => {
       });
     },
   );
+
+  test("fail does not write the held parts after the write before them fails", async () => {
+    await t.action(async (ctx) => {
+      const addDelta = getFunctionAddress(
+        components.agent.streams.addDelta,
+      ).reference;
+      let failWrite!: () => void;
+      const writeFails = new Promise<void>((resolve) => (failWrite = resolve));
+      let writes = 0;
+      const failing = {
+        ...ctx,
+        runMutation: (async (reference, args) => {
+          if (
+            getFunctionAddress(reference).reference === addDelta &&
+            ++writes === 1
+          ) {
+            await writeFails;
+            throw new Error("delta failed");
+          }
+          return ctx.runMutation(reference, args);
+        }) as typeof ctx.runMutation,
+      };
+      const streamer = new DeltaStreamer<string>(
+        components.agent,
+        failing,
+        {
+          ...defaultTestOptions,
+          throttleMs: 60_000,
+          onAsyncAbort: async () => {},
+        },
+        { ...testMetadata, format: undefined, threadId },
+      );
+      await streamer.addParts(["A partial "]);
+      await streamer.addParts(["answer"]);
+      const failed = streamer.fail("provider failed");
+      failWrite();
+      await failed.catch(() => {});
+      const [stream] = await ctx.runQuery(components.agent.streams.list, {
+        threadId,
+        statuses: ["aborted"],
+      });
+      const deltas = await ctx.runQuery(components.agent.streams.listDeltas, {
+        threadId,
+        cursors: [{ streamId: stream.streamId, cursor: 0 }],
+      });
+      expect(deltas).toEqual([]);
+    });
+  });
 
   test("preserves the public throwing behavior after an existing stream aborts", async () => {
     await t.action(async (ctx) => {
