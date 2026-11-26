@@ -1990,6 +1990,50 @@ describe("abandoning a save whose prompt was deleted (issue #300)", () => {
     expect(left).toEqual({ thread: null, messages: [] });
   });
 
+  test("finalizing during a thread deletion doesn't outlive the thread", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hello" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const messageId = messages[1]._id as Id<"messages">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "next" }, status: "failed" },
+      ],
+    });
+
+    // The deletion's first page takes the later failed message, so a pending
+    // message failed now would land behind its cursor.
+    let step = await t.mutation(internal.threads._deleteThreadStep, {
+      threadId,
+      limit: 1,
+    });
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId,
+      result: { status: "failed", error: "Stopped" },
+    });
+    while (!step.isDone) {
+      step = await t.mutation(internal.threads._deleteThreadStep, step.next);
+    }
+
+    const left = await t.run(async (ctx) =>
+      ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+          q.eq("threadId", threadId),
+        )
+        .collect(),
+    );
+    expect(left).toEqual([]);
+  });
+
   test("an app's save into a thread mid-deletion throws", async () => {
     const t = initConvexTest();
     const thread = await t.mutation(api.threads.createThread, { userId: "u" });
