@@ -56,11 +56,11 @@ export async function storeFile(
         "Read more in the docs.",
     );
   }
-  if (sha256 && !/^[0-9a-f]{64}$/i.test(sha256)) {
+  if (sha256 !== undefined && !/^[0-9a-f]{64}$/i.test(sha256)) {
     throw new Error(`sha256 must be 64 hex characters, got "${sha256}"`);
   }
   const hash =
-    sha256?.toLowerCase() ||
+    sha256?.toLowerCase() ??
     Array.from(
       new Uint8Array(
         await crypto.subtle.digest("SHA-256", await blob.slice().arrayBuffer()),
@@ -92,7 +92,7 @@ export async function storeFile(
   // Storage takes the digest base64 encoded; file hashes are hex.
   const newStorageId = await ctx.storage.store(
     blob,
-    sha256
+    sha256 !== undefined
       ? {
           sha256: convertUint8ArrayToBase64(
             Uint8Array.from(hash.match(/../g)!, (byte) => parseInt(byte, 16)),

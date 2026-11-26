@@ -85,6 +85,9 @@ describe("storeFile", () => {
         sha256: sha256.slice(1),
       }),
     ).rejects.toThrow("sha256 must be 64 hex characters");
+    await expect(
+      storeFile(ctx, component, new Blob(["hello"]), { sha256: "" }),
+    ).rejects.toThrow("sha256 must be 64 hex characters");
     expect(storeOptions).toEqual([
       { sha256: "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" },
       { sha256: "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=" },
