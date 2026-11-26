@@ -552,4 +552,37 @@ describe("users", () => {
     }));
     expect(left).toEqual({ thread: null, messages: [] });
   });
+
+  test("a user deletion run again after a thread's messages went still removes its streams", async () => {
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "hello" } }],
+    });
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 1,
+      format: "UIMessageChunk",
+    });
+    // A deletion that stopped after its message pages, as a timed-out
+    // deleteAllForUserId does.
+    let step = await t.mutation(internal.threads._deleteThreadStep, {
+      threadId,
+    });
+    while (!step.next.messagesDone) {
+      step = await t.mutation(internal.threads._deleteThreadStep, step.next);
+    }
+
+    await t.action(api.users.deleteAllForUserId, { userId: "u" });
+
+    expect(
+      await t.run(async (ctx) => ({
+        thread: await ctx.db.get("threads", threadId),
+        stream: await ctx.db.get("streamingMessages", streamId),
+      })),
+    ).toEqual({ thread: null, stream: null });
+  });
 });
