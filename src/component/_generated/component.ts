@@ -1740,7 +1740,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       getMessagesByIds: FunctionReference<
         "query",
         "internal",
-        { messageIds: Array<string> },
+        { messageIds: Array<string>; threadId?: string },
         Array<null | {
           _creationTime: number;
           _id: string;
@@ -2452,7 +2452,11 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       getMessageSearchFields: FunctionReference<
         "query",
         "internal",
-        { messageId: string },
+        {
+          messageId: string;
+          searchAllMessagesForUserId?: string;
+          threadId?: string;
+        },
         { embedding?: Array<number>; embeddingModel?: string; text?: string },
         Name
       >;

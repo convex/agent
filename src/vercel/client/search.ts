@@ -186,6 +186,7 @@ export async function fetchRecentAndSearchMessages(
           (
             await ctx.runQuery(component.messages.getMessagesByIds, {
               messageIds: [targetMessageId],
+              threadId,
             })
           )[0]
         )?.order === oldest.order;
@@ -234,9 +235,12 @@ export async function fetchRecentAndSearchMessages(
         } else {
           const targetSearchFields = await ctx.runQuery(
             component.messages.getMessageSearchFields,
-            {
-              messageId: targetMessageId,
-            },
+            threadId
+              ? { messageId: targetMessageId, threadId }
+              : {
+                  messageId: targetMessageId,
+                  searchAllMessagesForUserId: args.userId,
+                },
           );
           text = targetSearchFields.text;
           embedding = targetSearchFields.embedding;
