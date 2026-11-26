@@ -699,6 +699,9 @@ export class DeltaStreamer<T> {
   }
 
   async #abortDelta(reason: string) {
+    // Nothing is written after a failed write, even by an abort draining the
+    // parts it holds: the failed range would be a gap in the stream.
+    this.abortController.abort();
     let callbackFailure: { error: unknown } | undefined;
     try {
       await this.config.onAsyncAbort(reason);
