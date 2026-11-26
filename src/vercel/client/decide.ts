@@ -510,8 +510,9 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
       providerMetadata,
       promptMessageId,
     });
-  // The AI SDK doesn't export how it resolves a model ID string, so only a model
-  // object can be wrapped.
+  // A refusal reports no usage and the AI SDK doesn't export how it resolves a
+  // model ID string, so only a model object can be wrapped:
+  // https://github.com/vercel/ai/issues/25546
   const recording =
     typeof model === "string" ? undefined : recordingResults(model);
   let result: Experimental_DecisionResult<QUESTIONS>;
