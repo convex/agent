@@ -1983,3 +1983,35 @@ describe("cloneThread", () => {
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
   });
 });
+
+describe("restarting a generation", () => {
+  test("fails its prompt's pending steps however many other turns are pending", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const pendingTurn = (text: string) =>
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [
+          { message: { role: "user", content: text } },
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+      });
+    const { messages: first } = await pendingTurn("restarted");
+    for (let i = 0; i < 100; i++) await pendingTurn(`in flight ${i}`);
+
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: first[0]!._id as Id<"messages">,
+      failPendingSteps: true,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+
+    const stale = await t.run((ctx) =>
+      ctx.db.get("messages", first[1]!._id as Id<"messages">),
+    );
+    expect(stale).toMatchObject({ status: "failed", error: "Restarting" });
+  });
+});
