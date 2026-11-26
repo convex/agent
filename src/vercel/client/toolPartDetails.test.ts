@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import type { LanguageModelV4Content } from "@ai-sdk/provider";
 import {
   dynamicTool,
+  generateText,
   readUIMessageStream,
   stepCountIs,
   tool,
@@ -187,6 +188,43 @@ describe("tool part details after reload", () => {
     expect(pages.flatMap((page) => Object.values(page))).toContainEqual({
       type: "dynamic-tool",
       toolName: "ask",
+      state: "output-available",
+    });
+  });
+
+  test("a step saved with per-call tools reloads as their part", async () => {
+    const t = initConvexTest();
+    const threadId = await t.action(async (ctx) => {
+      const threadId = await createThread(ctx, components.agent, {});
+      const agent = new Agent(components.agent, {
+        name: "details",
+        tools,
+        languageModel: mockModel(),
+      });
+      const { messageId: promptMessageId } = await agent.saveMessage(ctx, {
+        threadId,
+        prompt: "Find Paris",
+        skipEmbeddings: true,
+      });
+      const perCall = {
+        lookup: tool({ inputSchema: city, execute: async () => "found" }),
+      };
+      const { steps } = await generateText({
+        model: mockModel({ contentSteps: [[call("c-lookup", "lookup")]] }),
+        tools: perCall,
+        prompt: "Find Paris",
+      });
+      await agent.saveStep(ctx, {
+        threadId,
+        promptMessageId,
+        step: steps[0],
+        tools: perCall,
+      });
+      return threadId;
+    });
+    const [reloaded] = await listed(t, threadId);
+    expect(reloaded["c-lookup"]).toStrictEqual({
+      type: "tool-lookup",
       state: "output-available",
     });
   });
