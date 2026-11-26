@@ -376,7 +376,7 @@ describe("DeltaStreamer", () => {
 
     expect(runMutation).toHaveBeenNthCalledWith(
       2,
-      components.agent.streams.abort,
+      components.agent.streams.abortIfPresent,
       { streamId: "stream-1", reason: "abortSignal" },
     );
   });
@@ -419,7 +419,7 @@ describe("DeltaStreamer", () => {
     await expect(consuming).rejects.toBe(sourceError);
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abort,
+      components.agent.streams.abortIfPresent,
       { streamId: "stream-1", reason: "abortSignal" },
     );
   });
@@ -452,7 +452,7 @@ describe("DeltaStreamer", () => {
     expect(abortReason).toBe("provider_disconnected: Provider dropped");
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abort,
+      components.agent.streams.abortIfPresent,
       {
         streamId: "stream-1",
         reason: "provider_disconnected: Provider dropped",
@@ -483,7 +483,7 @@ describe("DeltaStreamer", () => {
     await expect(streamer.finish()).resolves.toBeUndefined();
     expect(runMutation).toHaveBeenNthCalledWith(
       2,
-      components.agent.streams.abort,
+      components.agent.streams.abortIfPresent,
       { streamId: "stream-1", reason: "storage failed" },
     );
   });
@@ -526,7 +526,7 @@ describe("DeltaStreamer", () => {
 
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abort,
+      components.agent.streams.abortIfPresent,
       { streamId: "stream-1", reason: "delta failed" },
     );
   });
@@ -561,7 +561,7 @@ describe("DeltaStreamer", () => {
     await expect(failing).rejects.toBe(pendingMessageFailure);
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
-      components.agent.streams.abort,
+      components.agent.streams.abortIfPresent,
       { streamId: "stream-1", reason: "external abort" },
     );
   });

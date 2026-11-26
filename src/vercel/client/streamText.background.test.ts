@@ -22,7 +22,7 @@ test("returnImmediately observes a failed abort cleanup", async () => {
   const firstDelta = new Promise<void>((resolve) => {
     firstDeltaWritten = resolve;
   });
-  const abortRef = getFunctionAddress(components.agent.streams.abort);
+  const abortRef = getFunctionAddress(components.agent.streams.abortIfPresent);
   const deltaRef = getFunctionAddress(components.agent.streams.addDelta);
   const agent = new Agent(components.agent, {
     name: "background-stream-test",

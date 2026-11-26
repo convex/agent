@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import { getMaxMessage } from "./messages.js";
@@ -2266,5 +2266,65 @@ describe("listing a thread's messages", () => {
     expect(last.page.map((m) => m.text)).toEqual(["1", "0"]);
     const past = await list({ numItems: 2, cursor: last.continueCursor });
     expect(past).toMatchObject({ page: [], isDone: true });
+  });
+});
+
+describe("a missing id in finalizeMessage and streams.abort", () => {
+  async function deletedIds() {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hello" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const pending = messages[1];
+    const messageId = pending._id as Id<"messages">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: pending.order,
+      stepOrder: pending.stepOrder,
+      format: "UIMessageChunk",
+    });
+    await t.run(async (ctx) => {
+      await ctx.db.delete("messages", messageId);
+      await ctx.db.delete("streamingMessages", streamId);
+    });
+    return { t, messageId, streamId };
+  }
+
+  test("throws for an app's call", async () => {
+    const { t, messageId, streamId } = await deletedIds();
+    await expect(
+      t.mutation(api.messages.finalizeMessage, {
+        messageId,
+        result: { status: "success" },
+      }),
+    ).rejects.toThrow("not found");
+    await expect(
+      t.mutation(api.streams.abort, { streamId, reason: "stop" }),
+    ).rejects.toThrow("Stream not found");
+  });
+
+  test("warns and returns in the Agent's own calls, which a thread deletion can race", async () => {
+    const { t, messageId, streamId } = await deletedIds();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    onTestFinished(() => warn.mockRestore());
+    expect(
+      await t.mutation(api.messages.finalizeMessageIfPresent, {
+        messageId,
+        result: { status: "failed", error: "Stopped" },
+      }),
+    ).toBeNull();
+    expect(
+      await t.mutation(api.streams.abortIfPresent, {
+        streamId,
+        reason: "stop",
+      }),
+    ).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(2);
   });
 });
