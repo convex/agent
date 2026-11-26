@@ -329,7 +329,10 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     sources: hasToolMessage ? undefined : sources,
   } satisfies Omit<MessageWithMetadata, "message" | "text" | "fileIds">;
   const toolFields = { sources };
-  const toSerialize = withStepCitations(step, messagesToSerialize);
+  const toSerialize = withStepToolDetails(
+    step,
+    withStepCitations(step, messagesToSerialize),
+  );
 
   const messages: MessageWithMetadata[] = await Promise.all(
     toSerialize.map(async (msg): Promise<MessageWithMetadata> => {
@@ -343,6 +346,52 @@ async function serializeStepMessages<TOOLS extends ToolSet>(
     }),
   );
   return { messages };
+}
+
+/**
+ * Response messages leave out the title and metadata the SDK puts on the
+ * step's tool calls from their tool definitions, which its UI stream shows on
+ * each tool part, so they are put back on the matching saved calls.
+ */
+function withStepToolDetails<TOOLS extends ToolSet>(
+  step: StepResult<TOOLS>,
+  messages: ModelMessage[],
+): ModelMessage[] {
+  const details = new Map(
+    step.content.flatMap((call) =>
+      call.type === "tool-call" &&
+      (call.title != null || call.toolMetadata != null)
+        ? [[call.toolCallId, call] as const]
+        : [],
+    ),
+  );
+  if (details.size === 0) {
+    return messages;
+  }
+  return messages.map((message) => {
+    if (message.role !== "assistant" || typeof message.content === "string") {
+      return message;
+    }
+    return {
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== "tool-call") {
+          return part;
+        }
+        const call = details.get(part.toolCallId);
+        if (!call || call.toolName !== part.toolName) {
+          return part;
+        }
+        return {
+          ...part,
+          ...(call.title != null ? { title: call.title } : {}),
+          ...(call.toolMetadata != null
+            ? { toolMetadata: call.toolMetadata }
+            : {}),
+        };
+      }),
+    };
+  });
 }
 
 /**

@@ -522,6 +522,13 @@ function createAssistantUIMessage<
       ? storedContent.filter((part) => part.type === "text")
       : [];
     let textPartIndex = 0;
+    const storedToolCalls = new Map(
+      Array.isArray(storedContent)
+        ? storedContent.flatMap((part) =>
+            part.type === "tool-call" ? [[part.toolCallId, part] as const] : [],
+          )
+        : [],
+    );
 
     const state = message.streaming
       ? ("streaming" as const)
@@ -592,6 +599,8 @@ function createAssistantUIMessage<
             type: "step-start",
           } satisfies StepStartUIPart);
           const callProviderMetadata = ownProviderMetadata(contentPart);
+          const { title, toolMetadata } =
+            storedToolCalls.get(contentPart.toolCallId) ?? {};
           const toolPart: ToolUIPart<TOOLS> = {
             type: `tool-${contentPart.toolName as keyof TOOLS & string}`,
             toolCallId: contentPart.toolCallId,
@@ -599,6 +608,8 @@ function createAssistantUIMessage<
               TOOLS[keyof TOOLS & string]["input"]
             >,
             providerExecuted: contentPart.providerExecuted,
+            ...(title != null ? { title } : {}),
+            ...(toolMetadata != null ? { toolMetadata } : {}),
             ...(message.streaming
               ? {
                   state: "input-streaming",
