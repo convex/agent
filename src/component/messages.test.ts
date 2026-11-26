@@ -1998,7 +1998,11 @@ describe("restarting a generation", () => {
         ],
       });
     const { messages: first } = await pendingTurn("restarted");
-    for (let i = 0; i < 100; i++) await pendingTurn(`in flight ${i}`);
+    const inFlight: Id<"messages">[] = [];
+    for (let i = 0; i < 100; i++) {
+      const { messages } = await pendingTurn(`in flight ${i}`);
+      inFlight.push(messages[1]!._id as Id<"messages">);
+    }
 
     await t.mutation(api.messages.addMessages, {
       threadId,
@@ -2013,5 +2017,9 @@ describe("restarting a generation", () => {
       ctx.db.get("messages", first[1]!._id as Id<"messages">),
     );
     expect(stale).toMatchObject({ status: "failed", error: "Restarting" });
+    const others = await t.run((ctx) =>
+      Promise.all(inFlight.map((id) => ctx.db.get("messages", id))),
+    );
+    expect(others.map((m) => m?.status)).toEqual(inFlight.map(() => "pending"));
   });
 });
