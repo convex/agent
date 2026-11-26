@@ -550,9 +550,6 @@ function orderedMessagesStream(
 
 const finalizeMessageArgs = {
   messageId: v.id("messages"),
-  // The Agent passes its thread, which a deletion may have removed along with
-  // the message.
-  threadId: v.optional(v.id("threads")),
   result: v.union(
     v.object({ status: v.literal("success") }),
     v.object({ status: v.literal("failed"), error: v.string() }),
@@ -562,28 +559,21 @@ const finalizeMessageArgs = {
 export const finalizeMessage = mutation({
   args: finalizeMessageArgs,
   returns: v.null(),
-  handler: async (ctx, { messageId, threadId, result }) => {
+  handler: async (ctx, { messageId, result }) => {
     const stored = await ctx.db.get("messages", messageId);
-    if (await isThreadGone(ctx, stored?.threadId ?? threadId, !stored)) {
+    if (!stored) {
+      console.warn("Message not found", messageId);
       return null;
     }
-    assert(stored, `Message ${messageId} not found`);
+    // A deletion pages messages by status, so finalizing one behind its
+    // cursor would outlive the thread.
+    if (await getDeletionMark(ctx, stored.threadId)) {
+      return null;
+    }
     await finalizeStoredMessage(ctx, stored, result);
     return null;
   },
 });
-
-// A row whose thread a deletion has marked or removed is gone or about to be,
-// so finalizing or aborting it has nothing left to do.
-export async function isThreadGone(
-  ctx: QueryCtx,
-  threadId: Id<"threads"> | undefined,
-  rowMissing: boolean,
-) {
-  if (!threadId) return false;
-  if (await getDeletionMark(ctx, threadId)) return true;
-  return rowMissing && !(await ctx.db.get("threads", threadId));
-}
 
 async function finalizeStoredMessage(
   ctx: MutationCtx,

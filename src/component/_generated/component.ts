@@ -1733,7 +1733,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           messageId: string;
           result: { status: "success" } | { error: string; status: "failed" };
-          threadId?: string;
         },
         null,
         Name
@@ -6154,7 +6153,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           };
           reason: string;
           streamId: string;
-          threadId?: string;
         },
         boolean,
         Name

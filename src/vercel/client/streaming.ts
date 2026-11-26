@@ -773,7 +773,6 @@ export class DeltaStreamer<T> {
     try {
       await this.ctx.runMutation(this.component.streams.abort, {
         streamId: this.streamId,
-        threadId: this.metadata.threadId,
         reason,
       });
     } catch (error) {

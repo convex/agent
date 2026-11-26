@@ -321,7 +321,6 @@ export async function startGeneration<
         if (pendingMessageId) {
           await ctx.runMutation(component.messages.finalizeMessage, {
             messageId: pendingMessageId,
-            threadId,
             result: { status: "failed", error },
           });
         }

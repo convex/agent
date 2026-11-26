@@ -30,7 +30,7 @@ import {
   projectPersistedUIMessageChunks,
 } from "../streaming/materializePersistedUIMessageChunks.js";
 import { changeRefcount } from "./files.js";
-import { isThreadGone } from "./messages.js";
+import { getDeletionMark } from "./messages.js";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -360,20 +360,18 @@ export const abortByOrder = mutation({
 export const abort = mutation({
   args: {
     streamId: v.id("streamingMessages"),
-    // The Agent passes its thread, which a deletion may have removed along
-    // with the stream.
-    threadId: v.optional(v.id("threads")),
     reason: v.string(),
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.boolean(),
-  handler: async (ctx, { threadId, ...args }) => {
+  handler: async (ctx, args) => {
     const stream = await ctx.db.get("streamingMessages", args.streamId);
-    if (await isThreadGone(ctx, stream?.threadId ?? threadId, !stream)) {
+    if (!stream) {
+      console.warn("Stream not found", args.streamId);
       return false;
     }
-    if (!stream) {
-      throw new Error(`Stream not found: ${args.streamId}`);
+    if (await getDeletionMark(ctx, stream.threadId)) {
+      return false;
     }
     return await abortStreamingMessage(ctx, stream, args);
   },

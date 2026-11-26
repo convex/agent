@@ -377,7 +377,7 @@ describe("DeltaStreamer", () => {
     expect(runMutation).toHaveBeenNthCalledWith(
       2,
       components.agent.streams.abort,
-      { streamId: "stream-1", threadId, reason: "abortSignal" },
+      { streamId: "stream-1", reason: "abortSignal" },
     );
   });
 
@@ -420,7 +420,7 @@ describe("DeltaStreamer", () => {
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
       components.agent.streams.abort,
-      { streamId: "stream-1", threadId, reason: "abortSignal" },
+      { streamId: "stream-1", reason: "abortSignal" },
     );
   });
 
@@ -455,7 +455,6 @@ describe("DeltaStreamer", () => {
       components.agent.streams.abort,
       {
         streamId: "stream-1",
-        threadId,
         reason: "provider_disconnected: Provider dropped",
       },
     );
@@ -485,7 +484,7 @@ describe("DeltaStreamer", () => {
     expect(runMutation).toHaveBeenNthCalledWith(
       2,
       components.agent.streams.abort,
-      { streamId: "stream-1", threadId, reason: "storage failed" },
+      { streamId: "stream-1", reason: "storage failed" },
     );
   });
 
@@ -528,7 +527,7 @@ describe("DeltaStreamer", () => {
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
       components.agent.streams.abort,
-      { streamId: "stream-1", threadId, reason: "delta failed" },
+      { streamId: "stream-1", reason: "delta failed" },
     );
   });
 
@@ -563,7 +562,7 @@ describe("DeltaStreamer", () => {
     expect(runMutation).toHaveBeenNthCalledWith(
       3,
       components.agent.streams.abort,
-      { streamId: "stream-1", threadId, reason: "external abort" },
+      { streamId: "stream-1", reason: "external abort" },
     );
   });
   // TODO: test fetching partial stream data - syncStreams w/ cursors
