@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => ({
     // node_modules; one copy of each keeps hooks and the Convex client shared.
     dedupe: ["react", "react-dom", "convex"],
     alias: {
-      "@": path.resolve(import.meta.dirname, "./src"),
+      "@": path.resolve(__dirname, "./src"),
     },
   },
   base: process.env.VITE_BASE || "/",
