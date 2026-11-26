@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
+import { getConvexSize } from "convex/values";
 import { describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -1981,5 +1982,65 @@ describe("cloneThread", () => {
       upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
     });
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
+  });
+});
+
+describe("listing a thread's messages", () => {
+  test("splits a page that reads too much, bound by endCursor or not", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const big = "x".repeat(400_000);
+    let added = 0;
+    const add = async (count: number) => {
+      for (let batch = 0; batch < count / 5; batch++) {
+        await t.mutation(api.messages.addMessages, {
+          threadId,
+          messages: Array.from({ length: 5 }, () => ({
+            message: { role: "user" as const, content: `${added++} ${big}` },
+          })),
+        });
+      }
+    };
+    // convex-test checks the read limit but not the 16 MiB return limit.
+    const list = async (cursor: string | null, endCursor?: string) => {
+      const page = await t.query(api.messages.listMessagesByThreadId, {
+        threadId,
+        order: "desc",
+        paginationOpts: { numItems: 100, cursor, endCursor },
+      });
+      expect(getConvexSize(page)).toBeLessThanOrEqual(16 * 1024 * 1024);
+      return page;
+    };
+    // What usePaginatedQuery does: split a page at splitCursor while it reads
+    // too much, and load the next page from the last one's continueCursor.
+    const read = async (
+      cursor: string | null,
+      endCursor?: string,
+    ): Promise<number[]> => {
+      const page = await list(cursor, endCursor);
+      const listed =
+        page.pageStatus === "SplitRequired"
+          ? [
+              ...(await read(cursor, page.splitCursor!)),
+              ...(await read(page.splitCursor!, page.continueCursor)),
+            ]
+          : page.page.map((m) => Number(m.text!.split(" ", 1)[0]));
+      return endCursor !== undefined || page.isDone
+        ? listed
+        : [...listed, ...(await read(page.continueCursor))];
+    };
+    const newestFirst = () =>
+      Array.from({ length: added }, (_, i) => added - 1 - i);
+
+    await add(50);
+    expect(await read(null)).toEqual(newestFirst());
+
+    const first = await list(null);
+    await add(40);
+    expect([
+      ...(await read(null, first.continueCursor)),
+      ...(await read(first.continueCursor)),
+    ]).toEqual(newestFirst());
   });
 });
