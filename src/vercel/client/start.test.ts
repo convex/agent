@@ -372,7 +372,13 @@ test("the agent's prepareStep gets the ctx its tools get, and a call's prepareSt
     await agent.generateText(
       ctx,
       { threadId },
-      { prompt: "replaced", prepareStep: () => undefined },
+      {
+        prompt: "replaced",
+        prepareStep: ({ stepNumber }) => {
+          seen.push({ call: stepNumber });
+          return undefined;
+        },
+      },
     );
     return [generated, streamed].map(({ promptMessageId }) => ({
       orgId: "o1",
@@ -383,5 +389,5 @@ test("the agent's prepareStep gets the ctx its tools get, and a call's prepareSt
       stepNumber: 0,
     }));
   });
-  expect(seen).toEqual(turns);
+  expect(seen).toEqual([...turns, { call: 0 }]);
 });
