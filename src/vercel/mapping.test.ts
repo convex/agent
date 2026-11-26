@@ -1,4 +1,4 @@
-import { describe, test, expect, vi } from "vitest";
+import { afterEach, describe, test, expect, vi } from "vitest";
 import {
   guessMimeType,
   serializeDataOrUrl,
@@ -928,6 +928,10 @@ describe("mapping", () => {
   });
 
   describe("autoDenyUnresolvedApprovals", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
     test("returns messages unchanged when no unresolved approvals", () => {
       const messages = [
         { role: "user" as const, content: "hello" },
@@ -978,7 +982,6 @@ describe("mapping", () => {
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       const result = autoDenyUnresolvedApprovals(messages);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
-      warnSpy.mockRestore();
       expect(result).toHaveLength(4); // original 3 + 1 synthetic tool message
       // Synthetic denial should be inserted right after the assistant message (index 1)
       expect(result[2].role).toBe("tool");
@@ -1024,7 +1027,6 @@ describe("mapping", () => {
       const result = autoDenyUnresolvedApprovals(messages);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
-      warnSpy.mockRestore();
       expect(result).toHaveLength(2); // assistant + 1 synthetic tool message
       expect(result[1].role).toBe("tool");
       const denialContent = result[1].content as any[];
@@ -1095,7 +1097,6 @@ describe("mapping", () => {
       ]);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
-      warnSpy.mockRestore();
     });
 
     test("the AI SDK accepts the settled history", async () => {
@@ -1114,7 +1115,6 @@ describe("mapping", () => {
         expect.objectContaining({ type: "tool-result", toolCallId: "tc1" }),
         expect.objectContaining({ type: "tool-result", toolCallId: "tc2" }),
       ]);
-      vi.restoreAllMocks();
     });
 
     test("keeps the reason of a stored denial that never ran", () => {
@@ -1135,7 +1135,6 @@ describe("mapping", () => {
       });
       expect(warnSpy).toHaveBeenCalledTimes(1);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
-      warnSpy.mockRestore();
     });
 
     test("denies an unresolved provider-executed approval with a decision", () => {
@@ -1173,7 +1172,6 @@ describe("mapping", () => {
           },
         ],
       });
-      vi.restoreAllMocks();
     });
 
     test("the provider receives the denial of a parallel provider-executed call", async () => {
@@ -1230,7 +1228,6 @@ describe("mapping", () => {
           },
         }),
       ]);
-      vi.restoreAllMocks();
     });
 
     test("emits console.warn for each auto-denied approval", () => {
@@ -1260,7 +1257,6 @@ describe("mapping", () => {
       expect(warnSpy).toHaveBeenCalledTimes(2);
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap1"));
       expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("ap2"));
-      warnSpy.mockRestore();
     });
   });
 });
