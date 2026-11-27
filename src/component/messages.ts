@@ -62,6 +62,7 @@ import {
   adoptOpenRow,
   authorizeRow,
   endTurnsForDeleted,
+  failPlainReplies,
   planResponse,
   planSave,
   resolve,
@@ -168,7 +169,23 @@ export async function endDeleted(
   deleted: (Doc<"messages"> | null)[],
 ) {
   if (deleted.some((m) => m?.turnId)) await endTurnsForDeleted(ctx, deleted);
+  await failPlainReplies(
+    ctx,
+    deleted.filter((m) => m !== null),
+  );
   await abortStreamsForDeleted(ctx, deleted);
+}
+
+async function closeLinkedStream(
+  ctx: MutationCtx,
+  row: Doc<"messages">,
+  finished: boolean,
+) {
+  if (!row.streamId) return;
+  const stream = await ctx.db.get("streamingMessages", row.streamId);
+  if (stream?.state.kind !== "streaming") return;
+  if (finished) await finishHandler(ctx, { streamId: stream._id });
+  else await abortById(ctx, { streamId: stream._id, reason: "Ended" });
 }
 
 export const deleteByIds = mutation({
@@ -440,6 +457,7 @@ async function addMessagesHandler(
       order: requestedOrder,
       messages,
     }));
+  if (plan.userId !== undefined && !args.userId) userId = plan.userId;
   if (plan.adopt) {
     const adopted = await adoptOpenRow(
       ctx,
@@ -622,6 +640,8 @@ async function addMessagesHandler(
         ...messageDoc,
         order: pendingMessage.order,
         stepOrder: pendingMessage.stepOrder,
+        streamId: pendingMessage.streamId,
+        abort: pendingMessage.abort,
         ...plan.stamp?.(
           pendingMessage.order,
           messageDoc.status,
@@ -675,7 +695,15 @@ async function addMessagesHandler(
       ...messageDoc,
       order,
       stepOrder,
-      ...(plan.unlinked ? {} : { streamId }),
+      ...(plan.unlinked
+        ? {}
+        : {
+            streamId:
+              streamId ??
+              (i === messages.length - 1 && messageDoc.status === "pending"
+                ? plan.carry
+                : undefined),
+          }),
       ...plan.stamp?.(order, messageDoc.status),
     });
     if (message.fileIds) {
@@ -790,6 +818,7 @@ export const finalizeMessage = mutation({
       onSaveMessages,
       stored.streamId ? [stored.streamId] : [],
     );
+    await closeLinkedStream(ctx, stored, result.status === "success");
     const turnId = write.as === "turn" ? write.turn._id : write.liveTurn?._id;
     if (turnId) {
       await settle(ctx, turnId, {
@@ -947,6 +976,9 @@ export const updateMessage = mutation({
     }
     await ctx.db.patch("messages", args.messageId, patch);
     const turnId = write?.as === "turn" ? write.turn._id : write?.liveTurn?._id;
+    if (turnId && patch.status && patch.status !== "pending") {
+      await closeLinkedStream(ctx, message, patch.status === "success");
+    }
     if (turnId) {
       await settle(ctx, turnId, {
         byApp: write!.as === "app",
@@ -1147,6 +1179,9 @@ export const cloneMessageBatch = internalMutation({
               "order",
               "embeddingId",
               "parentMessageId",
+              "turnId",
+              "jobId",
+              "streamId",
             ]),
             embeddingId,
             threadId: args.targetThreadId,
@@ -1226,13 +1261,11 @@ async function listMessagesByThreadIdHandler(
   { keepContinuedOrderTools = false } = {},
 ) {
   const statuses = args.statuses ?? vMessageStatus.members.map((m) => m.value);
-  const last =
+  const found =
     args.upToAndIncludingMessageId &&
     (await ctx.db.get("messages", args.upToAndIncludingMessageId));
-  assert(
-    !last || last.threadId === args.threadId,
-    "upToAndIncludingMessageId must be a message in the thread",
-  );
+  // Another thread's message reads as missing.
+  const last = found && found.threadId === args.threadId ? found : null;
   const toolOptions = args.excludeToolMessages ? [false] : [true, false];
   const order = args.order ?? "desc";
   const streams = toolOptions.flatMap((tool) =>

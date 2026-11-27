@@ -36,7 +36,9 @@ import {
   endStream,
   planStream,
   settleStream,
+  stopStreamReply,
   stopTurns,
+  streamLease,
   timeoutTurnStream,
 } from "./turns.js";
 
@@ -277,12 +279,13 @@ export const create = mutation({
     promptMessageId: v.optional(v.id("messages")),
   },
   returns: v.id("streamingMessages"),
-  handler: (ctx, { promptMessageId, ...args }) =>
-    promptMessageId === undefined
-      ? createStream(ctx, args)
-      : planStream(ctx, args.threadId, promptMessageId).then((stamp) =>
-          createStream(ctx, { ...args, ...stamp }),
-        ),
+  handler: async (ctx, { promptMessageId, ...args }) => {
+    const stamp =
+      promptMessageId === undefined
+        ? await streamLease(ctx)
+        : await planStream(ctx, args.threadId, promptMessageId);
+    return createStream(ctx, { ...args, ...stamp });
+  },
 });
 
 export async function createStream(
@@ -409,7 +412,9 @@ export const abort = mutation({
   handler: async (ctx, args) => {
     const stream = await ctx.db.get("streamingMessages", args.streamId);
     if (stream?.jobId !== undefined) return endStream(ctx, stream, args);
-    return abortById(ctx, args);
+    const aborted = await abortById(ctx, args);
+    if (aborted) await stopStreamReply(ctx, stream!, args.reason);
+    return aborted;
   },
 });
 
@@ -429,11 +434,12 @@ export async function abortById(
   if (args.lease && stream.jobId !== undefined) {
     await authorizeStream(ctx, stream);
   }
-  if (args.finalDelta) {
-    await ctx.db.insert("streamDeltas", args.finalDelta);
-  }
   if (stream.state.kind !== "streaming") {
     return false;
+  }
+  // A final delta lands only in the stream it ends.
+  if (args.finalDelta?.streamId === args.streamId) {
+    await ctx.db.insert("streamDeltas", args.finalDelta);
   }
   await cleanupTimeoutFn(ctx, stream);
   const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);

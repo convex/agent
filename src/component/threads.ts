@@ -1,4 +1,5 @@
 import { assert, omit, pick } from "convex-helpers";
+import { endTurnsForDeleted } from "./turns.js";
 import { partial } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
 import type { ObjectType } from "convex/values";
@@ -302,6 +303,9 @@ async function deletePageForThreadIdHandler(
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
+  if (messages.page.some((m) => m.turnId)) {
+    await endTurnsForDeleted(ctx, messages.page);
+  }
   await reportSavedMessages(
     ctx,
     args.onSaveMessages,

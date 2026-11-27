@@ -1,7 +1,7 @@
 import type { FunctionHandle } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import type { MutationCtx } from "./_generated/server.js";
-import { finalizePending } from "./messages.js";
+import { finalizePending, getMaxMessage } from "./messages.js";
 import { abortById, finishHandler } from "./streams.js";
 
 type Turn = Doc<"turns">;
@@ -322,10 +322,30 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
       await ctx.db.patch("messages", newest._id, { abort: { reason } });
     }
   }
+  if (end === "unanswered" && !openRows.some(atOrder)) {
+    await failedReply(ctx, turn, reason);
+  }
   await ctx.db.patch("turns", turn._id, {
     status: "done",
     outcome: end,
     jobId: byOwnJob ? turn.jobId : undefined,
+  });
+}
+
+/** A turn whose job left nothing to show its failure on gets a failed reply. */
+async function failedReply(ctx: MutationCtx, turn: Turn, error: string) {
+  const prompt = await ctx.db.get("messages", turn.promptMessageId);
+  const last = await getMaxMessage(ctx, turn.threadId, turn.order);
+  await ctx.db.insert("messages", {
+    threadId: turn.threadId,
+    order: turn.order,
+    stepOrder: (last?.stepOrder ?? turn.anchorStepOrder) + 1,
+    userId: prompt?.userId,
+    message: { role: "assistant", content: [] },
+    tool: false,
+    status: "failed",
+    error,
+    turnId: turn._id,
   });
 }
 
@@ -444,8 +464,9 @@ async function supersede(
   for (const turn of await liveTurns(ctx, threadId)) {
     if (caller && turn.jobId === caller) continue;
     const replaced =
-      order === undefined ||
-      (turn.status === "running" ? turn.order === order : turn.order <= order);
+      turn.status === "running"
+        ? turn.order === order
+        : order === undefined || turn.order <= order;
     if (replaced) {
       await handOff(ctx, turn, { end: "superseded", byOwnJob: false });
     }
@@ -465,6 +486,10 @@ export type SaveTurn = {
   stamp?: (order: number, status: Status, replaced?: Row) => Stamp;
   streamStamp?: Stamp;
   unlinked?: boolean;
+  // The open row's stream, handed to the next open row a step save inserts.
+  carry?: Id<"streamingMessages">;
+  // The turn's prompt's user, whom its job's saves act for.
+  userId?: string;
   adopt?: { row: Row; turn: Turn; caller: string };
   after?: (
     saved: Row[],
@@ -518,7 +543,15 @@ export async function planSave(
     args.messages.length === 1 && args.messages[0].status === "pending";
   if (pending) {
     if (!pending.turnId) return { pending };
-    return planFill(ctx, pending, await authorizeRow(ctx, pending));
+    const write = await authorizeRow(ctx, pending);
+    if (
+      write.as === "turn" || write.liveTurn
+        ? args.promptMessage && args.promptMessage.order !== pending.order
+        : false
+    ) {
+      throw new Error("A live turn's reply can't move to another prompt");
+    }
+    return planFill(ctx, pending, write);
   }
   if (!caller && !args.promptMessage?.turnId) return { pending };
   const prompt = args.promptMessage ?? null;
@@ -529,23 +562,25 @@ export async function planSave(
   );
   if (role.kind === "revoked") throw new Error(REFUSED);
   if (prompt && beginning) await takeOver(ctx, prompt, role);
-  if (role.kind !== "holder" || role.turn.threadId !== args.threadId) {
-    return { pending };
-  }
+  if (role.kind !== "holder") return { pending };
   const turn = role.turn;
   const own = caller!;
+  const atTurn =
+    turn.threadId === args.threadId &&
+    (prompt ? prompt.order === turn.order : args.order === turn.order);
+  if (!atTurn) return { pending, ...lease(turn, own) };
+  const userId = await promptUser(ctx, turn);
   if (prompt && beginning && anchors(turn, prompt)) {
     const [open] = (await members(ctx, turn, "pending")).filter(
       (row) => row.order === turn.order,
     );
-    if (open) return { pending, adopt: { row: open, turn, caller: own } };
+    if (open) {
+      return { pending, userId, adopt: { row: open, turn, caller: own } };
+    }
   }
-  const atTurn = prompt
-    ? prompt.order === turn.order
-    : args.order === turn.order;
-  if (!atTurn) return { pending };
   return {
     pending,
+    userId,
     stamp: memberStamp(turn, own),
     streamStamp: { turnId: turn._id, jobId: own },
     after: async () => {
@@ -555,10 +590,34 @@ export async function planSave(
   };
 }
 
+/** Whatever a job opens away from its turn is still its own, so ending its turn closes it. */
+function lease(turn: Turn, caller: string): SaveTurn {
+  const stamp = { turnId: turn._id, jobId: caller };
+  return {
+    stamp: (_order, status) => (status === "pending" ? stamp : {}),
+    streamStamp: stamp,
+  };
+}
+
+async function promptUser(ctx: MutationCtx, turn: Turn) {
+  return (await ctx.db.get("messages", turn.promptMessageId))?.userId;
+}
+
+/** The lease for a stream a caller opens: the turn its job holds, if any. */
+export async function streamLease(ctx: MutationCtx): Promise<Stamp> {
+  const caller = await callerJob(ctx);
+  if (!caller) return {};
+  const role = await roleOf(ctx, caller);
+  if (role.kind === "revoked") throw new Error(REFUSED);
+  return role.kind === "holder" ? { turnId: role.turn._id, jobId: caller } : {};
+}
+
 function planFill(ctx: MutationCtx, pending: Row, write: Write): SaveTurn {
   const turnId = write.as === "turn" ? write.turn._id : write.liveTurn?._id;
   return {
     pending,
+    userId: turnId ? pending.userId : undefined,
+    carry: turnId ? pending.streamId : undefined,
     stamp:
       write.as === "turn"
         ? memberStamp(write.turn, write.caller)
@@ -570,7 +629,10 @@ function planFill(ctx: MutationCtx, pending: Row, write: Write): SaveTurn {
         : undefined,
     after: async (saved) => {
       const row = saved.find((doc) => doc._id === pending._id);
-      if (pending.streamId && row && row.status !== "pending") {
+      const carried = saved.some(
+        (doc) => doc._id !== pending._id && doc.streamId === pending.streamId,
+      );
+      if (pending.streamId && row && row.status !== "pending" && !carried) {
         const stream = await ctx.db.get("streamingMessages", pending.streamId);
         if (stream) {
           await closeStream(ctx, stream, row.status === "success", "Filled");
@@ -780,7 +842,107 @@ export async function stopTurns(
   for (const turn of turns) {
     await handOff(ctx, turn, { end: "stopped", byOwnJob: false, reason });
   }
-  return turns.length > 0;
+  const order = args.promptMessageId ? turns[0]?.order : args.order;
+  if (args.promptMessageId && order === undefined) return false;
+  const plain = await stopPlain(ctx, args.threadId, order, reason);
+  return turns.length > 0 || plain;
+}
+
+/** A stop also reaches inline generations: their pending replies and streams. */
+async function stopPlain(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+  order: number | undefined,
+  reason: string,
+) {
+  let stopped = false;
+  for (const tool of [false, true]) {
+    const rows = await ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) => {
+        const base = q
+          .eq("threadId", threadId)
+          .eq("status", "pending")
+          .eq("tool", tool);
+        return order === undefined ? base : base.eq("order", order);
+      })
+      .collect();
+    for (const row of rows) {
+      if (row.jobId !== undefined) continue;
+      await ctx.db.patch("messages", row._id, { abort: { reason } });
+      stopped = true;
+    }
+  }
+  const streams = await ctx.db
+    .query("streamingMessages")
+    .withIndex("threadId_state_order_stepOrder", (q) => {
+      const base = q.eq("threadId", threadId).eq("state.kind", "streaming");
+      return order === undefined ? base : base.eq("order", order);
+    })
+    .collect();
+  for (const stream of streams) {
+    if (stream.jobId !== undefined) continue;
+    await abortById(ctx, { streamId: stream._id, reason });
+    stopped = true;
+  }
+  return stopped;
+}
+
+/** An app's stop of a plain stream reaches the pending reply it streams into. */
+export async function stopStreamReply(
+  ctx: MutationCtx,
+  stream: Stream,
+  reason: string,
+) {
+  for (const tool of [false, true]) {
+    const rows = await ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+        q
+          .eq("threadId", stream.threadId)
+          .eq("status", "pending")
+          .eq("tool", tool)
+          .eq("order", stream.order)
+          .eq("stepOrder", stream.stepOrder),
+      )
+      .collect();
+    for (const row of rows) {
+      if (row.jobId === undefined) {
+        await ctx.db.patch("messages", row._id, { abort: { reason } });
+      }
+    }
+  }
+}
+
+/** Deleting a plain prompt fails the plain replies pending at its order. */
+export async function failPlainReplies(ctx: MutationCtx, deleted: Row[]) {
+  const seen = new Set<string>();
+  for (const row of deleted) {
+    const key = `${row.threadId}:${row.order}`;
+    if (row.status === "pending" || seen.has(key)) continue;
+    seen.add(key);
+    for (const tool of [false, true]) {
+      const rows = await ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+          q
+            .eq("threadId", row.threadId)
+            .eq("status", "pending")
+            .eq("tool", tool)
+            .eq("order", row.order),
+        )
+        .collect();
+      for (const reply of rows) {
+        if (reply.jobId !== undefined) continue;
+        await finalizePending(
+          ctx,
+          reply,
+          { status: "failed", error: REASONS.deleted },
+          undefined,
+        );
+      }
+    }
+  }
 }
 
 export async function retryTurn(
@@ -831,9 +993,14 @@ export async function planResponse(
   const role = await roleOf(ctx, caller, turn);
   if (role.kind === "revoked") throw new Error(REFUSED);
   if (!live(turn)) {
-    return generate === undefined
+    // A request of an ended turn takes its answer, but nothing continues it.
+    return generate === undefined || turn
       ? undefined
-      : planSend(ctx, { threadId: request.threadId, generate }, caller);
+      : planSend(
+          ctx,
+          { threadId: request.threadId, generate, order: request.order },
+          caller,
+        );
   }
   if (role.kind === "holder" && role.turn._id !== turn._id) {
     throw new Error(REFUSED);
