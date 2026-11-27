@@ -429,11 +429,6 @@ async function jobState(ctx: MutationCtx, turn: Turn) {
   return job?.state.kind;
 }
 
-async function jobRunning(ctx: MutationCtx, turn: Turn) {
-  const state = await jobState(ctx, turn);
-  return state === "pending" || state === "inProgress";
-}
-
 /** Cancels a turn's job before it runs; returns whether it may still be running. */
 async function cancelQueued(ctx: MutationCtx, turn: Turn) {
   if (!turn.jobId) return false;
@@ -615,10 +610,10 @@ async function supersede(
 ) {
   for (const turn of await turnsOf(ctx, threadId)) {
     if (caller && turn.jobId === caller) continue;
-    // A running turn elsewhere keeps its live job; a dead one is replaced.
+    // D6: a running turn elsewhere is left to its job or its retry.
     const replaced =
       turn.status === "running"
-        ? turn.order === order || !(await jobRunning(ctx, turn))
+        ? turn.order === order
         : order === undefined || turn.order <= order;
     if (replaced) {
       await handOff(ctx, turn, { end: "superseded", byOwnJob: false });

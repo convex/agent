@@ -971,32 +971,8 @@ test("a send at a new order leaves an older crashed turn running and retryable (
   const retried = await s.control((ctx) =>
     ctx.runMutation(api.messages.retryGeneration, s.ids),
   );
+  await s.drain();
   expect(typeof retried).toBe("string");
-});
-
-test("a send at a new order ends an older turn whose job returned without answering (D6)", async () => {
-  attempts.push(async (ctx, ids) => {
-    await ctx.runMutation(api.messages.addMessages, {
-      ...ids,
-      messages: [{ message: { role: "system", content: "Noted." } }],
-    });
-  });
-  attempts.push(async () => {});
-  const s = await submitted();
-  await s.drain();
-  await s.control(async (ctx) =>
-    ctx.runMutation(api.messages.addMessages, {
-      threadId: s.ids.threadId,
-      messages: [{ message: { role: "user", content: "Later." } }],
-      generate: await createFunctionHandle(generate),
-    }),
-  );
-  await s.drain();
-  expect(
-    await s.control((ctx) =>
-      ctx.runMutation(api.messages.abortGeneration, s.ids),
-    ),
-  ).toBe(false);
 });
 
 test("a stop by stream id is control: another thread's job stops a turn's stream, and the turn's job is refused after it", async () => {
