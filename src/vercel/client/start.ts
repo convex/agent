@@ -529,7 +529,7 @@ export async function startGeneration<
     stopWhen: [
       ...afterSavedSteps(
         [args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat(),
-        savedSteps<Tools, RUNTIME_CONTEXT>(context.responseDocs),
+        savedSteps<Tools, RUNTIME_CONTEXT>(turn?.saved ?? []),
       ),
       () => held?.error !== undefined,
     ],
@@ -677,7 +677,7 @@ export async function startGeneration<
     userId,
     promptMessageId,
     streamId,
-    turn,
+    turn: turn && { promptMessageId: turn.promptMessageId, jobId: turn.jobId },
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {

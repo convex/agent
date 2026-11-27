@@ -617,17 +617,15 @@ export async function fetchContextWithPrompt(
   order: number | undefined;
   stepOrder: number | undefined;
 }> {
-  const {
-    responseDocs: _,
-    approvedCalls: __,
-    ...context
-  } = await fetchContextAndResponses(...args);
+  const { approvedCalls: _, ...context } = await fetchContextAndResponses(
+    ...args,
+  );
   return context;
 }
 
 /**
- * {@link fetchContextWithPrompt}, with the messages already saved after the
- * prompt at its order.
+ * {@link fetchContextWithPrompt}, with the calls a continuation's approvals
+ * approved.
  */
 export async function fetchContextAndResponses(
   ctx: ActionCtx,
@@ -645,7 +643,6 @@ export async function fetchContextAndResponses(
   messages: ModelMessage[];
   order: number | undefined;
   stepOrder: number | undefined;
-  responseDocs: MessageDoc[];
   /** Each approved call's id, to the message its request's step saved. */
   approvedCalls: Map<string, string>;
 }> {
@@ -778,7 +775,6 @@ export async function fetchContextAndResponses(
     messages: processedMessages,
     order: promptMessage?.order,
     stepOrder: promptMessage?.stepOrder,
-    responseDocs: existingResponseDocs,
     approvedCalls: continuation?.approvedCalls ?? new Map(),
   };
 }

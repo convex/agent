@@ -77,6 +77,7 @@ import {
   settle,
   stopTurns,
   hold,
+  type TurnInfo,
 } from "./turns.js";
 
 export const vOnSaveMessages = v.optional(v.string());
@@ -130,6 +131,14 @@ function publicMessage(message: Doc<"messages">): MessageDoc {
     ...doc
   } = withText(message);
   return withDerivedReasoning(doc);
+}
+
+function publicTurn(turn: TurnInfo) {
+  return {
+    promptMessageId: turn.promptMessageId,
+    jobId: turn.jobId as Id<"_scheduled_functions">,
+    saved: turn.saved.map(publicMessage),
+  };
 }
 
 export async function deleteMessage(
@@ -385,7 +394,11 @@ export const addMessages = mutation({
     jobId: v.optional(vJobId),
     // Only for the turn's own job, when this save belongs to its turn.
     turn: v.optional(
-      v.object({ promptMessageId: v.id("messages"), jobId: vJobId }),
+      v.object({
+        promptMessageId: v.id("messages"),
+        jobId: vJobId,
+        saved: v.array(vMessageDoc),
+      }),
     ),
   }),
 });
@@ -525,10 +538,7 @@ async function addMessagesHandler(
     return {
       messages: [publicMessage(adopted.row)],
       ...(adopted.streamId ? { streamId: adopted.streamId } : {}),
-      turn: adopted.turn as {
-        promptMessageId: Id<"messages">;
-        jobId: Id<"_scheduled_functions">;
-      },
+      turn: publicTurn(adopted.turn),
     };
   }
   const saved: SavedMessage[] = [];
@@ -796,20 +806,15 @@ async function addMessagesHandler(
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
-  const turn = plan.after
+  const { jobId, turn } = plan.after
     ? await plan.after(toReturn, streamId, finishStreamId)
     : {};
   await reportSavedMessages(ctx, onSaveMessages, saved);
   return {
     messages: toReturn.map(publicMessage),
     ...(streamId ? { streamId } : {}),
-    ...(turn as {
-      jobId?: Id<"_scheduled_functions">;
-      turn?: {
-        promptMessageId: Id<"messages">;
-        jobId: Id<"_scheduled_functions">;
-      };
-    }),
+    ...(jobId ? { jobId: jobId as Id<"_scheduled_functions"> } : {}),
+    ...(turn ? { turn: publicTurn(turn) } : {}),
   };
 }
 

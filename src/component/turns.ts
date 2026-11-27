@@ -26,7 +26,12 @@ const atOf = (turn: Pick<Turn, "threadId" | "fromOrder">): At => ({
   threadId: turn.threadId,
   order: turn.fromOrder,
 });
-export type TurnInfo = { promptMessageId: Id<"messages">; jobId: string };
+export type TurnInfo = {
+  promptMessageId: Id<"messages">;
+  jobId: string;
+  /** The steps its turn saved since its anchor, which its job resumes after. */
+  saved: Row[];
+};
 
 export const REFUSED = "The generation was stopped or replaced";
 export const DEFAULT_MAX_RETRIES = 2;
@@ -771,9 +776,14 @@ export type SaveTurn = {
   ) => Promise<{ jobId?: string; turn?: TurnInfo }>;
 };
 
-const turnInfo = (turn: Turn, jobId: string): TurnInfo => ({
+const turnInfo = async (
+  ctx: MutationCtx,
+  turn: Turn,
+  jobId: string,
+): Promise<TurnInfo> => ({
   promptMessageId: turn.promptMessageId,
   jobId,
+  saved: await members(ctx, turn, "success", "anchor"),
 });
 
 type Position = Pick<Turn, "_id" | "threadId" | "order" | "fromOrder">;
@@ -880,7 +890,7 @@ export async function planSave(
         byApp: false,
         ...(beginning ? { opened: true as const } : {}),
       });
-      return beginning ? { turn: turnInfo(turn, own) } : {};
+      return beginning ? { turn: await turnInfo(ctx, turn, own) } : {};
     },
   };
 }
@@ -1101,7 +1111,7 @@ export async function adoptOpenRow(
     );
     await ctx.db.patch("messages", row._id, { streamId });
   }
-  return { row, streamId, turn: turnInfo(turn, caller) };
+  return { row, streamId, turn: await turnInfo(ctx, turn, caller) };
 }
 
 /** A stream a generation opens at a prompt without saving a message. */
