@@ -396,29 +396,6 @@ export const abortGeneration = mutation({
   handler: (ctx, { reason, ...args }) => stopTurns(ctx, args, reason),
 });
 
-export const _finalize = internalMutation({
-  args: {
-    messageId: v.id("messages"),
-    result: v.union(
-      v.object({ status: v.literal("success") }),
-      v.object({ status: v.literal("failed"), error: v.string() }),
-    ),
-  },
-  returns: v.null(),
-  handler: async (ctx, { messageId, result }) => {
-    const row = await ctx.db.get("messages", messageId);
-    if (row?.status !== "pending") return null;
-    await finalizePending(
-      ctx,
-      row,
-      result,
-      undefined,
-      row.streamId ? [row.streamId] : [],
-    );
-    return null;
-  },
-});
-
 export const _recover = internalMutation({
   args: { ...addMessagesArgs, turnId: v.id("turns") },
   returns: v.object({ messages: v.array(vMessageDoc) }),

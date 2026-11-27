@@ -1,7 +1,6 @@
 import type { FunctionHandle } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import type { MutationCtx } from "./_generated/server.js";
-import { internal } from "./_generated/api.js";
 import { finalizePending, getMaxMessage } from "./messages.js";
 import { abortById, finishHandler } from "./streams.js";
 
@@ -242,25 +241,12 @@ const REASONS: Record<Ending, string> = {
 
 type Result = { status: "success" } | { status: "failed"; error: string };
 
-// While its job may still be streaming, a closed row is built from its
-// stream later: reading the delta log as the streamer appends would conflict
-// with every delta and stall a stop under load.
 async function closeRow(
   ctx: MutationCtx,
   row: Row,
   result: Result,
-  writing: boolean,
   abort?: { reason: string },
 ) {
-  const mark = { jobId: undefined, ...(abort ? { abort } : {}) };
-  if (writing) {
-    await ctx.db.patch("messages", row._id, mark);
-    await ctx.scheduler.runAfter(0, internal.messages._finalize, {
-      messageId: row._id,
-      result,
-    });
-    return;
-  }
   await finalizePending(
     ctx,
     row,
@@ -268,7 +254,7 @@ async function closeRow(
     undefined,
     row.streamId ? [row.streamId] : [],
   );
-  await ctx.db.patch("messages", row._id, mark);
+  if (abort) await ctx.db.patch("messages", row._id, { abort });
 }
 
 async function closeStream(
@@ -297,13 +283,12 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, TIMED_OUT);
     for (const row of openRows) {
-      await closeRow(ctx, row, { status: "failed", error: TIMED_OUT }, false);
+      await closeRow(ctx, row, { status: "failed", error: TIMED_OUT });
     }
     await ctx.db.patch("turns", turn._id, { jobId: undefined });
     return;
   }
   if (!("end" in to && to.byOwnJob)) await cancelQueued(ctx, turn);
-  const writing = openRows.length > 0 && (await jobRunning(ctx, turn));
   if ("job" in to) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, "Retried");
@@ -314,12 +299,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
           streamId: undefined,
         });
       } else {
-        await closeRow(
-          ctx,
-          row,
-          { status: "failed", error: "Retried" },
-          writing,
-        );
+        await closeRow(ctx, row, { status: "failed", error: "Retried" });
       }
     }
     if (to.newRow) {
@@ -352,9 +332,9 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
         jobId: undefined,
       });
     } else if (end === "stopped") {
-      await closeRow(ctx, row, { status: "success" }, writing, { reason });
+      await closeRow(ctx, row, { status: "success" }, { reason });
     } else {
-      await closeRow(ctx, row, { status: "failed", error: reason }, writing);
+      await closeRow(ctx, row, { status: "failed", error: reason });
     }
   }
   for (const s of openStreams) {
