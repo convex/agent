@@ -658,10 +658,9 @@ test("a send at the job's own prompt leaves the prompt with its turn, so a stop 
 
 test("streams.abort is a stop whoever calls it: the job's own abort keeps the reply and marks it", async () => {
   attempts.push(async (ctx, ids) => {
-    const { streamId, messages } = await begin(ctx, ids);
+    const { streamId } = await begin(ctx, ids);
     await delta(ctx, streamId!, "Half.");
     await ctx.runMutation(api.streams.abort, { streamId, reason: "Stopped" });
-    await fill(ctx, ids.threadId, messages[0]._id, [assistant("Half.")]);
   });
   const s = await submitted();
   await s.drain();

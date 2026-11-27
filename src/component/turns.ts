@@ -308,6 +308,18 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
   }
   const running =
     !("end" in to && to.byOwnJob) && (await cancelQueued(ctx, turn));
+  // A stop reads no deltas while another caller's job may still stream into
+  // a reply: the job's next save into the marked row ends it, or its stream's
+  // own close, timeout, or a retry does. Rows without a stream have no deltas
+  // to race, and rows elsewhere close with the turn.
+  const leftToJob =
+    "end" in to &&
+    to.end === "stopped" &&
+    running &&
+    (await callerJob(ctx)) !== turn.jobId
+      ? openRows.filter((row) => row.streamId && atOrder(row))
+      : [];
+  const leftStreams = new Set(leftToJob.map((row) => row.streamId));
   if ("job" in to) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, "Retried");
@@ -342,11 +354,8 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
   }
   const { end, byOwnJob } = to;
   const reason = to.reason ?? REASONS[end];
-  // A stop reads no deltas while its job may run: the job's next save into
-  // each marked row is its ending, or the stream's timeout or a retry is.
-  const leftToJob = end === "stopped" && running;
   for (const row of openRows) {
-    if (leftToJob) {
+    if (leftToJob.includes(row)) {
       await ctx.db.patch("messages", row._id, { abort: { reason } });
       continue;
     }
@@ -364,7 +373,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     }
   }
   for (const s of openStreams) {
-    if (leftToJob) await stopStream(ctx, s, reason);
+    if (leftStreams.has(s._id)) await stopStream(ctx, s, reason);
     else await closeStream(ctx, s._id, end === "answered", reason);
   }
   if (end === "stopped" && !openRows.some(atOrder)) {
@@ -941,6 +950,7 @@ export async function endStream(
     finalDelta?: Omit<Doc<"streamDeltas">, "_id" | "_creationTime">;
   },
 ) {
+  if (await closeStoppedStream(ctx, stream)) return false;
   const caller = await callerJob(ctx);
   const holds = caller !== null && caller === stream.jobId;
   if (!holds && (await roleOf(ctx, caller)).kind !== "app") return false;
@@ -971,6 +981,16 @@ export async function endStream(
 /** After a durable stream finishes, its turn may be answered. */
 export async function settleStream(ctx: MutationCtx, stream: Stream) {
   if (stream.turnId) await settle(ctx, stream.turnId, { byApp: false });
+}
+
+/** A stopped job's own close of its stopped stream ends that stream's rows. */
+export async function closeStoppedStream(ctx: MutationCtx, stream: Stream) {
+  if (stream.state.kind !== "aborted" || !stream.state.timeoutFnId) {
+    return false;
+  }
+  if ((await callerJob(ctx)) !== stream.jobId) return false;
+  await timeoutStoppedStream(ctx, stream);
+  return true;
 }
 
 /** A stopped stream's timeout: its runner is gone, so its rows end here. */

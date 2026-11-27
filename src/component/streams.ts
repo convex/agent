@@ -40,6 +40,7 @@ import {
   stopTurns,
   streamLease,
   timeoutStoppedStream,
+  closeStoppedStream,
   timeoutTurnStream,
 } from "./turns.js";
 
@@ -537,8 +538,11 @@ export const finish = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const stopped = await ctx.db.get("streamingMessages", args.streamId);
+    if (stopped && (await closeStoppedStream(ctx, stopped))) return null;
     const stream = await finishHandler(ctx, { ...args, lease: true });
     if (stream?.turnId) await settleStream(ctx, stream);
+    return null;
   },
 });
 
