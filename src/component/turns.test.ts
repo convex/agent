@@ -1581,3 +1581,41 @@ test("deleting a thread with more running jobs than a page completes while they 
   await s.drain();
   expect(gone).toBe(true);
 }, 20000);
+
+test("deleting a stopped turn's thread still ends the reply it left open in another thread", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const ready = gate();
+  const go = gate();
+  const s = await submitted();
+  const { _id: other } = await s.control((ctx) =>
+    ctx.runMutation(api.threads.createThread, {}),
+  );
+  let saved!: { messages: { _id: string }[]; streamId?: string };
+  attempts.push(async (ctx) => {
+    saved = await ctx.runMutation(api.messages.addMessages, {
+      threadId: other,
+      messages: [pending],
+      createStream: { format: "UIMessageChunk" },
+    });
+    await delta(ctx, saved.streamId!, "keep");
+    ready.open();
+    await go.opened;
+  });
+  const job = s.t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(1));
+  await ready.opened;
+  await s.stop();
+  await s.control((ctx) =>
+    ctx.runMutation(api.threads.deleteAllForThreadIdAsync, {
+      threadId: s.ids.threadId,
+    }),
+  );
+  go.open();
+  await job;
+  await s.t.finishAllScheduledFunctions(() => vi.runAllTimers());
+  const [row] = await s.t.query((ctx) =>
+    ctx.runQuery(api.messages.getMessagesByIds, {
+      messageIds: [saved.messages[0]._id],
+    }),
+  );
+  expect([row?.status, row?.text]).toEqual(["failed", "keep"]);
+});
