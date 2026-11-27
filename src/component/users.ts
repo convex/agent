@@ -4,7 +4,6 @@ import { paginationOptsValidator } from "convex/server";
 import type { ObjectType } from "convex/values";
 import { vPaginationResult } from "../validators.js";
 import { internal } from "./_generated/api.js";
-import type { Id } from "./_generated/dataModel.js";
 import {
   action,
   internalMutation,
@@ -13,13 +12,9 @@ import {
   type MutationCtx,
   query,
 } from "./_generated/server.js";
-import { deleteMessage } from "./messages.js";
-import {
-  deleteStreamsPageForThreadId,
-  deletionCursor,
-  repeatWhileHeadroom,
-} from "./streams.js";
 import { schema, v } from "./schema.js";
+import { repeatWhileHeadroom } from "./streams.js";
+import { deleteThreadArgs, deleteThreadStep } from "./threads.js";
 
 // Note: it only searches for users with threads
 export const listUsersWithThreads = query({
@@ -43,33 +38,14 @@ export const listUsersWithThreads = query({
 export const deleteAllForUserId = action({
   args: { userId: v.string() },
   handler: async (ctx, args) => {
-    let threadsCursor = null;
-    let threadInProgress = null;
-    let messagesCursor = null;
-    let streamsInProgress = false;
-    let streamOrder = undefined;
-    let deltaCursor = undefined;
-    let isDone = false;
-    while (!isDone) {
-      const result: DeleteAllReturns = await ctx.runMutation(
+    let next: DeleteUserArgs = { userId: args.userId };
+    while (true) {
+      const result: DeleteUserStep = await ctx.runMutation(
         internal.users._deletePageForUserId,
-        {
-          userId: args.userId,
-          messagesCursor,
-          threadInProgress,
-          threadsCursor,
-          streamsInProgress,
-          streamOrder,
-          deltaCursor,
-        },
+        next,
       );
-      messagesCursor = result.messagesCursor;
-      threadInProgress = result.threadInProgress;
-      threadsCursor = result.threadsCursor;
-      streamsInProgress = result.streamsInProgress ?? false;
-      streamOrder = result.streamOrder;
-      deltaCursor = result.deltaCursor;
-      isDone = result.isDone;
+      if (result.isDone) break;
+      next = result.next;
     }
   },
   returns: v.null(),
@@ -79,55 +55,39 @@ export const deleteAllForUserIdAsync = mutation({
   args: {
     userId: v.string(),
   },
-  handler: async (ctx, args) => {
-    const isDone = await deleteAllForUserIdBatch(
-      ctx,
-      {
-        userId: args.userId,
-        messagesCursor: null,
-        threadsCursor: null,
-        threadInProgress: null,
-        streamsInProgress: false,
-        streamOrder: undefined,
-        deltaCursor: undefined,
-      },
-      false,
-    );
-    return isDone;
-  },
+  handler: (ctx, args) =>
+    deleteAllForUserIdBatch(ctx, { userId: args.userId }, false),
   returns: v.boolean(),
 });
 
-const deleteAllArgs = {
+const deleteUserArgs = {
   userId: v.string(),
-  messagesCursor: nullable(v.string()),
-  threadsCursor: nullable(v.string()),
-  threadInProgress: nullable(v.id("threads")),
+  thread: v.optional(v.object(deleteThreadArgs)),
+  // Jobs scheduled by earlier versions carry these. They restart from the
+  // user's first thread, which is safe since deletion deletes what it reads.
+  threadsCursor: v.optional(nullable(v.string())),
+  threadInProgress: v.optional(nullable(v.id("threads"))),
+  messagesCursor: v.optional(nullable(v.string())),
   streamsInProgress: v.optional(v.boolean()),
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),
 };
-type DeleteAllArgs = ObjectType<typeof deleteAllArgs>;
-const deleteAllReturns = {
-  threadsCursor: v.string(),
-  threadInProgress: nullable(v.id("threads")),
-  messagesCursor: nullable(v.string()),
-  streamsInProgress: v.optional(v.boolean()),
-  streamOrder: v.optional(v.number()),
-  deltaCursor: v.optional(v.string()),
+type DeleteUserArgs = ObjectType<typeof deleteUserArgs>;
+const deleteUserStepReturns = v.object({
   isDone: v.boolean(),
-};
-type DeleteAllReturns = ObjectType<typeof deleteAllReturns>;
+  next: v.object(deleteUserArgs),
+});
+type DeleteUserStep = { isDone: boolean; next: DeleteUserArgs };
 
 export const _deleteAllForUserIdAsync = internalMutation({
-  args: deleteAllArgs,
+  args: deleteUserArgs,
   handler: (ctx, args) => deleteAllForUserIdBatch(ctx, args, true),
   returns: v.boolean(),
 });
 
 async function deleteAllForUserIdBatch(
   ctx: MutationCtx,
-  args: DeleteAllArgs,
+  args: DeleteUserArgs,
   repeat: boolean,
 ): Promise<boolean> {
   let result = await deletePageForUserId(ctx, args);
@@ -136,141 +96,52 @@ async function deleteAllForUserIdBatch(
       ctx,
       result,
       1,
-      (
-        { isDone: _, ...previous },
-        transactionLimits,
-      ): Promise<DeleteAllReturns> =>
-        ctx.runMutation(
-          internal.users._deletePageForUserId,
-          { userId: args.userId, ...previous },
-          { transactionLimits },
-        ),
+      (previous, transactionLimits): Promise<DeleteUserStep> =>
+        ctx.runMutation(internal.users._deletePageForUserId, previous.next, {
+          transactionLimits,
+        }),
     );
   }
   if (!result.isDone) {
-    await ctx.scheduler.runAfter(0, internal.users._deleteAllForUserIdAsync, {
-      userId: args.userId,
-      messagesCursor: result.messagesCursor,
-      threadsCursor: result.threadsCursor,
-      threadInProgress: result.threadInProgress,
-      streamsInProgress: result.streamsInProgress ?? false,
-      streamOrder: result.streamOrder,
-      deltaCursor: result.deltaCursor,
-    });
+    await ctx.scheduler.runAfter(
+      0,
+      internal.users._deleteAllForUserIdAsync,
+      result.next,
+    );
   }
   return result.isDone;
 }
 
 export const _deletePageForUserId = internalMutation({
-  args: deleteAllArgs,
+  args: deleteUserArgs,
   handler: deletePageForUserId,
-  returns: deleteAllReturns,
+  returns: deleteUserStepReturns,
 });
 async function deletePageForUserId(
   ctx: MutationCtx,
-  args: DeleteAllArgs,
-): Promise<DeleteAllReturns> {
-  let threadInProgress: Id<"threads"> | null = args.threadInProgress;
-  let threadsCursor: string | null = args.threadsCursor;
-  let messagesCursor: string | null = args.messagesCursor;
-  let streamsInProgress: boolean = args.streamsInProgress ?? false;
-  let streamOrder: number | undefined = args.streamOrder;
-  let deltaCursor: string | undefined = args.deltaCursor;
-
-  // Phase 1: Get a thread to work on if we don't have one
-  if (!threadsCursor || !threadInProgress) {
-    const threads = await ctx.db
+  args: DeleteUserArgs,
+): Promise<DeleteUserStep> {
+  let thread = args.thread;
+  if (!thread) {
+    // Deleted threads leave the index, so the first one left is next. Finding
+    // none reads the user's whole range, so a thread created meanwhile
+    // conflicts with the step that finishes.
+    const next = await ctx.db
       .query("threads")
       .withIndex("userId", (q) => q.eq("userId", args.userId))
-      .order("desc")
-      .paginate({
-        numItems: 1,
-        cursor: deletionCursor(args.threadsCursor),
-      });
-    threadsCursor = threads.continueCursor;
-    if (threads.page.length > 0) {
-      threadInProgress = threads.page[0]._id;
-      messagesCursor = null;
-      streamsInProgress = false;
-      streamOrder = undefined;
-      deltaCursor = undefined;
-    } else {
-      return {
-        isDone: true,
-        threadsCursor,
-        threadInProgress,
-        messagesCursor,
-        streamsInProgress,
-        streamOrder,
-        deltaCursor,
-      };
+      .first();
+    if (!next) {
+      return { isDone: true, next: { userId: args.userId } };
     }
+    thread = { threadId: next._id };
   }
-
-  // Phase 2: Delete messages for the current thread
-  if (!streamsInProgress) {
-    const messages = await ctx.db
-      .query("messages")
-      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-        q.eq("threadId", threadInProgress!),
-      )
-      .order("desc")
-      .paginate({
-        numItems: 100,
-        cursor: deletionCursor(messagesCursor),
-      });
-    await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
-
-    if (messages.isDone) {
-      // Messages are done, move to streams deletion phase
-      streamsInProgress = true;
-      messagesCursor = null;
-      streamOrder = undefined;
-      deltaCursor = undefined;
-    } else {
-      messagesCursor = messages.continueCursor;
-    }
-
-    return {
-      messagesCursor,
-      threadsCursor,
-      threadInProgress,
-      streamsInProgress,
-      streamOrder,
-      deltaCursor,
-      isDone: false,
-    };
-  }
-
-  // Phase 3: Delete streams for the current thread
-  const streamResult = await deleteStreamsPageForThreadId(ctx, {
-    threadId: threadInProgress!,
-    streamOrder,
-    deltaCursor,
-  });
-
-  if (streamResult.isDone) {
-    // Streams are done, delete the thread and reset for next thread
-    await ctx.db.delete("threads", threadInProgress);
-    threadInProgress = null;
-    messagesCursor = null;
-    streamsInProgress = false;
-    streamOrder = undefined;
-    deltaCursor = undefined;
-  } else {
-    // Continue with streams deletion
-    streamOrder = streamResult.streamOrder;
-    deltaCursor = streamResult.deltaCursor;
-  }
-
+  const result = await deleteThreadStep(ctx, thread);
   return {
-    messagesCursor,
-    threadsCursor,
-    threadInProgress,
-    streamsInProgress,
-    streamOrder,
-    deltaCursor,
     isDone: false,
+    next: {
+      userId: args.userId,
+      thread: result.isDone ? undefined : result.next,
+    },
   };
 }
 

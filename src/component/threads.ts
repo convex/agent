@@ -171,7 +171,7 @@ export const deleteAllForThreadIdSync = action({
   returns: v.null(),
 });
 
-const deleteThreadArgs = {
+export const deleteThreadArgs = {
   threadId: v.id("threads"),
   cursor: v.optional(v.string()),
   messagesDone: v.optional(v.boolean()),
@@ -183,7 +183,7 @@ const deleteThreadArgs = {
 };
 type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
-  cursor: v.string(),
+  cursor: v.optional(v.string()),
   isDone: v.boolean(),
 };
 type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
@@ -250,11 +250,11 @@ async function deleteAllForThreadIdBatch(
   return { isDone: result.isDone };
 }
 
-async function deleteThreadStep(
+export async function deleteThreadStep(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
 ): Promise<DeleteThreadStep> {
-  let messagesResult = {
+  let messagesResult: DeleteThreadReturns = {
     isDone: args.messagesDone ?? false,
     cursor: args.cursor,
   };
@@ -308,6 +308,18 @@ async function deletePageForThreadIdHandler(
     messages.page.map((doc) => ({ kind: "delete", doc })),
   );
   if (messages.isDone) {
+    // A message saved behind the cursor after its page was deleted is only
+    // found by reading the whole thread, which also makes a save racing
+    // this delete conflict with it.
+    const remaining = await ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+        q.eq("threadId", args.threadId),
+      )
+      .first();
+    if (remaining) {
+      return { cursor: undefined, isDone: false };
+    }
     const thread = await ctx.db.get("threads", args.threadId);
     if (thread) {
       await ctx.db.delete("threads", args.threadId);

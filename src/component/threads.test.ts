@@ -544,6 +544,75 @@ describe("threads", () => {
     expect(await t.query(api.threads.getThread, { threadId })).toBeNull();
   });
 
+  test("deleteAllForThreadIdAsync deletes a message saved behind its cursor", async () => {
+    vi.useFakeTimers();
+
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: Array.from({ length: 4 }, (_, i) => ({
+        message: { role: "user" as const, content: `Message ${i}` },
+      })),
+    });
+
+    await t.mutation(api.threads.deleteAllForThreadIdAsync, {
+      threadId,
+      limit: 2,
+    });
+    // The index sorts "pending" before "success", behind the cursor.
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    vi.useRealTimers();
+
+    expect(await t.query(api.threads.getThread, { threadId })).toBeNull();
+    expect(await t.run((ctx) => ctx.db.query("messages").collect())).toEqual(
+      [],
+    );
+  });
+
+  test("a deleted thread refuses new messages", async () => {
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    const source = await t.mutation(api.threads.createThread, { userId: "u" });
+    await t.mutation(api.messages.addMessages, {
+      threadId: source._id as Id<"threads">,
+      messages: [{ message: { role: "user", content: "to clone" } }],
+    });
+    await t.action(api.threads.deleteAllForThreadIdSync, { threadId });
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        userId: "u",
+        messages: [{ message: { role: "user", content: "late" } }],
+      }),
+    ).rejects.toThrow("not found");
+    await expect(
+      t.action(api.messages.cloneThread, {
+        sourceThreadId: source._id as Id<"threads">,
+        targetThreadId: threadId,
+      }),
+    ).rejects.toThrow("not found");
+    expect(
+      await t.run((ctx) =>
+        ctx.db
+          .query("messages")
+          .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+            q.eq("threadId", threadId),
+          )
+          .collect(),
+      ),
+    ).toEqual([]);
+  });
+
   test("deleteAllForThreadIdSync handles thread with no messages", async () => {
     const t = convexTest(schema, modules);
 
