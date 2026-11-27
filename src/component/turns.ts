@@ -1,6 +1,7 @@
 import type { FunctionHandle } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import type { MutationCtx } from "./_generated/server.js";
+import { internal } from "./_generated/api.js";
 import { finalizePending, getMaxMessage } from "./messages.js";
 import { abortById, finishHandler } from "./streams.js";
 
@@ -239,11 +240,28 @@ const REASONS: Record<Ending, string> = {
   exhausted: "The generation failed after its retries",
 };
 
+type Result = { status: "success" } | { status: "failed"; error: string };
+
+// A closed row is built from its stream's deltas later: reading the delta
+// log here would race the streamer's writes and stall a stop under load.
 async function closeRow(
   ctx: MutationCtx,
   row: Row,
-  result: { status: "success" } | { status: "failed"; error: string },
+  result: Result,
+  abort?: { reason: string },
 ) {
+  await ctx.db.patch("messages", row._id, {
+    jobId: undefined,
+    ...(abort ? { abort } : {}),
+  });
+  await ctx.scheduler.runAfter(0, internal.messages._finalize, {
+    messageId: row._id,
+    result,
+  });
+}
+
+/** A row whose writer is gone, built now: no streamer races its deltas. */
+async function closeRowNow(ctx: MutationCtx, row: Row, result: Result) {
   await finalizePending(
     ctx,
     row,
@@ -280,7 +298,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, TIMED_OUT);
     for (const row of openRows) {
-      await closeRow(ctx, row, { status: "failed", error: TIMED_OUT });
+      await closeRowNow(ctx, row, { status: "failed", error: TIMED_OUT });
     }
     await ctx.db.patch("turns", turn._id, { jobId: undefined });
     return;
@@ -329,11 +347,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
         jobId: undefined,
       });
     } else if (end === "stopped") {
-      await closeRow(ctx, row, { status: "success" });
-      await ctx.db.patch("messages", row._id, {
-        jobId: undefined,
-        abort: { reason },
-      });
+      await closeRow(ctx, row, { status: "success" }, { reason });
     } else {
       await closeRow(ctx, row, { status: "failed", error: reason });
     }
