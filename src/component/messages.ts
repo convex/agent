@@ -826,10 +826,10 @@ export const finalizeMessage = mutation({
   handler: async (ctx, { messageId, result, onSaveMessages }) => {
     const stored = await ctx.db.get("messages", messageId);
     assert(stored, `Message ${messageId} not found`);
+    const write = await authorizeRow(ctx, stored);
     if (!stored.turnId) {
       return finalizePending(ctx, stored, result, onSaveMessages);
     }
-    const write = await authorizeRow(ctx, stored);
     await finalizePending(
       ctx,
       stored,
@@ -838,7 +838,7 @@ export const finalizeMessage = mutation({
       stored.streamId ? [stored.streamId] : [],
     );
     await closeLinkedStream(ctx, stored, result.status === "success");
-    const turnId = write.as === "turn" ? write.turn._id : write.liveTurn?._id;
+    const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
     if (turnId) {
       await settle(ctx, turnId, {
         byApp: write.as === "app",
@@ -989,18 +989,18 @@ export const updateMessage = mutation({
       patch.embeddingId = undefined;
     }
 
-    const write = message.turnId ? await authorizeRow(ctx, message) : undefined;
-    if (write && patch.status && patch.status !== "pending") {
+    const write = await authorizeRow(ctx, message);
+    if (message.turnId && patch.status && patch.status !== "pending") {
       patch.jobId = undefined;
     }
     await ctx.db.patch("messages", args.messageId, patch);
-    const turnId = write?.as === "turn" ? write.turn._id : write?.liveTurn?._id;
+    const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
     if (turnId && patch.status && patch.status !== "pending") {
       await closeLinkedStream(ctx, message, patch.status === "success");
     }
     if (turnId) {
       await settle(ctx, turnId, {
-        byApp: write!.as === "app",
+        byApp: write.as === "app",
         wroteFailed: patch.status === "failed",
         reason: patch.error,
       });

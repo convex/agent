@@ -66,19 +66,22 @@ async function roleOf(
 }
 
 type Write =
-  | { as: "turn"; turn: Turn; caller: string }
+  | { as: "turn"; turnId: Id<"turns">; caller: string }
   | { as: "app"; liveTurn?: Turn };
 
 /** Who may write an existing row: its turn's job, the app, or no one. */
 export async function authorizeRow(ctx: MutationCtx, row: Row): Promise<Write> {
-  if (!row.turnId) return { as: "app" };
   const caller = await callerJob(ctx);
+  // handOff changes a row's job copy with its turn's job, so a match is the holder.
+  if (caller && row.jobId === caller) {
+    return { as: "turn", turnId: row.turnId!, caller };
+  }
   const turn = await turnOf(ctx, row);
   const role = await roleOf(ctx, caller, turn);
   if (role.kind === "revoked") throw new Error(REFUSED);
   if (!live(turn)) return { as: "app" };
   if (role.kind === "holder" && role.turn._id === turn._id) {
-    return { as: "turn", turn, caller: caller! };
+    return { as: "turn", turnId: turn._id, caller: caller! };
   }
   if (role.kind === "holder") throw new Error(REFUSED);
   return { as: "app", liveTurn: turn };
@@ -126,13 +129,25 @@ function memberStreams(
     .collect();
 }
 
-async function settledMembers(ctx: MutationCtx, turn: Turn, since?: "anchor") {
-  return [
-    ...(await members(ctx, turn, "success", since)),
-    ...(await members(ctx, turn, "failed", since)),
-  ]
+// A turn's newest settled members at its position, newest first. A step's
+// calls resolve in the step after it, so two rows decide an answer.
+async function newestSettled(ctx: MutationCtx, turn: Turn, since?: "anchor") {
+  const newest = (status: Status) =>
+    ctx.db
+      .query("messages")
+      .withIndex("turnId_status_order_stepOrder", (q) => {
+        const base = q
+          .eq("turnId", turn._id)
+          .eq("status", status)
+          .eq("order", turn.order);
+        return since ? base.gt("stepOrder", turn.anchorStepOrder) : base;
+      })
+      .order("desc")
+      .take(2);
+  return [...(await newest("success")), ...(await newest("failed"))]
     .filter(at(turn))
-    .sort((a, b) => a.stepOrder - b.stepOrder);
+    .sort((a, b) => b.stepOrder - a.stepOrder)
+    .slice(0, 2);
 }
 
 type Part = { type: string; toolCallId?: string; approvalId?: string };
@@ -157,14 +172,21 @@ async function detect(
   if ((await memberStreams(ctx, turn, "streaming")).some(atOrder)) {
     return { kind: "open" };
   }
-  const rows = await settledMembers(ctx, turn, "anchor");
-  if (!rows.length) {
+  const [last, before] = await newestSettled(ctx, turn, "anchor");
+  if (!last) {
     const finished = (await memberStreams(ctx, turn, "finished")).some(
       (s) => atOrder(s) && s.jobId === turn.jobId,
     );
     return { kind: finished ? "answered" : "none" };
   }
-  if (rows.at(-1)!.status === "failed") return { kind: "failed" };
+  if (last.status === "failed") return { kind: "failed" };
+  // Only the model's own step answers: a user or system row leaves it open.
+  const role = last.message?.role;
+  if (role !== "assistant" && role !== "tool") return { kind: "none" };
+  const rows =
+    role === "tool" && before?.message?.role === "assistant"
+      ? [before, last]
+      : [last];
   const calls = new Map<string, Id<"messages">>();
   const requests = new Map<string, { call: string; row: Id<"messages"> }>();
   for (const row of rows) {
@@ -257,7 +279,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
   if ("idle" in to) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, TIMED_OUT);
-    for (const row of openRows.filter(atOrder)) {
+    for (const row of openRows) {
       await closeRow(ctx, row, { status: "failed", error: TIMED_OUT });
     }
     await ctx.db.patch("turns", turn._id, { jobId: undefined });
@@ -320,7 +342,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     await closeStream(ctx, s._id, end === "answered", reason);
   }
   if (end === "stopped" && !openRows.some(atOrder)) {
-    const newest = (await settledMembers(ctx, turn)).at(-1);
+    const [newest] = await newestSettled(ctx, turn);
     if (newest) {
       await ctx.db.patch("messages", newest._id, { abort: { reason } });
     }
@@ -411,15 +433,14 @@ export async function settle(
   turnOrId: Id<"turns"> | Turn,
   w: Settle,
 ): Promise<string | undefined> {
+  // An open row at the turn answers "open", which changes nothing for a running turn.
+  if (w.opened && !w.wroteFailed) return;
   const turn =
     typeof turnOrId === "string"
       ? await ctx.db.get("turns", turnOrId)
       : turnOrId;
   if (!live(turn)) return;
-  const result: Detected =
-    w.opened && !w.wroteFailed
-      ? { kind: "open" }
-      : await detect(ctx, turn, !!w.wroteFailed);
+  const result = await detect(ctx, turn, !!w.wroteFailed);
   if (result.kind === "open" || result.kind === "none") {
     if (turn.status === "waiting") {
       await ctx.db.patch("turns", turn._id, {
@@ -540,8 +561,10 @@ const turnInfo = (turn: Turn, jobId: string): TurnInfo => ({
   jobId,
 });
 
+type Position = Pick<Turn, "_id" | "threadId" | "order">;
+
 /** A holder's rows at its turn are members; elsewhere only its open rows are leased. */
-function memberStamp(turn: Turn, caller: string, threadId: Id<"threads">) {
+function memberStamp(turn: Position, caller: string, threadId: Id<"threads">) {
   return (order: number, status: Status, replaced?: Row): Stamp => {
     const job = status === "pending" ? { jobId: caller } : {};
     if (replaced) return { turnId: replaced.turnId, ...job };
@@ -576,8 +599,8 @@ export async function planSave(
   const beginning =
     args.messages.length === 1 && args.messages[0].status === "pending";
   if (pending) {
-    if (!pending.turnId) return { pending };
     const write = await authorizeRow(ctx, pending);
+    if (!pending.turnId) return { pending };
     if (
       write.as === "turn" || write.liveTurn
         ? args.promptMessage && args.promptMessage.order !== pending.order
@@ -585,7 +608,7 @@ export async function planSave(
     ) {
       throw new Error("A live turn's reply can't move to another prompt");
     }
-    return planFill(ctx, pending, write);
+    return planFill(ctx, pending, write, args.promptMessage);
   }
   if (!caller && !args.promptMessage?.turnId) return { pending };
   const prompt = args.promptMessage ?? null;
@@ -647,20 +670,39 @@ export async function streamLease(ctx: MutationCtx): Promise<Stamp> {
   return role.kind === "holder" ? { turnId: role.turn._id, jobId: caller } : {};
 }
 
-function planFill(ctx: MutationCtx, pending: Row, write: Write): SaveTurn {
-  const turnId = write.as === "turn" ? write.turn._id : write.liveTurn?._id;
+// A holder's turn's position, from its prompt when the save names it.
+async function positionOf(
+  ctx: MutationCtx,
+  turnId: Id<"turns">,
+  prompt?: Row | null,
+): Promise<Position> {
+  if (prompt?.turnId === turnId && prompt.status !== "pending") {
+    return { _id: turnId, threadId: prompt.threadId, order: prompt.order };
+  }
+  return (await ctx.db.get("turns", turnId))!;
+}
+
+async function planFill(
+  ctx: MutationCtx,
+  pending: Row,
+  write: Write,
+  prompt?: Row | null,
+): Promise<SaveTurn> {
+  const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
+  const position =
+    write.as === "turn" ? await positionOf(ctx, write.turnId, prompt) : null;
   return {
     pending,
     userId: turnId ? pending.userId : undefined,
     carry: turnId ? pending.streamId : undefined,
     stamp:
       write.as === "turn"
-        ? memberStamp(write.turn, write.caller, pending.threadId)
+        ? memberStamp(position!, write.caller, pending.threadId)
         : (_order, _status, replaced) =>
             replaced ? { turnId: replaced.turnId } : {},
     streamStamp:
       write.as === "turn"
-        ? { turnId: write.turn._id, jobId: write.caller }
+        ? { turnId: write.turnId, jobId: write.caller }
         : undefined,
     after: async (saved, _streamId, finished) => {
       const row = saved.find((doc) => doc._id === pending._id);
@@ -681,13 +723,17 @@ function planFill(ctx: MutationCtx, pending: Row, write: Write): SaveTurn {
           "Filled",
         );
       }
-      const turn = write.as === "turn" ? write.turn : write.liveTurn;
-      if (turn) {
-        await settle(ctx, turn, {
-          byApp: write.as === "app",
-          wroteFailed: saved.some((doc) => doc.status === "failed"),
-        });
-      }
+      if (!turnId) return {};
+      const opened =
+        position &&
+        saved.some(
+          (doc) => doc.status === "pending" && at(position as Turn)(doc),
+        );
+      await settle(ctx, write.as === "app" ? write.liveTurn! : turnId, {
+        byApp: write.as === "app",
+        wroteFailed: saved.some((doc) => doc.status === "failed"),
+        ...(opened ? { opened: true as const } : {}),
+      });
       return {};
     },
   };
@@ -741,9 +787,11 @@ async function planSend(
       });
       await recordJob(ctx, jobId, turnId);
       // Stamped in the save's own transaction: the turn needs the rows' ids.
-      const stamped = args.promptMessage
-        ? [args.promptMessage, ...saved]
-        : saved;
+      // A send never restamps a row: an existing prompt keeps its turn.
+      const stamped =
+        args.promptMessage && !args.promptMessage.turnId
+          ? [args.promptMessage, ...saved]
+          : saved;
       for (const row of stamped) {
         await ctx.db.patch("messages", row._id, {
           turnId,
@@ -804,19 +852,19 @@ export async function endStream(
   },
 ) {
   const caller = await callerJob(ctx);
-  if (caller === stream.jobId) {
+  const holds = caller !== null && caller === stream.jobId;
+  if (!holds && (await roleOf(ctx, caller)).kind !== "app") return false;
+  // fail is the streamer's own failure; abort, or the app's fail, is a stop.
+  if (holds && how === "fail") {
     if (stream.state.kind !== "streaming") return false;
     await abortById(ctx, { streamId: stream._id, ...args });
-    // Its job failing its stream fails the turn; aborting one only ends it.
     await settle(ctx, stream.turnId!, {
       byApp: false,
-      wroteFailed: how === "fail",
+      wroteFailed: true,
       reason: args.reason,
     });
     return true;
   }
-  const role = await roleOf(ctx, caller);
-  if (role.kind !== "app") return false;
   const turn = await turnOf(ctx, stream);
   if (live(turn)) {
     await handOff(ctx, turn, {
