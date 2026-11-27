@@ -1039,3 +1039,73 @@ test("a send at a new order leaves an older turn whose job returned without answ
     error: "The generation returned without answering",
   });
 });
+
+test("a stop reaches a send's pending row that sits before its prompt's order", async () => {
+  const t = createTest();
+  const handle = await t.mutation(() => createFunctionHandle(generate));
+  const pendingLeft = await t.mutation(async (ctx) => {
+    const thread = await ctx.runMutation(api.threads.createThread, {});
+    await ctx.runMutation(api.messages.addMessages, {
+      threadId: thread._id,
+      messages: [
+        { message: { role: "user", content: "A." } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+        { message: { role: "user", content: "B." } },
+      ],
+      generate: handle,
+    });
+    await ctx.runMutation(api.messages.abortGeneration, {
+      threadId: thread._id,
+    });
+    const { page } = await ctx.runQuery(api.messages.listMessagesByThreadId, {
+      threadId: thread._id,
+      order: "asc",
+      statuses: ["pending"],
+      paginationOpts: { numItems: 10, cursor: null },
+    });
+    return page.length;
+  });
+  expect(pendingLeft).toBe(0);
+});
+
+test("ending a turn ends the row and stream its job opened in another thread", async () => {
+  const ready = gate();
+  const done = gate();
+  let away!: { threadId: string; streamId: string };
+  attempts.push(async (ctx, ids) => {
+    await begin(ctx, ids);
+    const other = await ctx.runMutation(api.threads.createThread, {});
+    const saved = await ctx.runMutation(api.messages.addMessages, {
+      threadId: other._id,
+      messages: [pending],
+      createStream: { format: "UIMessageChunk" },
+    });
+    away = { threadId: other._id, streamId: saved.streamId };
+    await delta(ctx, saved.streamId, "Away.");
+    ready.open();
+    await done.opened;
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await ready.opened;
+  await s.stop();
+  done.open();
+  await job;
+  const left = await s.t.query(async (ctx) => ({
+    rows: (
+      await ctx.runQuery(api.messages.listMessagesByThreadId, {
+        threadId: away.threadId,
+        order: "asc",
+        statuses: ["pending"],
+        paginationOpts: { numItems: 10, cursor: null },
+      })
+    ).page.length,
+    streams: (
+      await ctx.runQuery(api.streams.list, {
+        threadId: away.threadId,
+        statuses: ["streaming"],
+      })
+    ).length,
+  }));
+  expect(left).toEqual({ rows: 0, streams: 0 });
+});
