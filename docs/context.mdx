@@ -18,6 +18,13 @@ if you pass the ID of the user-submitted message as the `promptMessageId` and
 there had already been some assistant and/or tool responses, those will be
 included in the context, allowing the LLM to continue the conversation.
 
+A durable reply stopped with `abortGeneration` ends failed, with error "Stopped"
+(or the reason you passed), and keeps what it streamed. An inline generation
+ends its own reply, as on main: failed with "async abort" and what it streamed,
+or success if its last chunks arrived before the stop. A turn with no open
+message is still stopped, and its messages stay as they are. Recent messages in
+later context leave failed replies out, but text search can still find them.
+
 You can also use [RAG](./rag.mdx) to add extra context to your prompt.
 
 ## Customizing the context

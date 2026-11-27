@@ -131,6 +131,8 @@ export async function saveAgentMessages(
     /** A handle to the Agent's `onSaveMessages`. */
     onSaveMessages?: string;
     createStream?: Parameters<typeof addMessages>[2]["createStream"];
+    /** A handle to the action that answers the last message. */
+    generate?: string;
   },
 ): ReturnType<typeof addMessages> {
   const serialized = await Promise.all(
@@ -157,6 +159,7 @@ export async function saveAgentMessages(
     failPendingSteps: args.failPendingSteps ?? false,
     onSaveMessages: args.onSaveMessages,
     createStream: args.createStream,
+    generate: args.generate,
   });
 }
 

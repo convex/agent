@@ -134,8 +134,8 @@ export async function saveMessages(
   return { messages };
 }
 
-// Not exported from the package: a save that can also start a stream, with
-// everything the component returns.
+// Not exported from the package: a save that can also start a stream or a
+// durable turn, with everything the component returns.
 export async function addMessages(
   ctx: MutationCtx | ActionCtx,
   component: AgentComponent,
@@ -143,6 +143,7 @@ export async function addMessages(
     agentName?: string;
     onSaveMessages?: string;
     createStream?: AddMessagesArgs["createStream"];
+    generate?: string;
   },
 ): Promise<FunctionReturnType<AgentComponent["messages"]["addMessages"]>> {
   let embeddings: MessageEmbeddingsWithDimension | undefined;
@@ -178,6 +179,7 @@ export async function addMessages(
         failPendingSteps: args.failPendingSteps ?? false,
         onSaveMessages: args.onSaveMessages,
         createStream: args.createStream,
+        generate: args.generate,
       }),
   );
 }

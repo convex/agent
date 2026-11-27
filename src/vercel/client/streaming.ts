@@ -274,6 +274,7 @@ export class DeltaStreamer<T> {
   #latestWrite: number = 0;
   #ongoingWrite: Promise<void> | undefined;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #closedItsReply = false;
   #keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
   #keepAliveStopped: boolean;
   #abortPromise: Promise<void> | undefined;
@@ -313,6 +314,8 @@ export class DeltaStreamer<T> {
     },
     public readonly metadata: {
       threadId: string;
+      /** The prompt the stream answers, when no saved message does. */
+      promptMessageId?: string;
       userId?: string;
       order: number;
       stepOrder: number;
@@ -724,8 +727,10 @@ export class DeltaStreamer<T> {
     });
   }
 
-  public async fail(reason: string) {
+  /** Fails the stream; true when this close ended its reply, as a stopped job's close does. */
+  public async fail(reason: string): Promise<boolean> {
     await this.#abort(reason);
+    return this.#closedItsReply;
   }
 
   async #abortDelta(reason: string) {
@@ -791,20 +796,23 @@ export class DeltaStreamer<T> {
     const opening = waitForOngoingWrite ? this.#nextParts : [];
     let abortFailure: { error: unknown } | undefined;
     try {
-      await this.ctx.runMutation(this.component.streams.fail, {
-        streamId: this.streamId,
-        reason,
-        ...(opening.length > 0 && !this.#hasVisibleParts()
-          ? {
-              finalDelta: {
-                streamId: this.streamId,
-                start: this.#cursor,
-                end: this.#cursor + opening.length,
-                parts: opening,
-              },
-            }
-          : {}),
-      });
+      this.#closedItsReply = await this.ctx.runMutation(
+        this.component.streams.fail,
+        {
+          streamId: this.streamId,
+          reason,
+          ...(opening.length > 0 && !this.#hasVisibleParts()
+            ? {
+                finalDelta: {
+                  streamId: this.streamId,
+                  start: this.#cursor,
+                  end: this.#cursor + opening.length,
+                  parts: opening,
+                },
+              }
+            : {}),
+        },
+      );
     } catch (error) {
       abortFailure = { error };
     }
