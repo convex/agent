@@ -1150,6 +1150,33 @@ describe("search.ts", () => {
       ]);
     });
 
+    it("fills the recent window past a page the byte cap cut short", async () => {
+      const threadId = await createTestThread("userBig");
+      const big = "x".repeat(400_000);
+      for (let batch = 0; batch < 3; batch++) {
+        await t.run((mutCtx) =>
+          saveMessages(mutCtx, components.agent, {
+            threadId,
+            userId: "userBig",
+            messages: Array.from({ length: 5 }, (_, i) => ({
+              role: "user" as const,
+              content: `${batch * 5 + i} ${big}`,
+            })),
+          }),
+        );
+      }
+
+      const recent = await fetchContextMessages(ctx, components.agent, {
+        userId: "userBig",
+        threadId,
+        contextOptions: { recentMessages: 15 },
+      });
+
+      expect(recent.map((m) => Number(m.text!.split(" ", 1)[0]))).toEqual(
+        Array.from({ length: 15 }, (_, i) => i),
+      );
+    });
+
     it("still omits an older order longer than the window when the continued one has no successful messages", async () => {
       const threadId = await createTestThread("user433b");
       const steps = Array.from({ length: 1_103 }, (_, i) => ({

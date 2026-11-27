@@ -164,17 +164,23 @@ export async function fetchRecentAndSearchMessages(
         order: "desc",
         statuses: ["success"],
       });
-    const firstPage = await fetchRecentPage(
-      opts.recentMessages ?? DEFAULT_RECENT_MESSAGES,
-      null,
-    );
-    const page = [...firstPage.page];
+    const numItems = opts.recentMessages ?? DEFAULT_RECENT_MESSAGES;
+    let recent = await fetchRecentPage(numItems, null);
+    const page = [...recent.page];
+    // The component cuts a page that reads too much short and asks for a split.
+    while (recent.pageStatus === "SplitRequired" && page.length < numItems) {
+      recent = await fetchRecentPage(
+        numItems - page.length,
+        recent.continueCursor,
+      );
+      page.push(...recent.page);
+    }
     const oldest = page.at(-1);
     if (
       oldest &&
       oldest.stepOrder > 0 &&
-      !firstPage.isDone &&
-      firstPage.continueCursor
+      !recent.isDone &&
+      recent.continueCursor
     ) {
       // The order being continued holds the prompt, so it is read whole. An
       // older order gets one page, and is trimmed below if still split.
@@ -189,7 +195,7 @@ export async function fetchRecentAndSearchMessages(
             })
           )[0]
         )?.order === oldest.order;
-      let next = firstPage;
+      let next = recent;
       do {
         next = await fetchRecentPage(
           Math.min(page.at(-1)!.stepOrder, MAX_ORDER_COMPLETION_MESSAGES),

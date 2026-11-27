@@ -972,6 +972,12 @@ export const cloneThread = action({
   },
 });
 
+// A listed message carries its text twice, in its content and as `text`, so a
+// page returns up to twice what it reads. This plus the message that crosses
+// it (up to the 1 MiB document limit), doubled, stays under the 16 MiB return
+// limit, which binds before the 16 MiB read limit.
+const MAX_PAGE_BYTES = 4 * 1024 * 1024;
+
 export const listMessagesByThreadIdArgs = {
   threadId: v.id("threads"),
   excludeToolMessages: v.optional(v.boolean()),
@@ -1043,12 +1049,25 @@ async function listMessagesByThreadIdHandler(
       ),
     );
   }
+  const paginationOpts = args.paginationOpts ?? {
+    numItems: DEFAULT_RECENT_MESSAGES,
+    cursor: null,
+  };
   const messages = await mergedStream(streams, ["order", "stepOrder"]).paginate(
-    args.paginationOpts ?? {
-      numItems: DEFAULT_RECENT_MESSAGES,
-      cursor: null,
+    {
+      ...paginationOpts,
+      maximumBytesRead: Math.min(
+        paginationOpts.maximumBytesRead ?? Infinity,
+        MAX_PAGE_BYTES,
+      ),
     },
   );
+  // A paginated hook replaces a SplitRequired page with (cursor, splitCursor]
+  // and (splitCursor, continueCursor], so a page bound by endCursor keeps it
+  // as its end, or the messages it didn't reach would never show.
+  if (messages.pageStatus === "SplitRequired" && paginationOpts.endCursor) {
+    messages.continueCursor = paginationOpts.endCursor;
+  }
   if (messages.page.length === 0) {
     messages.isDone = true;
   }
