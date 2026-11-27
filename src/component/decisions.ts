@@ -79,11 +79,11 @@ function toDoc(decision: Doc<"decisions">, rows: Doc<"decisionAnswers">[]) {
 const vAsked = v.object(pick(answerFields, ["questionId", "shapeHash"]));
 
 /**
- * Reads `source` in batches that leave room for a full document per decision
- * read, ending the page once half the query's read limits are used, as
- * listDeltas keeps. A decision's size shows only once it's read. A refresh up
- * to its `endCursor` returns that whole range, as a paginated query's pages
- * must stay adjacent.
+ * Reads `source` in batches that leave room for a full decision with its
+ * answers per item read, ending the page once half the query's read limits are
+ * used, as listDeltas keeps. A decision's size shows only once it's read. A
+ * refresh up to its `endCursor` that runs out first asks for a split, as a
+ * paginated query's pages must stay adjacent.
  */
 async function pageWithinReadLimits<T, D>(
   ctx: QueryCtx,
@@ -91,10 +91,7 @@ async function pageWithinReadLimits<T, D>(
   opts: PaginationOptions,
   load: (item: T) => Promise<D>,
 ): Promise<PaginationResult<D>> {
-  if (opts.endCursor) {
-    const result = await source.paginate(opts);
-    return { ...result, page: await Promise.all(result.page.map(load)) };
-  }
+  const { endCursor } = opts;
   const page: D[] = [];
   let cursor = opts.cursor;
   for (;;) {
@@ -102,22 +99,33 @@ async function pageWithinReadLimits<T, D>(
     const [bytesLeft, documentsLeft] = [bytesRead, documentsRead].map(
       ({ used, remaining }) => (used + remaining) / 2 - used,
     );
-    if (page.length > 0 && (bytesLeft <= 0 || documentsLeft <= 0)) {
-      return { page, isDone: false, continueCursor: cursor! };
+    if (cursor !== opts.cursor && (bytesLeft <= 0 || documentsLeft <= 0)) {
+      return endCursor
+        ? {
+            page,
+            isDone: false,
+            continueCursor: endCursor,
+            splitCursor: cursor,
+            pageStatus: "SplitRequired",
+          }
+        : { page, isDone: false, continueCursor: cursor! };
     }
-    const result = await source.paginate({
-      numItems: Math.max(
-        1,
-        Math.min(
-          opts.numItems - page.length,
-          Math.floor(bytesLeft / MAX_DOCUMENT_BYTES),
-        ),
-      ),
-      cursor,
-    });
+    const batch = Math.max(1, Math.floor(bytesLeft / MAX_DOCUMENT_BYTES));
+    const result = await source.paginate(
+      endCursor
+        ? { numItems: batch, cursor, endCursor, maximumRowsRead: batch }
+        : {
+            numItems: Math.max(1, Math.min(opts.numItems - page.length, batch)),
+            cursor,
+          },
+    );
     page.push(...(await Promise.all(result.page.map(load))));
     cursor = result.continueCursor;
-    if (result.isDone || page.length >= opts.numItems) {
+    if (
+      endCursor
+        ? cursor === endCursor
+        : result.isDone || page.length >= opts.numItems
+    ) {
       return { page, isDone: result.isDone, continueCursor: cursor };
     }
   }

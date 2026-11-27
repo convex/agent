@@ -115,7 +115,9 @@ its answer type, so earlier answers are left out. Listing with empty `questions`
 returns an empty page. Without `questions`, every decision is listed with the
 questions it was asked. A page of large decisions can hold fewer than
 `numItems`, so it stays within a query's read limits: keep paging until
-`isDone`.
+`isDone`. A page refreshed up to its `endCursor` can come back with
+`pageStatus: "SplitRequired"` and a `splitCursor`, as Convex's paginated queries
+do, and `usePaginatedQuery` splits it.
 
 Record the right answer to a question next to the model's:
 

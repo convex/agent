@@ -548,6 +548,79 @@ describe("a stored decision", () => {
     expect(out.corrections).toEqual([0]);
   });
 
+  test("a refresh that reads past the read limit asks for a split, and its halves list the range once", async () => {
+    const agent = makeAgent({});
+    const out = await initConvexTest({
+      transactionLimits: { bytesRead: 4 << 20 },
+    }).action(async (ctx) => {
+      const { threadId } = await seedThread(ctx);
+      const decide = (state: string) =>
+        agent.experimental_decide(ctx, { threadId }, { questions, state });
+      for (let i = 0; i < 3; i++) await decide(`small ${i}`);
+      const listing =
+        (asked?: typeof questions) =>
+        (paginationOpts: {
+          numItems: number;
+          cursor: string | null;
+          endCursor?: string;
+        }) =>
+          experimental_listDecisions(ctx, components.agent, {
+            threadId,
+            questions: asked as typeof questions,
+            paginationOpts,
+          });
+      const ends = await Promise.all(
+        [undefined, questions].map(
+          async (asked) =>
+            (await listing(asked)({ numItems: 2, cursor: null }))
+              .continueCursor,
+        ),
+      );
+      for (let i = 0; i < 8; i++) await decide(String(i).padEnd(900_000, "x"));
+      // As usePaginatedQuery does: a page asking for a split is replaced by its
+      // halves.
+      const refresh = async (
+        page: ReturnType<typeof listing>,
+        cursor: string | null,
+        endCursor: string,
+      ): Promise<{ ids: string[]; splits: number }> => {
+        const result = await page({ numItems: 2, cursor, endCursor });
+        if (result.pageStatus !== "SplitRequired") {
+          return { ids: result.page.map((d) => d._id), splits: 0 };
+        }
+        expect(result.continueCursor).toBe(endCursor);
+        const first = await refresh(page, cursor, result.splitCursor!);
+        const second = await refresh(page, result.splitCursor!, endCursor);
+        return {
+          ids: [...first.ids, ...second.ids],
+          splits: first.splits + second.splits + 1,
+        };
+      };
+      const refreshed = await Promise.all(
+        [undefined, questions].map((asked, i) =>
+          refresh(listing(asked), null, ends[i]),
+        ),
+      );
+      const all: string[] = [];
+      let cursor: string | null = null;
+      for (;;) {
+        const result: {
+          page: { _id: string }[];
+          isDone: boolean;
+          continueCursor: string;
+        } = await listing()({ numItems: 20, cursor });
+        all.push(...result.page.map((d) => d._id));
+        if (result.isDone) break;
+        cursor = result.continueCursor;
+      }
+      return { refreshed, newest: all.slice(0, 10) };
+    });
+    for (const { ids, splits } of out.refreshed) {
+      expect(splits).toBeGreaterThan(0);
+      expect(ids).toEqual(out.newest);
+    }
+  });
+
   test("a listed page stops short of the read limit, however large its decisions, and the next continues it", async () => {
     const agent = makeAgent({});
     const out = await initConvexTest({ transactionLimits: true }).action(
