@@ -254,12 +254,19 @@ export const listDeltas = query({
 });
 
 export const create = mutation({
-  args: omit(schema.tables.streamingMessages.validator.fields, [
-    "state",
-    "fileRefs",
-  ]),
+  args: {
+    ...omit(schema.tables.streamingMessages.validator.fields, [
+      "state",
+      "fileRefs",
+      "turnId",
+      "jobId",
+    ]),
+    // The prompt the stream answers, when a generation begins with it.
+    promptMessageId: v.optional(v.id("messages")),
+  },
   returns: v.id("streamingMessages"),
-  handler: async (ctx, args) => {
+  handler: async (ctx, { promptMessageId, ...args }) => {
+    if (promptMessageId !== undefined) throw new Error("not implemented");
     const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
     // TODO: enforce order/stepOrder uniqueness?
     const streamId = await ctx.db.insert("streamingMessages", {
@@ -408,6 +415,19 @@ async function cleanupTimeoutFn(
 }
 
 // No longer used from the DeltaStreamer
+// The stream's own writer ending it with an error. From anyone else it is a stop.
+export const fail = mutation({
+  args: {
+    streamId: v.id("streamingMessages"),
+    reason: v.string(),
+    finalDelta: v.optional(deltaValidator),
+  },
+  returns: v.boolean(),
+  handler: async () => {
+    throw new Error("not implemented");
+  },
+});
+
 export const finish = mutation({
   args: {
     streamId: v.id("streamingMessages"),

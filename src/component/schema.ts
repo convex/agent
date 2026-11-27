@@ -68,6 +68,14 @@ export const schema = defineSchema({
     // Set when the message's text parts are stored empty, as `text` holds
     // their text: the length of each text part's text, or of a string content.
     textLengths: v.optional(v.array(v.number())),
+
+    // The durable turn this row belongs to, stamped when it is inserted.
+    turnId: v.optional(v.id("turns")),
+    // While pending: the job that may write it, always the turn's job.
+    jobId: v.optional(v.string()),
+    // The stream this row's text comes from while it is pending.
+    streamId: v.optional(v.id("streamingMessages")),
+    abort: v.optional(v.object({ reason: v.string() })),
   })
     // Allows finding successful visible messages in order
     // Also surface pending messages separately to e.g. stream
@@ -85,7 +93,13 @@ export const schema = defineSchema({
       filterFields: ["userId", "threadId"],
     })
     // Allows finding messages by vector embedding id
-    .index("embeddingId_threadId", ["embeddingId", "threadId"]),
+    .index("embeddingId_threadId", ["embeddingId", "threadId"])
+    .index("turnId_status_order_stepOrder", [
+      "turnId",
+      "status",
+      "order",
+      "stepOrder",
+    ]),
 
   // Status: if it's done, it's deleted, then deltas are vacuumed
   streamingMessages: defineTable({
@@ -136,6 +150,10 @@ export const schema = defineSchema({
         cleanupFnId: v.optional(v.id("_scheduled_functions")),
       }),
     ),
+    turnId: v.optional(v.id("turns")),
+    // Set at insert and never changed: every change of the turn's job closes
+    // the turn's open streams first.
+    jobId: v.optional(v.string()),
   })
     // There should only be one per "order" index
     // If another exists, it's deleted and replaced
@@ -144,7 +162,42 @@ export const schema = defineSchema({
       "state.kind",
       "order",
       "stepOrder",
-    ]),
+    ])
+    .index("turnId_state_order", ["turnId", "state.kind", "order"]),
+
+  // A durable generation: the prompt it answers and the job that may write it.
+  turns: defineTable({
+    threadId: v.id("threads"),
+    order: v.number(),
+    promptMessageId: v.id("messages"),
+    // Where the current job starts: the prompt, or the response a
+    // continuation resumes from.
+    anchorMessageId: v.id("messages"),
+    anchorStepOrder: v.number(),
+    requestMessageId: v.optional(v.id("messages")),
+    generate: v.string(),
+    retries: v.number(),
+    jobId: v.optional(v.string()),
+    status: v.union(
+      v.literal("running"),
+      v.literal("waiting"),
+      v.literal("done"),
+    ),
+    outcome: v.optional(v.string()),
+  }).index("threadId_status_order", ["threadId", "status", "order"]),
+
+  // Every job a turn ever scheduled, so a replaced job reads as replaced.
+  jobs: defineTable({
+    jobId: v.string(),
+    turnId: v.id("turns"),
+  }).index("jobId", ["jobId"]),
+
+  // A durable tool mutation's result, replayed when a retry calls it again.
+  toolRuns: defineTable({
+    turnId: v.id("turns"),
+    toolCallId: v.string(),
+    result: v.any(),
+  }).index("turnId_toolCallId", ["turnId", "toolCallId"]),
 
   streamDeltas: defineTable({
     streamId: v.id("streamingMessages"),

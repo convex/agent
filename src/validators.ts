@@ -782,6 +782,8 @@ export const vMessageDoc = v.object({
   // Likely deprecated soon
   reasoning: v.optional(v.string()),
   reasoningDetails: v.optional(vReasoningDetails),
+  // Set when a stop ended the generation that wrote it.
+  abort: v.optional(v.object({ reason: v.string() })),
   // Deprecated
   id: v.optional(v.string()), // external id, e.g. from Vercel AI SDK
 });

@@ -136,12 +136,26 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       >;
     };
     messages: {
+      abortGeneration: FunctionReference<
+        "mutation",
+        "internal",
+        { promptMessageId?: string; reason?: string; threadId: string },
+        boolean,
+        Name
+      >;
       addMessages: FunctionReference<
         "mutation",
         "internal",
         {
           abandonIfPromptMissing?: boolean;
           agentName?: string;
+          createStream?: {
+            agentName?: string;
+            format?: "UIMessageChunk" | "TextStreamPart";
+            model?: string;
+            provider?: string;
+            providerOptions?: Record<string, Record<string, any>>;
+          };
           embeddings?: {
             dimension:
               | 128
@@ -160,6 +174,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           };
           failPendingSteps?: boolean;
           finishStreamId?: string;
+          generate?: string;
           hideFromUserIdSearch?: boolean;
           messages: Array<{
             error?: string;
@@ -926,6 +941,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           messages: Array<{
             _creationTime: number;
             _id: string;
+            abort?: { reason: string };
             agentName?: string;
             embeddingId?: string;
             error?: string;
@@ -1688,6 +1704,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | { message: string; type: "other" }
             >;
           }>;
+          jobId?: string;
+          streamId?: string;
+          turn?: { jobId: string; promptMessageId: string };
         },
         Name
       >;
@@ -1747,6 +1766,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<null | {
           _creationTime: number;
           _id: string;
+          abort?: { reason: string };
           agentName?: string;
           embeddingId?: string;
           error?: string;
@@ -2483,6 +2503,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           page: Array<{
             _creationTime: number;
             _id: string;
+            abort?: { reason: string };
             agentName?: string;
             embeddingId?: string;
             error?: string;
@@ -3260,6 +3281,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             approved: boolean;
             reason?: string;
           }>;
+          generate?: string;
           onSaveMessages?: string;
           outputs?: Array<{
             output:
@@ -3275,7 +3297,14 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           }>;
           threadId: string;
         },
-        { messageId: string },
+        { jobId?: string; messageId: string },
+        Name
+      >;
+      retryGeneration: FunctionReference<
+        "mutation",
+        "internal",
+        { maxRetries?: number; promptMessageId?: string; threadId: string },
+        null | string,
         Name
       >;
       searchMessages: FunctionReference<
@@ -3297,6 +3326,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           _creationTime: number;
           _id: string;
+          abort?: { reason: string };
           agentName?: string;
           embeddingId?: string;
           error?: string;
@@ -4015,6 +4045,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           _creationTime: number;
           _id: string;
+          abort?: { reason: string };
           agentName?: string;
           embeddingId?: string;
           error?: string;
@@ -5439,6 +5470,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           _creationTime: number;
           _id: string;
+          abort?: { reason: string };
           agentName?: string;
           embeddingId?: string;
           error?: string;
@@ -6190,6 +6222,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           format?: "UIMessageChunk" | "TextStreamPart";
           model?: string;
           order: number;
+          promptMessageId?: string;
           provider?: string;
           providerOptions?: Record<string, Record<string, any>>;
           stepOrder: number;
@@ -6225,6 +6258,22 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { streamId: string },
         null,
+        Name
+      >;
+      fail: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          finalDelta?: {
+            end: number;
+            parts: Array<any>;
+            start: number;
+            streamId: string;
+          };
+          reason: string;
+          streamId: string;
+        },
+        boolean,
         Name
       >;
       finish: FunctionReference<
@@ -6410,6 +6459,15 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           title?: string;
           userId?: string;
         },
+        Name
+      >;
+    };
+    turns: {
+      runToolMutation: FunctionReference<
+        "mutation",
+        "internal",
+        { args: any; handle: string; toolCallId: string },
+        any,
         Name
       >;
     };

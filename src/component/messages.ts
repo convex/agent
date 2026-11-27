@@ -5,7 +5,7 @@ import {
   type FunctionHandle,
   type WithoutSystemFields,
 } from "convex/server";
-import { ConvexError, type ObjectType } from "convex/values";
+import { ConvexError, type ObjectType, v as baseV } from "convex/values";
 import {
   DEFAULT_MESSAGE_RANGE,
   DEFAULT_RECENT_MESSAGES,
@@ -103,6 +103,9 @@ function publicMessage(message: Doc<"messages">): MessageDoc {
     parentMessageId: _parentMessageId,
     stepId: _stepId,
     files: _files,
+    turnId: _turnId,
+    jobId: _jobId,
+    streamId: _streamId,
     ...doc
   } = withText(message);
   return withDerivedReasoning(doc);
@@ -277,11 +280,65 @@ const addMessagesArgs = {
   // Failed messages abort it instead.
   finishStreamId: v.optional(v.id("streamingMessages")),
   onSaveMessages: vOnSaveMessages,
+  // Starts a stream with the last message, which must be pending.
+  createStream: v.optional(
+    v.object(
+      pick(schema.tables.streamingMessages.validator.fields, [
+        "agentName",
+        "format",
+        "model",
+        "provider",
+        "providerOptions",
+      ]),
+    ),
+  ),
+  // A handle to an action taking { threadId, promptMessageId }, scheduled to
+  // answer the last message: the save starts a durable turn.
+  generate: v.optional(v.string()),
 };
+export const vJobId = baseV.id("_scheduled_functions");
 export const addMessages = mutation({
   args: addMessagesArgs,
-  handler: (ctx, args) => addMessagesHandler(ctx, args),
-  returns: v.object({ messages: v.array(vMessageDoc) }),
+  handler: (ctx, args) => {
+    if (args.generate !== undefined || args.createStream !== undefined) {
+      throw new Error("not implemented");
+    }
+    return addMessagesHandler(ctx, args);
+  },
+  returns: v.object({
+    messages: v.array(vMessageDoc),
+    streamId: v.optional(v.id("streamingMessages")),
+    // The job a save with `generate` scheduled.
+    jobId: v.optional(vJobId),
+    // Only for the turn's own job, when this save belongs to its turn.
+    turn: v.optional(
+      v.object({ promptMessageId: v.id("messages"), jobId: vJobId }),
+    ),
+  }),
+});
+
+export const retryGeneration = mutation({
+  args: {
+    threadId: v.id("threads"),
+    promptMessageId: v.optional(v.id("messages")),
+    maxRetries: v.optional(v.number()),
+  },
+  returns: v.union(v.null(), vJobId),
+  handler: async () => {
+    throw new Error("not implemented");
+  },
+});
+
+export const abortGeneration = mutation({
+  args: {
+    threadId: v.id("threads"),
+    promptMessageId: v.optional(v.id("messages")),
+    reason: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: async () => {
+    throw new Error("not implemented");
+  },
 });
 
 function incrementMessagePosition(value: number, field: "order" | "stepOrder") {
@@ -776,9 +833,15 @@ export const respondToToolCallApprovals = mutation({
       ),
     ),
     onSaveMessages: vOnSaveMessages,
+    // Continues the turn the request belongs to once its step is answered.
+    generate: v.optional(v.string()),
   },
-  returns: v.object({ messageId: v.id("messages") }),
+  returns: v.object({
+    messageId: v.id("messages"),
+    jobId: v.optional(vJobId),
+  }),
   handler: async (ctx, args) => {
+    if (args.generate !== undefined) throw new Error("not implemented");
     const read: Doc<"messages">[] = [];
     const plan = await planToolCallResponses(
       recentMessages(ctx, args.threadId, read),
