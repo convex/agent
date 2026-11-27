@@ -112,6 +112,40 @@ describe("streams", () => {
     ).resolves.toEqual([]);
   });
 
+  test("finish and abort refuse a finalDelta for another stream (issue #541)", async () => {
+    const t = initConvexTest();
+    const { streamId } = await seedStream(t);
+    const { streamId: other } = await seedStream(t);
+    const finalDelta = { streamId: other, start: 0, end: 1, parts: ["x"] };
+
+    await expect(
+      t.mutation(api.streams.finish, { streamId, finalDelta }),
+    ).rejects.toThrow(`Final delta is for stream ${other}`);
+    await expect(
+      t.mutation(api.streams.abort, { streamId, reason: "r", finalDelta }),
+    ).rejects.toThrow(`Final delta is for stream ${other}`);
+
+    expect(await countDeltas(t, other)).toBe(0);
+    const stream = await t.run((ctx) =>
+      ctx.db.get("streamingMessages", streamId),
+    );
+    expect(stream?.state.kind).toBe("streaming");
+  });
+
+  test("a finish or abort after the stream ended writes no finalDelta (issue #541)", async () => {
+    const t = initConvexTest();
+    const { streamId } = await seedStream(t);
+    const finalDelta = { streamId, start: 0, end: 1, parts: ["late"] };
+    await t.mutation(api.streams.finish, { streamId });
+
+    await t.mutation(api.streams.finish, { streamId, finalDelta });
+    await expect(
+      t.mutation(api.streams.abort, { streamId, reason: "r", finalDelta }),
+    ).resolves.toBe(false);
+
+    expect(await countDeltas(t, streamId)).toBe(0);
+  });
+
   test("stream file ownership flows from addDelta to the final message", async () => {
     const t = initConvexTest();
     const { threadId, streamId, fileId } = await seedStream(t);

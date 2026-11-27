@@ -1540,6 +1540,91 @@ describe("late saves racing a failed pending message (issue #320)", () => {
   });
 });
 
+describe("filling a pending message with another message's stream (issue #543)", () => {
+  async function pendingWithStream(
+    t: ReturnType<typeof initConvexTest>,
+    threadId: Id<"threads">,
+    order = 0,
+  ) {
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      order,
+      messages: [
+        { message: { role: "assistant", content: "" }, status: "pending" },
+      ],
+    });
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: messages[0].order,
+      stepOrder: messages[0].stepOrder,
+      format: "UIMessageChunk",
+    });
+    return { messageId: messages[0]._id as Id<"messages">, streamId };
+  }
+
+  async function states(
+    t: ReturnType<typeof initConvexTest>,
+    ids: { messageId: Id<"messages">; streamId: Id<"streamingMessages"> }[],
+  ) {
+    return t.run(async (ctx) =>
+      Promise.all(
+        ids.map(async ({ messageId, streamId }) => [
+          (await ctx.db.get("messages", messageId))?.status,
+          (await ctx.db.get("streamingMessages", streamId))?.state.kind,
+        ]),
+      ),
+    );
+  }
+
+  test("refuses a stream from another order", async () => {
+    const t = initConvexTest();
+    const threadId = (await t.mutation(api.threads.createThread, {}))
+      ._id as Id<"threads">;
+    const first = await pendingWithStream(t, threadId, 0);
+    const second = await pendingWithStream(t, threadId, 1);
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        pendingMessageId: second.messageId,
+        finishStreamId: first.streamId,
+        messages: [{ message: { role: "assistant", content: "Second." } }],
+      }),
+    ).rejects.toThrow(
+      `Stream ${first.streamId} does not belong to message ${second.messageId}`,
+    );
+    expect(await states(t, [first, second])).toEqual([
+      ["pending", "streaming"],
+      ["pending", "streaming"],
+    ]);
+  });
+
+  test("refuses a stream from another thread", async () => {
+    const t = initConvexTest();
+    const threadId = (await t.mutation(api.threads.createThread, {}))
+      ._id as Id<"threads">;
+    const otherThreadId = (await t.mutation(api.threads.createThread, {}))
+      ._id as Id<"threads">;
+    const own = await pendingWithStream(t, threadId);
+    const other = await pendingWithStream(t, otherThreadId);
+
+    await expect(
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        pendingMessageId: own.messageId,
+        finishStreamId: other.streamId,
+        messages: [{ message: { role: "assistant", content: "Mine." } }],
+      }),
+    ).rejects.toThrow(
+      `Stream ${other.streamId} does not belong to message ${own.messageId}`,
+    );
+    expect(await states(t, [own, other])).toEqual([
+      ["pending", "streaming"],
+      ["pending", "streaming"],
+    ]);
+  });
+});
+
 describe("saving into a pending message that already succeeded", () => {
   const NOT_PENDING = /can't be filled: its status is "success"/;
 
