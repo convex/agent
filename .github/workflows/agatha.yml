@@ -9,9 +9,10 @@
 # `${{ }}` in the script.
 #
 # It runs on pull_request, so PRs from forks get no OIDC token and aren't
-# reviewed. Reviews cost Agatha money, so a PR whose author isn't an owner,
-# member or collaborator is reviewed only after a maintainer adds the
-# `agatha` label.
+# reviewed. A PR from a branch in this repo is reviewed, since its author
+# could push here; a bot's (Renovate, Dependabot) only once a maintainer adds
+# the `agatha` label. The job doesn't check author_association: the event
+# reports a private org member as CONTRIBUTOR.
 name: Agatha
 
 on:
@@ -28,9 +29,10 @@ concurrency:
 jobs:
   review:
     if: >-
-      !github.event.pull_request.draft && (contains(fromJSON('["OWNER",
-      "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
-      || contains(github.event.pull_request.labels.*.name, 'agatha'))
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.user.type != 'Bot' ||
+      contains(github.event.pull_request.labels.*.name, 'agatha'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
