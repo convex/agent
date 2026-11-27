@@ -16,6 +16,7 @@ import {
   experimental_correctDecision,
   experimental_listDecisions,
   saveMessage,
+  saveMessages,
   type DecideArgs,
   type DecideResult,
   type DecisionDoc,
@@ -423,6 +424,40 @@ describe("a stored decision", () => {
     });
     expect(error).toMatch(
       /over the \d+ bytes the 1 MiB limit on a decision and its answers leaves for them; the largest is state/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  test("a decision with more context messages than Convex can store the IDs of is refused before the model is called", async () => {
+    const calls: Calls = [];
+    const agent = makeAgent({
+      experimental_decisionModel: decisionModel(calls),
+    });
+    const error = await initConvexTest().action(async (ctx) => {
+      const threadId = await createThread(ctx, components.agent, {});
+      for (let i = 0; i < 9; i++) {
+        await saveMessages(ctx, components.agent, {
+          threadId,
+          messages: Array.from({ length: 1000 }, (_, j) => ({
+            role: "user" as const,
+            content: `${i}.${j}`,
+          })),
+        });
+      }
+      return agent
+        .experimental_decide(
+          ctx,
+          { threadId },
+          { questions },
+          { contextOptions: { recentMessages: 9000 } },
+        )
+        .then(
+          () => "decided",
+          (e: Error) => e.message,
+        );
+    });
+    expect(error).toMatch(
+      /context is 9000 messages, over the 8192 message IDs/,
     );
     expect(calls).toHaveLength(0);
   });
@@ -1316,13 +1351,40 @@ test("a correction must answer the question as it was asked", async () => {
             Object.keys(asked.many.criteria).map((key) => [key, 0]),
           ),
         }),
+        // Stored as JSON text, where NaN becomes null.
+        await correct("intent", {
+          type: "choice",
+          choice: "status",
+          probabilities: { status: NaN, compare: 1 },
+        }),
+        await correct("intent", {
+          type: "choice",
+          choice: "status",
+          probabilities: { status: "0", compare: 1 },
+        }),
+        await correct("level", {
+          type: "score",
+          score: 2,
+          probabilities: [0, 0, 1],
+        }),
+        await ctx
+          .runMutation(components.agent.decisions.correct, {
+            threadId,
+            decisionId: decisionId!,
+            questionId: "intent",
+            answer: { type: "choice", choice: "status", probabilities: "null" },
+          })
+          .then(
+            () => "corrected",
+            (e: Error) => e.message,
+          ),
       ],
       accepted: await correct("level", { type: "score", score: 2 }),
       corrections: (await list(ctx, threadId, asked)).page[0].corrections,
     };
   });
   expect(out.refused).toEqual(
-    Array(9).fill(expect.stringMatching(/isn't an answer to/)),
+    Array(13).fill(expect.stringMatching(/isn't an answer to/)),
   );
   expect(out.accepted).toBe("corrected");
   expect(out.corrections).toEqual({

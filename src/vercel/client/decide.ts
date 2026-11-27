@@ -25,6 +25,7 @@ import {
   decodeAnswer,
   decodeQuestions,
   encodeAnswer,
+  MAX_ARRAY_LENGTH,
   MAX_DOCUMENT_BYTES,
   decisionSize,
   decisionTooLarge,
@@ -371,6 +372,11 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
           settings: callSettings && JSON.stringify(callSettings),
         }
       : undefined;
+  if (row && row.contextMessageIds.length > MAX_ARRAY_LENGTH) {
+    throw new Error(
+      `The decision's context is ${row.contextMessageIds.length} messages, over the ${MAX_ARRAY_LENGTH} message IDs Convex's array limit lets a decision store. Pass fewer context messages.`,
+    );
+  }
   const limit = MAX_DOCUMENT_BYTES - MODEL_OUTPUT_RESERVE_BYTES;
   const before =
     row &&

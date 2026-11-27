@@ -14,6 +14,8 @@ import type { vStoredDecisionAnswer } from "./component/schema.js";
 
 export const MAX_DOCUMENT_BYTES = 1 << 20;
 
+export const MAX_ARRAY_LENGTH = 8192;
+
 // What getDocumentSize assumes for an _id it isn't given.
 const ESTIMATED_ID = "0".repeat(32);
 
@@ -106,15 +108,21 @@ export function decodeQuestions(
   return JSON.parse(questions);
 }
 
-const inUnitRange = (n: number) => n >= 0 && n <= 1;
+// Probabilities are decoded from JSON text no validator checks.
+const inUnitRange = (n: unknown) =>
+  typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1;
 
 // A distribution has a probability for every option or level, as the AI SDK
 // requires of the model's answers.
-function isDistributionOver(
-  keys: string[],
-  probabilities: Record<string, number> | undefined,
-) {
-  if (!probabilities) return true;
+function isDistributionOver(keys: string[], probabilities: unknown) {
+  if (probabilities === undefined) return true;
+  if (
+    typeof probabilities !== "object" ||
+    probabilities === null ||
+    Array.isArray(probabilities)
+  ) {
+    return false;
+  }
   const entries = Object.entries(probabilities);
   return (
     entries.length === keys.length &&

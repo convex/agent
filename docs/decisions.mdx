@@ -90,9 +90,10 @@ throws before the model is called. Pass
 its answers, corrections included, can take 1 MiB in all, a Convex document's
 limit. A call throws before the model is called if the state, questions, context
 message IDs and settings leave less than 64 KiB of that for what the model
-returns. If the decision still doesn't fit with what the model returned, the
-call throws after reporting usage, with the model's result as the error's
-`cause`. Deleting the thread or its user deletes its decisions.
+returns, or if its context is more than 8,192 messages, a Convex array's limit.
+If the decision still doesn't fit with what the model returned, the call throws
+after reporting usage, with the model's result as the error's `cause`. Deleting
+the thread or its user deletes its decisions.
 
 List them, newest first, typed by the questions you pass:
 
