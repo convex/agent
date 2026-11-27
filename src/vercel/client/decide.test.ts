@@ -16,7 +16,10 @@ import {
   experimental_correctDecision,
   experimental_listDecisions,
   saveMessage,
+  type DecideArgs,
+  type DecideResult,
   type DecisionDoc,
+  type DecisionQuestions,
   type UsageHandler,
 } from "../index.js";
 import { components, initConvexTest } from "./setup.test.js";
@@ -1185,6 +1188,13 @@ test("answer types follow the questions through decide, listing and corrections"
       { threadId },
       { questions },
     );
+    expectTypeOf(questions).toMatchTypeOf<DecisionQuestions>();
+    expectTypeOf<
+      Parameters<typeof agent.experimental_decide<typeof questions>>[2]
+    >().toEqualTypeOf<DecideArgs<typeof questions>>();
+    expectTypeOf<
+      Awaited<ReturnType<typeof agent.experimental_decide<typeof questions>>>
+    >().toEqualTypeOf<DecideResult<typeof questions>>();
     expectTypeOf(answers.intent.choice).toEqualTypeOf<"status" | "compare">();
     expectTypeOf(answers.ambiguous.probability).toEqualTypeOf<number>();
     expectTypeOf(decisionId).toEqualTypeOf<string | undefined>();

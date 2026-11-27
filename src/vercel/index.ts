@@ -200,7 +200,10 @@ export { startGeneration } from "./client/start.js";
 export {
   listDecisions as experimental_listDecisions,
   correctDecision as experimental_correctDecision,
+  type DecideArgs,
+  type DecideResult,
   type DecisionDoc,
+  type DecisionQuestions,
 } from "./client/decide.js";
 export {
   DEFAULT_STREAMING_OPTIONS,

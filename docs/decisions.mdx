@@ -89,9 +89,9 @@ throws before the model is called. Pass
 `storageOptions: { saveMessages: "none" }` to skip storing it. A call throws
 before the model is called if the state, questions, context message IDs and
 settings leave less than 64 KiB of a Convex document (1 MiB) for what the model
-returns. If what it returns still doesn't fit, the call throws after reporting
-usage, with the model's result as the error's `cause`. Deleting the thread or
-its user deletes its decisions.
+returns. If the decision or one of its answers still doesn't fit with what the
+model returned, the call throws after reporting usage, with the model's result
+as the error's `cause`. Deleting the thread or its user deletes its decisions.
 
 List them, newest first, typed by the questions you pass:
 
@@ -112,7 +112,9 @@ type, so rewording a question or adding and removing questions keeps the
 history. Changing a choice's option keys or a score's number of levels changes
 its answer type, so earlier answers are left out. Listing with empty `questions`
 returns an empty page. Without `questions`, every decision is listed with the
-questions it was asked.
+questions it was asked. A page of large decisions can hold fewer than
+`numItems`, so it stays within a query's read limits: keep paging until
+`isDone`.
 
 Record the right answer to a question next to the model's:
 
@@ -131,7 +133,12 @@ await experimental_correctDecision(ctx, components.agent, {
 
 The correction must answer the question as the decision asked it, and the
 decision must be in `threadId`. A later correction of the same question replaces
-it.
+it. A choice or score correction with probabilities must give one for every
+option or level, summing to 1. Corrections aren't yet checked for the AI SDK's
+other rules for answers: that a choice is a highest-probability option, a score
+equals the probability-weighted mean, and a box has positive area, as the AI SDK
+doesn't export those checks. A correction that would take the answer's document
+past 1 MiB throws.
 
 ## The cache
 
