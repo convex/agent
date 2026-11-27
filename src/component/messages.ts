@@ -240,6 +240,20 @@ export const messageStatuses = vMessageDoc.fields.status.members.map(
 const STREAM_RECOVERY_FAILURE =
   "Failed to recover persisted assistant stream output";
 
+/** Writes an existing row; one that leaves pending keeps no job copy, as only an open row is leased. */
+async function writeMessage(
+  ctx: MutationCtx,
+  messageId: Id<"messages">,
+  patch: Partial<Doc<"messages">>,
+) {
+  const closes = patch.status !== undefined && patch.status !== "pending";
+  await ctx.db.patch(
+    "messages",
+    messageId,
+    closes ? { ...patch, jobId: undefined } : patch,
+  );
+}
+
 async function markPendingMessageFailed(
   ctx: MutationCtx,
   message: Doc<"messages">,
@@ -250,14 +264,8 @@ async function markPendingMessageFailed(
     const { tableName } = getVectorIdInfo(ctx, message.embeddingId);
     await ctx.db.delete(tableName, message.embeddingId);
   }
-  // A closed row keeps no job copy: only an open row is leased.
-  const patch = {
-    status: "failed" as const,
-    error,
-    embeddingId: undefined,
-    jobId: undefined,
-  };
-  await ctx.db.patch("messages", message._id, patch);
+  const patch = { status: "failed" as const, error, embeddingId: undefined };
+  await writeMessage(ctx, message._id, patch);
   await reportSavedMessages(ctx, onSaveMessages, [
     { kind: "update", doc: { ...message, ...patch } },
   ]);
@@ -941,10 +949,7 @@ export async function finalizePending(
   if (result.status === "failed") {
     await markPendingMessageFailed(ctx, message, result.error, onSaveMessages);
   } else {
-    await ctx.db.patch("messages", messageId, {
-      status: "success",
-      jobId: undefined,
-    });
+    await writeMessage(ctx, messageId, { status: "success" });
     await reportSavedMessages(ctx, onSaveMessages, [
       { kind: "update", doc: { ...message, status: "success" } },
     ]);
@@ -999,10 +1004,7 @@ export const updateMessage = mutation({
     }
 
     const write = await authorizeRow(ctx, message);
-    if (message.turnId && patch.status && patch.status !== "pending") {
-      patch.jobId = undefined;
-    }
-    await ctx.db.patch("messages", args.messageId, patch);
+    await writeMessage(ctx, args.messageId, patch);
     const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
     if (turnId && patch.status && patch.status !== "pending") {
       await closeLinkedStream(ctx, message, patch.status === "success");

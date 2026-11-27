@@ -485,6 +485,18 @@ async function liveTurns(
   return lists.flat();
 }
 
+/** The live turn a row names: its own, else the newest one it prompts. */
+async function liveTurnFor(ctx: MutationCtx, row: Row) {
+  const own = await turnOf(ctx, row);
+  if (live(own)) return own;
+  return (
+    (await liveTurns(ctx, row.threadId, row.order))
+      .filter((turn) => anchors(turn, row))
+      .sort((a, b) => a._creationTime - b._creationTime)
+      .at(-1) ?? null
+  );
+}
+
 async function newestTurn(ctx: MutationCtx, threadId: Id<"threads">) {
   const newest = await Promise.all(
     (["running", "waiting", "done"] as const).map((status) =>
@@ -921,8 +933,8 @@ export async function stopTurns(
   let turns: Turn[];
   if (args.promptMessageId) {
     const prompt = await resolve(ctx, args.threadId, args.promptMessageId);
-    const turn = prompt && (await turnOf(ctx, prompt));
-    turns = live(turn) ? [turn] : [];
+    const turn = prompt && (await liveTurnFor(ctx, prompt));
+    turns = turn ? [turn] : [];
   } else {
     turns = await liveTurns(ctx, args.threadId, args.order);
   }
@@ -1042,7 +1054,7 @@ export async function retryTurn(
   let turn: Turn | null;
   if (args.promptMessageId) {
     const prompt = await resolve(ctx, args.threadId, args.promptMessageId);
-    turn = prompt && (await turnOf(ctx, prompt));
+    turn = prompt && (await liveTurnFor(ctx, prompt));
   } else {
     turn = await newestTurn(ctx, args.threadId);
   }
