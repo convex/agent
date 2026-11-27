@@ -922,3 +922,76 @@ test("a resumed job's stop conditions see its saved steps' usage and tool errors
     ],
   ]);
 });
+
+test("a job stopped mid-stream ends its reply once, by its stream's close, as stopped with what it streamed, and its generation ends without error", async () => {
+  const more = gate();
+  const model = mockModel({
+    doStream: async () => ({
+      stream: new ReadableStream<LanguageModelV4StreamPart>({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t" });
+          controller.enqueue({ type: "text-delta", id: "t", delta: "Hello" });
+          await more.opened;
+          controller.enqueue({ type: "text-delta", id: "t", delta: " world" });
+          controller.enqueue({ type: "text-end", id: "t" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: { unified: "stop", raw: "stop" },
+            usage,
+          });
+          controller.close();
+        },
+      }),
+    }),
+  }) as MockLanguageModel;
+  const calls: { fn: string; threw?: unknown; result?: unknown }[] = [];
+  let ended: { error?: unknown } | undefined;
+  attempts.push(async (ctx, ids) => {
+    const runMutation = (async (ref: never, args: object) => {
+      const fn = String(
+        (ref as Record<symbol, unknown>)[Symbol.for("toReferencePath")] ?? ref,
+      );
+      try {
+        const result = await ctx.runMutation(ref, args as never);
+        calls.push({ fn, result });
+        return result;
+      } catch (threw) {
+        calls.push({ fn, threw });
+        throw threw;
+      }
+    }) as ActionCtx["runMutation"];
+    await run({ ...ctx, runMutation }, model, ids).then(
+      () => (ended = {}),
+      (error: unknown) => (ended = { error }),
+    );
+  });
+  const { t, ids, docs } = await submitted();
+  const job = t.finishAllScheduledFunctions(() => {});
+  await until(async () =>
+    calls.some((c) => c.fn.endsWith("addDelta") && c.result === true),
+  );
+  expect(
+    await t.mutation((ctx) =>
+      agent.abortGeneration(ctx, { ...ids, reason: "Stopped" }),
+    ),
+  ).toBe(true);
+  more.open();
+  await job;
+  await until(async () => ended !== undefined);
+  const reply = (await docs()).at(-1)!;
+  expect([reply.status, reply.abort, reply.text]).toEqual([
+    "success",
+    { reason: "Stopped" },
+    "Hello",
+  ]);
+  // After its refused delta, the job's only write is its stream's close.
+  const refused = calls.findIndex(
+    (c) => c.fn.endsWith("streams/addDelta") && c.result === false,
+  );
+  expect(refused).toBeGreaterThan(0);
+  expect(
+    calls.slice(refused + 1).map((c) => [c.fn.split("/").at(-1), c.threw]),
+  ).toEqual([["fail", undefined]]);
+  expect(ended).toEqual({});
+});
