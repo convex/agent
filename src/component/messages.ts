@@ -51,6 +51,7 @@ import {
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
   abortById,
+  createStream,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -300,9 +301,7 @@ export const vJobId = baseV.id("_scheduled_functions");
 export const addMessages = mutation({
   args: addMessagesArgs,
   handler: (ctx, args) => {
-    if (args.generate !== undefined || args.createStream !== undefined) {
-      throw new Error("not implemented");
-    }
+    if (args.generate !== undefined) throw new Error("not implemented");
     return addMessagesHandler(ctx, args);
   },
   returns: v.object({
@@ -374,6 +373,8 @@ async function addMessagesHandler(
     pendingMessageId,
     hideFromUserIdSearch,
     onSaveMessages,
+    createStream: streamToCreate,
+    generate: _generate,
     ...rest
   } = args;
   const promptMessage =
@@ -601,8 +602,37 @@ async function addMessagesHandler(
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
+  const streamId = streamToCreate
+    ? await createStreamWith(ctx, toReturn.at(-1), streamToCreate)
+    : undefined;
   await reportSavedMessages(ctx, onSaveMessages, saved);
-  return { messages: toReturn.map(publicMessage) };
+  return {
+    messages: toReturn.map(publicMessage),
+    ...(streamId ? { streamId } : {}),
+  };
+}
+
+async function createStreamWith(
+  ctx: MutationCtx,
+  last: Doc<"messages"> | undefined,
+  fields: Pick<
+    Doc<"streamingMessages">,
+    "agentName" | "format" | "model" | "provider" | "providerOptions"
+  >,
+) {
+  assert(
+    last?.status === "pending",
+    "createStream needs the last message to be pending",
+  );
+  const streamId = await createStream(ctx, {
+    ...fields,
+    threadId: last.threadId,
+    order: last.order,
+    stepOrder: last.stepOrder,
+    userId: last.userId,
+  });
+  await ctx.db.patch("messages", last._id, { streamId });
+  return streamId;
 }
 
 // exported for tests

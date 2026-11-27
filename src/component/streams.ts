@@ -267,23 +267,33 @@ export const create = mutation({
   returns: v.id("streamingMessages"),
   handler: async (ctx, { promptMessageId, ...args }) => {
     if (promptMessageId !== undefined) throw new Error("not implemented");
-    const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
-    // TODO: enforce order/stepOrder uniqueness?
-    const streamId = await ctx.db.insert("streamingMessages", {
-      ...args,
-      state,
-    });
-    const timeoutFnId = await ctx.scheduler.runAfter(
-      TIMEOUT_INTERVAL,
-      internal.streams.timeoutStream,
-      { streamId },
-    );
-    await ctx.db.patch("streamingMessages", streamId, {
-      state: { ...state, timeoutFnId },
-    });
-    return streamId;
+    return createStream(ctx, args);
   },
 });
+
+export async function createStream(
+  ctx: MutationCtx,
+  fields: Omit<
+    WithoutSystemFields<Doc<"streamingMessages">>,
+    "state" | "fileRefs"
+  >,
+) {
+  const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
+  // TODO: enforce order/stepOrder uniqueness?
+  const streamId = await ctx.db.insert("streamingMessages", {
+    ...fields,
+    state,
+  });
+  const timeoutFnId = await ctx.scheduler.runAfter(
+    TIMEOUT_INTERVAL,
+    internal.streams.timeoutStream,
+    { streamId },
+  );
+  await ctx.db.patch("streamingMessages", streamId, {
+    state: { ...state, timeoutFnId },
+  });
+  return streamId;
+}
 
 export const list = query({
   args: {
@@ -423,8 +433,14 @@ export const fail = mutation({
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.boolean(),
-  handler: async () => {
-    throw new Error("not implemented");
+  handler: async (ctx, { streamId, reason, finalDelta }) => {
+    const stream = await ctx.db.get("streamingMessages", streamId);
+    if (!stream || stream.state.kind !== "streaming") return false;
+    return abortById(ctx, {
+      streamId,
+      reason,
+      ...(finalDelta?.streamId === streamId ? { finalDelta } : {}),
+    });
   },
 });
 
