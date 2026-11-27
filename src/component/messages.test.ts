@@ -1054,6 +1054,28 @@ describe("agent", () => {
     expect(results.some((m) => m._id === targetMessages[0]._id)).toBe(false);
   });
 
+  test("textSearch reads another thread's target message as missing", async () => {
+    const t = convexTest(schema, modules);
+    const threadA = await t.mutation(api.threads.createThread, {});
+    const threadB = await t.mutation(api.threads.createThread, {});
+    await t.mutation(api.messages.addMessages, {
+      threadId: threadA._id as Id<"threads">,
+      messages: [{ message: { role: "user", content: "apple pie recipe" } }],
+    });
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId: threadB._id as Id<"threads">,
+      messages: [{ message: { role: "user", content: "apple" } }],
+    });
+
+    const results = await t.query(api.messages.textSearch, {
+      threadId: threadA._id as Id<"threads">,
+      targetMessageId: messages[0]._id as Id<"messages">,
+      limit: 10,
+    });
+
+    expect(results).toEqual([]);
+  });
+
   async function pendingWithStreams(
     streamCount = 1,
     transactionLimits: Parameters<
