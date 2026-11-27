@@ -607,3 +607,73 @@ test("the job's own streams.fail fails the turn; from the app it is a stop", asy
     app: ["success", "Half.", "Broke."],
   });
 });
+
+test("a system row saved by the job doesn't answer its turn", async () => {
+  let stopped: unknown;
+  attempts.push(async (ctx, ids) => {
+    await ctx.runMutation(api.messages.addMessages, {
+      ...ids,
+      messages: [{ message: { role: "system", content: "Audit note." } }],
+    });
+    stopped = await ctx.runMutation(api.messages.abortGeneration, ids);
+  });
+  const s = await submitted();
+  await s.drain();
+  expect(stopped).toBe(true);
+});
+
+test("a send at the job's own prompt leaves the prompt with its turn, so a stop by that prompt revokes the job", async () => {
+  let late: unknown;
+  attempts.push(async (ctx, ids) => {
+    const { streamId } = await begin(ctx, ids);
+    await delta(ctx, streamId!, "First.");
+    await ctx.runMutation(api.messages.addMessages, {
+      ...ids,
+      messages: [pending],
+      generate: await createFunctionHandle(generate),
+    });
+    await ctx.runMutation(api.messages.abortGeneration, ids);
+    late = await delta(ctx, streamId!, " More.", 1);
+  });
+  const s = await submitted();
+  await s.drain();
+  expect(late).toBe(false);
+});
+
+test("streams.abort is a stop whoever calls it: the job's own abort keeps the reply and marks it", async () => {
+  attempts.push(async (ctx, ids) => {
+    const { streamId } = await begin(ctx, ids);
+    await delta(ctx, streamId!, "Half.");
+    await ctx.runMutation(api.streams.abort, { streamId, reason: "Stopped" });
+  });
+  const s = await submitted();
+  await s.drain();
+  const [, reply] = await s.docs();
+  expect([reply.status, reply.text, reply.abort?.reason]).toEqual([
+    "success",
+    "Half.",
+    "Stopped",
+  ]);
+});
+
+test("a revoked job can't fill a plain pending row", async () => {
+  const s = await submitted();
+  const plain = await s.control((ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      threadId: s.ids.threadId,
+      messages: [pending],
+    }),
+  );
+  let late: unknown;
+  attempts.push(async (ctx, ids) => {
+    await ctx.runMutation(api.messages.abortGeneration, ids);
+    late = await tried(
+      fill(ctx, ids.threadId, plain.messages[0]._id, [assistant("Late.")]),
+    );
+  });
+  await s.drain();
+  expect(late).toEqual({
+    ok: false,
+    error: "The generation was stopped or replaced",
+  });
+});
