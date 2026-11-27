@@ -192,13 +192,6 @@ export const schema = defineSchema({
     turnId: v.id("turns"),
   }).index("jobId", ["jobId"]),
 
-  // A durable tool mutation's result, replayed when a retry calls it again.
-  toolRuns: defineTable({
-    turnId: v.id("turns"),
-    toolCallId: v.string(),
-    result: v.any(),
-  }).index("turnId_toolCallId", ["turnId", "toolCallId"]),
-
   streamDeltas: defineTable({
     streamId: v.id("streamingMessages"),
     // the indexes work like: 0 <first> 1 <second> 2 <third> 3 ...

@@ -20,14 +20,11 @@ type Ctx = {
 type Attempt = (ctx: Ctx, ids: Ids) => Promise<unknown>;
 
 const generate = makeFunctionReference<"action", Ids>("turns:generate");
-const place = makeFunctionReference<"mutation">("turns:place");
 const attempts: Attempt[] = [];
 let jobs = 0;
-let placed = 0;
 beforeEach(() => {
   attempts.length = 0;
   jobs = 0;
-  placed = 0;
 });
 afterEach(() => vi.useRealTimers());
 
@@ -39,13 +36,6 @@ const { createTest } = app.defineModules({
         jobs++;
         const attempt = attempts.shift();
         if (attempt) await attempt(ctx as never, ids);
-      },
-    }),
-    place: app.mutation({
-      args: { item: v.string() },
-      handler: async (_ctx, { item }) => {
-        placed++;
-        return `placed ${item}`;
       },
     }),
   },
@@ -548,37 +538,6 @@ test("a generation begun at a live turn's prompt by anyone but its job takes the
     job: (seen.job as { ok: boolean } | undefined)?.ok ?? "never ran",
     retry: await s.retry(),
   }).toEqual({ turn: undefined, job: "never ran", retry: null });
-});
-
-test("a durable tool mutation runs once per tool call, and a retry replays its result", async () => {
-  const seen: unknown[] = [];
-  const run = async (ctx: Ctx) =>
-    seen.push(
-      await ctx.runMutation(api.turns.runToolMutation, {
-        toolCallId: "c1",
-        handle: await createFunctionHandle(place),
-        args: { item: "order" },
-      }),
-    );
-  attempts.push(async (ctx) => {
-    await run(ctx);
-    throw new Error("crashed");
-  });
-  attempts.push(async (ctx, ids) => {
-    await run(ctx);
-    const own = await begin(ctx, ids);
-    await fill(ctx, ids.threadId, own.messages[0]._id, [assistant("Done.")]);
-  });
-  const s = await submitted();
-  await s.drain();
-  await s.retry();
-  await s.drain();
-  const plain = await tried(s.control((ctx) => run(ctx)));
-  expect({ seen, placed, plain: plain.ok }).toEqual({
-    seen: ["placed order", "placed order"],
-    placed: 1,
-    plain: false,
-  });
 });
 
 test("deleting an older finished step leaves the turn running; deleting its prompt ends it", async () => {

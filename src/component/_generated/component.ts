@@ -6462,15 +6462,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
-    turns: {
-      runToolMutation: FunctionReference<
-        "mutation",
-        "internal",
-        { args: any; handle: string; toolCallId: string },
-        any,
-        Name
-      >;
-    };
     users: {
       deleteAllForUserId: FunctionReference<
         "action",

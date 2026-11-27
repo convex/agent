@@ -1,7 +1,6 @@
 import type { FunctionHandle } from "convex/server";
-import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel.js";
-import { mutation, type MutationCtx } from "./_generated/server.js";
+import type { MutationCtx } from "./_generated/server.js";
 import { finalizePending } from "./messages.js";
 import { abortById, finishHandler } from "./streams.js";
 
@@ -852,39 +851,3 @@ export async function planResponse(
     },
   };
 }
-
-// A durable tool's mutation: run once per tool call of the turn, and replayed
-// from its record when a retry calls it again.
-export const runToolMutation = mutation({
-  args: {
-    toolCallId: v.string(),
-    handle: v.string(),
-    args: v.any(),
-  },
-  returns: v.any(),
-  handler: async (ctx, args) => {
-    const role = await roleOf(ctx, await callerJob(ctx));
-    if (role.kind === "revoked") throw new Error(REFUSED);
-    if (role.kind !== "holder") {
-      throw new Error("runToolMutation runs only in a durable turn's job");
-    }
-    const turnId = role.turn._id;
-    const done = await ctx.db
-      .query("toolRuns")
-      .withIndex("turnId_toolCallId", (q) =>
-        q.eq("turnId", turnId).eq("toolCallId", args.toolCallId),
-      )
-      .first();
-    if (done) return done.result;
-    const result = await ctx.runMutation(
-      args.handle as FunctionHandle<"mutation">,
-      args.args,
-    );
-    await ctx.db.insert("toolRuns", {
-      turnId,
-      toolCallId: args.toolCallId,
-      result: result ?? null,
-    });
-    return result;
-  },
-});
