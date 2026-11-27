@@ -4,6 +4,7 @@ import type {
   TextStreamPart,
   ToolSet,
   UIMessage as AIUIMessage,
+  UIMessageChunk,
 } from "ai";
 import type { Context } from "@ai-sdk/provider-utils";
 import { streamText as streamTextAi, toUIMessageStream } from "ai";
@@ -11,6 +12,7 @@ import {
   compressUIMessageChunks,
   DEFAULT_STREAMING_OPTIONS,
   DeltaStreamer,
+  holdStreamerDeltas,
   mergeTransforms,
   type StreamingOptions,
 } from "./streaming.js";
@@ -102,6 +104,8 @@ export async function streamText<
   type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
   const { threadId } = options ?? {};
   const streamsDeltas = Boolean(threadId && options.saveStreamDeltas);
+  // The streamer starts after the first save, but holds the steps after it.
+  const holding: { streamer?: DeltaStreamer<UIMessageChunk> } = {};
   const { args, userId, order, stepOrder, promptMessageId, streamId, ...call } =
     await startGeneration<
       StreamingTextArgs<AgentTools, TOOLS, OUTPUT, RUNTIME_CONTEXT>,
@@ -116,7 +120,13 @@ export async function streamText<
         ...options,
         endsFromHooks: true,
         ...(streamsDeltas
-          ? { createStream: { format: "UIMessageChunk" } }
+          ? {
+              createStream: { format: "UIMessageChunk" },
+              holdDeltas: (during) =>
+                holding.streamer
+                  ? holdStreamerDeltas(holding.streamer, during)
+                  : during,
+            }
           : {}),
       },
       "streamText",
@@ -168,6 +178,7 @@ export async function streamText<
           },
         )
       : undefined;
+  holding.streamer = streamer;
 
   const failGeneration = (reason: string) =>
     runStreamCleanup({

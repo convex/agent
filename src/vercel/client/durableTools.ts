@@ -85,6 +85,7 @@ export function durableToolSteps(
     approves,
     pendingMessageId,
     refuse,
+    hold,
   }: {
     durable: boolean;
     toolRecord: ToolReplay | undefined;
@@ -93,6 +94,7 @@ export function durableToolSteps(
     pendingMessageId: () => string | undefined;
     /** Ends the generation: its step's tools mustn't run. */
     refuse: (reason: string) => void;
+    hold?: <R>(during: Promise<R>) => Promise<R>;
   },
 ) {
   const replay = toolRecord && {
@@ -144,11 +146,12 @@ export function durableToolSteps(
 
   const writeRecord = async (messageId: string, args: { step?: string }) => {
     try {
-      const refused = await ctx.runMutation(component.tools.recordToolStep, {
+      const writing = ctx.runMutation(component.tools.recordToolStep, {
         messageId,
         results: [],
         ...args,
       });
+      const refused = await (hold ? hold(writing) : writing);
       record = refused ? { refused } : { messageId };
       if (refused) refuse(refused);
     } catch {

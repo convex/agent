@@ -257,7 +257,28 @@ export function mergeTransforms<TOOLS extends ToolSet>(
  */
 const OPENING_CHUNKS = new Set<unknown>(["start", "start-step"]);
 
+let holdDeltas: <T, R>(
+  streamer: DeltaStreamer<T>,
+  during: Promise<R>,
+) => Promise<R>;
+
+/**
+ * Buffers a streamer's parts instead of starting a write until `during`
+ * settles, so a wait inside a step, like a durable step's record, doesn't
+ * split the step's deltas. Internal: not part of DeltaStreamer's API.
+ */
+export function holdStreamerDeltas<T, R>(
+  streamer: DeltaStreamer<T>,
+  during: Promise<R>,
+): Promise<R> {
+  return holdDeltas(streamer, during);
+}
+
 export class DeltaStreamer<T> {
+  static {
+    holdDeltas = (streamer, during) => streamer.#hold(during);
+  }
+
   streamId: string | undefined;
   public readonly config: {
     throttleMs: number;
@@ -274,6 +295,7 @@ export class DeltaStreamer<T> {
   #latestWrite: number = 0;
   #ongoingWrite: Promise<void> | undefined;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #held = 0;
   #keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
   #keepAliveStopped: boolean;
   #abortPromise: Promise<void> | undefined;
@@ -392,7 +414,7 @@ export class DeltaStreamer<T> {
     if (this.#stoppedAccepting || this.abortController.signal.aborted) {
       return;
     }
-    if (!this.#hasVisibleParts()) return;
+    if (!this.#readyToWrite()) return;
     if (
       !this.#ongoingWrite &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
@@ -401,6 +423,22 @@ export class DeltaStreamer<T> {
     } else {
       this.#scheduleFlush();
     }
+  }
+
+  async #hold<R>(during: Promise<R>): Promise<R> {
+    this.#held++;
+    try {
+      return await during;
+    } finally {
+      this.#held--;
+      if (!this.#ongoingWrite && this.#readyToWrite()) {
+        this.#scheduleFlush();
+      }
+    }
+  }
+
+  #readyToWrite() {
+    return !this.#held && this.#hasVisibleParts();
   }
 
   // A delta of only a message's or a step's opening chunks shows nothing, so
@@ -425,7 +463,7 @@ export class DeltaStreamer<T> {
       this.#flushTimer = undefined;
       if (
         this.#ongoingWrite ||
-        !this.#hasVisibleParts() ||
+        !this.#readyToWrite() ||
         this.#stoppedAccepting ||
         this.abortController.signal.aborted
       ) {
@@ -652,7 +690,7 @@ export class DeltaStreamer<T> {
     this.#keepAlive();
     // Now that we've sent the delta, check if we need to send another one.
     if (
-      this.#hasVisibleParts() &&
+      this.#readyToWrite() &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
     ) {
       // We send again immediately with the accumulated deltas.
@@ -661,7 +699,7 @@ export class DeltaStreamer<T> {
       this.#ongoingWrite = undefined;
       // Whatever is still buffered has just lost its owner: this write is
       // over and no arrival is guaranteed to follow. Hand it to the timer.
-      if (this.#hasVisibleParts()) {
+      if (this.#readyToWrite()) {
         this.#scheduleFlush();
       }
     }

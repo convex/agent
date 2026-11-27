@@ -211,6 +211,8 @@ export async function startGeneration<
       endsFromHooks?: boolean;
       /** Starts the generation's stream with its first save. */
       createStream?: { format: "UIMessageChunk" | "TextStreamPart" };
+      /** Holds the stream's deltas while a durable step's record is written. */
+      holdDeltas?: <R>(during: Promise<R>) => Promise<R>;
     },
   _operation?:
     | "generateText"
@@ -426,6 +428,7 @@ export async function startGeneration<
       last.content.some((part) => part.type === "tool-approval-response"),
     pendingMessageId: () => pendingMessageId,
     refuse: (reason) => refused?.abort(new Error(reason)),
+    hold: opts.holdDeltas,
   });
   const tools = callMessages(
     toolSteps.wrapTools(wrapTools(toolCtx, args.tools) as Tools),
