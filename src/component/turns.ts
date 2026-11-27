@@ -692,6 +692,19 @@ function memberStamp(turn: Position, caller: string, threadId: Id<"threads">) {
   };
 }
 
+/** A job's fill target, read once; `own` when its job copy is the caller's, so nothing else need be read. */
+export async function jobFillTarget(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+  pendingMessageId?: Id<"messages">,
+) {
+  if (!pendingMessageId) return undefined;
+  const caller = await callerJob(ctx);
+  if (!caller) return undefined;
+  const row = await resolve(ctx, threadId, pendingMessageId);
+  return { row, own: !!row?.turnId && row.jobId === caller };
+}
+
 export async function planSave(
   ctx: MutationCtx,
   args: {
@@ -699,14 +712,18 @@ export async function planSave(
     generate?: string;
     promptMessage?: Row | null;
     pendingMessageId?: Id<"messages">;
+    pendingMessage?: Row | null;
     order?: number | "next";
     messages: { status?: Status }[];
   },
 ): Promise<SaveTurn> {
   const caller = await callerJob(ctx);
-  const pending = args.pendingMessageId
-    ? await resolve(ctx, args.threadId, args.pendingMessageId)
-    : undefined;
+  const pending =
+    args.pendingMessage !== undefined
+      ? args.pendingMessage
+      : args.pendingMessageId
+        ? await resolve(ctx, args.threadId, args.pendingMessageId)
+        : undefined;
   if (args.generate !== undefined) {
     if (args.pendingMessageId) {
       throw new Error("generate and pendingMessageId cannot both be provided");

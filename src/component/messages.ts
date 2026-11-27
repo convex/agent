@@ -65,6 +65,7 @@ import {
   authorizeRow,
   endStopped,
   endStoppedInThread,
+  jobFillTarget,
   stoppedOpen,
   endTurnsForDeleted,
   failPlainReplies,
@@ -458,9 +459,15 @@ async function addMessagesHandler(
     generate,
     ...rest
   } = args;
-  const promptMessage =
-    prompt?.message ??
-    (promptMessageId && (await resolve(ctx, threadId, promptMessageId)));
+  // A job's fill of its own open row is placed by that row; its prompt isn't read.
+  const target = failPendingSteps
+    ? undefined
+    : await jobFillTarget(ctx, threadId, pendingMessageId);
+  const own = target?.own ? target.row : null;
+  const promptMessage = own
+    ? null
+    : (prompt?.message ??
+      (promptMessageId && (await resolve(ctx, threadId, promptMessageId))));
   assert(
     requestedOrder === undefined ||
       requestedOrder === "next" ||
@@ -490,6 +497,7 @@ async function addMessagesHandler(
       generate,
       promptMessage: promptMessage || null,
       pendingMessageId,
+      pendingMessage: target?.row,
       order: requestedOrder,
       messages,
     }));
@@ -574,7 +582,7 @@ async function addMessagesHandler(
     order = explicitOrder;
     const maxMessage = await getMaxMessage(ctx, threadId, order);
     stepOrder = maxMessage?.stepOrder ?? -1;
-  } else if (promptMessageId) {
+  } else if (promptMessageId && !own) {
     if (!promptMessage && abandonIfPromptMissing) {
       await reportSavedMessages(ctx, onSaveMessages, saved);
       return { messages: [] };
@@ -707,7 +715,7 @@ async function addMessagesHandler(
     } else if (message.message.role === "user") {
       if (
         (explicitOrder !== undefined && order === explicitOrder) ||
-        (promptMessage && promptMessage.order === order) ||
+        ((promptMessage || own) && (promptMessage || own)!.order === order) ||
         (!promptMessageId && pendingMessage?.order === order)
       ) {
         // Avoid colliding with a later order when saving from an older one.
