@@ -1076,6 +1076,36 @@ describe("agent", () => {
     expect(results).toEqual([]);
   });
 
+  test("vector searchMessages reads another thread's target message as missing", async () => {
+    const t = convexTest(schema, modules);
+    const threadA = await t.mutation(api.threads.createThread, {});
+    const threadB = await t.mutation(api.threads.createThread, {});
+    const embeddings = {
+      model: "test",
+      dimension: 128 as const,
+      vectors: [Array.from({ length: 128 }, () => 0.1)],
+    };
+    await t.mutation(api.messages.addMessages, {
+      threadId: threadA._id as Id<"threads">,
+      messages: [{ message: { role: "user", content: "apple pie recipe" } }],
+      embeddings,
+    });
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId: threadB._id as Id<"threads">,
+      messages: [{ message: { role: "user", content: "apple" } }],
+      embeddings,
+    });
+
+    await expect(
+      t.action(api.messages.searchMessages, {
+        threadId: threadA._id as Id<"threads">,
+        targetMessageId: messages[0]._id as Id<"messages">,
+        vectorSearch: true,
+        limit: 10,
+      }),
+    ).rejects.toThrow("Embedding missing");
+  });
+
   async function pendingWithStreams(
     streamCount = 1,
     transactionLimits: Parameters<
