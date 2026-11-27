@@ -841,3 +841,191 @@ test("a regenerate's failPendingSteps ends a stopped reply as stopped, and the s
     late: { ok: false, error: expect.stringContaining("stopped or replaced") },
   });
 });
+
+test("a stopped job whose reply another path already ended gets one verdict: its close returns true and its saves are no-ops", async () => {
+  const seen: Record<string, unknown> = {};
+  const { streaming, stopped } = stoppedMidStream(
+    async (ctx, ids, row, streamId) => {
+      seen.fail = await ctx.runMutation(api.streams.fail, {
+        streamId,
+        reason: "Aborted.",
+      });
+      seen.fill = (
+        await tried(fill(ctx, ids.threadId, row, [assistant("Late.")]))
+      ).ok;
+      seen.finalize = (
+        await tried(
+          ctx.runMutation(api.messages.finalizeMessage, {
+            messageId: row,
+            result: { status: "success" },
+          }),
+        )
+      ).ok;
+    },
+  );
+  const s = await submitted();
+  const job = s.drain();
+  await streaming.opened;
+  await s.stop();
+  await s.control((ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      threadId: s.ids.threadId,
+      messages: [{ message: { role: "user", content: "Next." } }],
+    }),
+  );
+  stopped.open();
+  await job;
+  const [, reply] = await s.docs();
+  expect({
+    ...seen,
+    reply: [reply.status, reply.text, reply.abort?.reason],
+  }).toEqual({
+    fail: true,
+    fill: true,
+    finalize: true,
+    reply: ["success", "Half.", "Stopped"],
+  });
+});
+
+test("when the app answers a turn, the job's open row elsewhere ends with what it streamed", async () => {
+  const ready = gate();
+  const done = gate();
+  const seen: Record<string, string> = {};
+  attempts.push(async (ctx, ids) => {
+    seen.own = (await begin(ctx, ids)).messages[0]._id;
+    const away = await ctx.runMutation(api.messages.addMessages, {
+      threadId: ids.threadId,
+      order: 5,
+      messages: [pending],
+      createStream: { format: "UIMessageChunk" },
+    });
+    seen.away = away.messages[0]._id;
+    await delta(ctx, away.streamId, "Away.");
+    ready.open();
+    await done.opened;
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await ready.opened;
+  await s.control((ctx) =>
+    fill(ctx, s.ids.threadId, seen.own, [assistant("Answer.")]),
+  );
+  done.open();
+  await job;
+  const away = (await s.docs()).find((m) => m._id === seen.away)!;
+  expect([away.status, away.text]).toEqual(["success", "Away."]);
+});
+
+test("a generation begun at a prompt takes over the newest live turn that prompt prompts, even one a later send started", async () => {
+  const ready = gate();
+  const go = gate();
+  let late: unknown;
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    await fill(ctx, ids.threadId, own.messages[0]._id, [assistant("Done.")]);
+  });
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    ready.open();
+    await go.opened;
+    late = await delta(ctx, own.streamId!, "Late.");
+  });
+  const s = await submitted();
+  await s.drain();
+  await s.control(async (ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      ...s.ids,
+      messages: [pending],
+      generate: await createFunctionHandle(generate),
+    }),
+  );
+  const job = s.drain();
+  await ready.opened;
+  await s.control((ctx) => begin(ctx, s.ids));
+  go.open();
+  await job;
+  expect(late).toBe(false);
+});
+
+test("a send at a new order leaves an older crashed turn running and retryable (D6)", async () => {
+  attempts.push(async (ctx, ids) => {
+    await begin(ctx, ids);
+    throw new Error("crashed");
+  });
+  attempts.push(async () => {});
+  attempts.push(async () => {});
+  const s = await submitted();
+  await s.drain();
+  await s.control(async (ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      threadId: s.ids.threadId,
+      messages: [{ message: { role: "user", content: "Later." } }],
+      generate: await createFunctionHandle(generate),
+    }),
+  );
+  await s.drain();
+  const retried = await s.control((ctx) =>
+    ctx.runMutation(api.messages.retryGeneration, s.ids),
+  );
+  expect(typeof retried).toBe("string");
+});
+
+test("a send at a new order ends an older turn whose job returned without answering (D6)", async () => {
+  attempts.push(async (ctx, ids) => {
+    await ctx.runMutation(api.messages.addMessages, {
+      ...ids,
+      messages: [{ message: { role: "system", content: "Noted." } }],
+    });
+  });
+  attempts.push(async () => {});
+  const s = await submitted();
+  await s.drain();
+  await s.control(async (ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      threadId: s.ids.threadId,
+      messages: [{ message: { role: "user", content: "Later." } }],
+      generate: await createFunctionHandle(generate),
+    }),
+  );
+  await s.drain();
+  expect(
+    await s.control((ctx) =>
+      ctx.runMutation(api.messages.abortGeneration, s.ids),
+    ),
+  ).toBe(false);
+});
+
+test("a stop by stream id is control: another thread's job stops a turn's stream, and the turn's job is refused after it", async () => {
+  const started = gate();
+  const go = gate();
+  let streamId!: string;
+  let own: boolean | undefined;
+  let stopped: unknown;
+  attempts.push(async (ctx, ids) => {
+    streamId = (await begin(ctx, ids)).streamId!;
+    started.open();
+    await go.opened;
+    own = await delta(ctx, streamId, "Late");
+  });
+  attempts.push(async (ctx) => {
+    await started.opened;
+    stopped = await tried(
+      ctx.runMutation(api.streams.abort, { streamId, reason: "Stopped" }),
+    );
+    go.open();
+  });
+  const s = await submitted();
+  await s.control(async (ctx) => {
+    const other = await ctx.runMutation(api.threads.createThread, {});
+    await ctx.runMutation(api.messages.addMessages, {
+      threadId: other._id,
+      messages: [{ message: { role: "user", content: "Elsewhere." } }],
+      generate: s.handle,
+    });
+  });
+  await s.drain();
+  expect({ stopped, own }).toEqual({
+    stopped: { ok: true, value: true },
+    own: false,
+  });
+});
