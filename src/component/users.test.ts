@@ -180,198 +180,86 @@ describe("users", () => {
     vi.useRealTimers();
   });
 
-  test("deletePageForUserId handles messages phase correctly", async () => {
+  test("deleteAllForUserIdAsync deletes what the user saves while it runs", async () => {
+    vi.useFakeTimers();
+
     const t = convexTest(schema, modules);
-
-    // Create a thread with many messages to test pagination
-    const thread = await t.mutation(api.threads.createThread, {
-      userId: "paginationUser",
-      title: "Pagination Thread",
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    expect(
+      await t.mutation(api.users.deleteAllForUserIdAsync, { userId: "u" }),
+    ).toBe(false);
+    await t
+      .mutation(api.messages.addMessages, {
+        threadId: thread._id as Id<"threads">,
+        userId: "u",
+        messages: [{ message: { role: "user", content: "During delete." } }],
+      })
+      .catch((error) => expect(String(error)).toMatch("not found"));
+    const later = await t.mutation(api.threads.createThread, { userId: "u" });
+    await t.mutation(api.messages.addMessages, {
+      threadId: later._id as Id<"threads">,
+      userId: "u",
+      messages: [{ message: { role: "user", content: "New thread." } }],
     });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    vi.useRealTimers();
 
-    // Add multiple messages to force pagination
-    const messages = [];
-    for (let i = 0; i < 150; i++) {
-      messages.push({
+    expect(
+      await t.run(async (ctx) => ({
+        threads: await ctx.db.query("threads").collect(),
+        messages: await ctx.db.query("messages").collect(),
+      })),
+    ).toEqual({ threads: [], messages: [] });
+  });
+
+  test("a deletion scheduled with the earlier resume args still finishes", async () => {
+    vi.useFakeTimers();
+
+    const t = convexTest(schema, modules);
+    const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+    const threadId = thread._id as Id<"threads">;
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: Array.from({ length: 3 }, (_, i) => ({
         message: { role: "user" as const, content: `Message ${i}` },
-      });
-    }
-    await t.mutation(api.messages.addMessages, {
-      threadId: thread._id as Id<"threads">,
-      messages,
+      })),
     });
+    const cursors = await t.run(async (ctx) => ({
+      threadsCursor: (
+        await ctx.db
+          .query("threads")
+          .withIndex("userId", (q) => q.eq("userId", "u"))
+          .order("desc")
+          .paginate({ numItems: 1, cursor: null })
+      ).continueCursor,
+      messagesCursor: await ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+          q.eq("threadId", threadId),
+        )
+        .order("desc")
+        .paginate({ numItems: 1, cursor: null })
+        .then(async ({ page, continueCursor }) => {
+          await ctx.db.delete("messages", page[0]._id);
+          return continueCursor;
+        }),
+    }));
 
-    // Test first page deletion
-    const result1 = await t.mutation(internal.users._deletePageForUserId, {
-      userId: "paginationUser",
-      messagesCursor: null,
-      threadsCursor: null,
-      threadInProgress: null,
+    await t.mutation(internal.users._deleteAllForUserIdAsync, {
+      userId: "u",
+      ...cursors,
+      threadInProgress: threadId,
       streamsInProgress: false,
-      streamOrder: undefined,
-      deltaCursor: undefined,
     });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    vi.useRealTimers();
 
-    expect(result1.isDone).toBe(false);
-    expect(result1.threadInProgress).toBe(thread._id);
-    expect(result1.streamsInProgress).toBe(false);
-    expect(result1.messagesCursor).toBeTruthy();
-
-    // Continue until messages are done
-    let currentResult = result1;
-    let iterations = 0;
-    while (!currentResult.streamsInProgress && iterations < 10) {
-      currentResult = await t.mutation(internal.users._deletePageForUserId, {
-        userId: "paginationUser",
-        messagesCursor: currentResult.messagesCursor,
-        threadsCursor: currentResult.threadsCursor,
-        threadInProgress: currentResult.threadInProgress,
-        streamsInProgress: currentResult.streamsInProgress,
-        streamOrder: currentResult.streamOrder,
-        deltaCursor: currentResult.deltaCursor,
-      });
-      iterations++;
-    }
-
-    // Should now be in streams phase
-    expect(currentResult.streamsInProgress).toBe(true);
-    expect(currentResult.messagesCursor).toBeNull();
-  });
-
-  test("deletePageForUserId handles streams phase correctly", async () => {
-    const t = convexTest(schema, modules);
-
-    // Create a thread with messages (no streams for this test)
-    const thread = await t.mutation(api.threads.createThread, {
-      userId: "streamsUser",
-      title: "Streams Thread",
-    });
-
-    await t.mutation(api.messages.addMessages, {
-      threadId: thread._id as Id<"threads">,
-      messages: [
-        { message: { role: "user" as const, content: "Test message" } },
-      ],
-    });
-
-    // Test starting directly in streams phase
-    const result = await t.mutation(internal.users._deletePageForUserId, {
-      userId: "streamsUser",
-      messagesCursor: null,
-      threadsCursor: null,
-      threadInProgress: thread._id as Id<"threads">,
-      streamsInProgress: true,
-      streamOrder: undefined,
-      deltaCursor: undefined,
-    });
-
-    expect(result.isDone).toBe(false);
-    expect(result.streamsInProgress).toBe(true);
-    expect(result.threadInProgress).toBe(thread._id);
-
-    const result2 = await t.mutation(internal.users._deletePageForUserId, {
-      userId: "streamsUser",
-      messagesCursor: result.messagesCursor,
-      threadsCursor: result.threadsCursor,
-      threadInProgress: result.threadInProgress,
-      streamsInProgress: result.streamsInProgress,
-      streamOrder: result.streamOrder,
-      deltaCursor: result.deltaCursor,
-    });
-
-    expect(result2.isDone).toBe(false);
-    expect(result2.threadInProgress).toBeNull();
-    expect(result2.streamsInProgress).toBe(false);
-    expect(result2.messagesCursor).toBeNull();
-    expect(result2.streamOrder).toBeUndefined();
-    expect(result2.deltaCursor).toBeUndefined();
-
-    // Thread should be deleted
-    const threadAfter = await t.query(api.threads.getThread, {
-      threadId: thread._id as Id<"threads">,
-    });
-    expect(threadAfter).toBeNull();
-  });
-
-  test("deletePageForUserId handles multiple threads correctly", async () => {
-    const t = convexTest(schema, modules);
-
-    // Create multiple threads for the same user
-    const thread1 = await t.mutation(api.threads.createThread, {
-      userId: "multiUser",
-      title: "Thread 1",
-    });
-    const thread2 = await t.mutation(api.threads.createThread, {
-      userId: "multiUser",
-      title: "Thread 2",
-    });
-
-    // Add a message to each
-    await t.mutation(api.messages.addMessages, {
-      threadId: thread1._id as Id<"threads">,
-      messages: [{ message: { role: "user" as const, content: "Message 1" } }],
-    });
-    await t.mutation(api.messages.addMessages, {
-      threadId: thread2._id as Id<"threads">,
-      messages: [{ message: { role: "user" as const, content: "Message 2" } }],
-    });
-
-    // Process first thread completely
-    let currentResult = await t.mutation(internal.users._deletePageForUserId, {
-      userId: "multiUser",
-      messagesCursor: null,
-      threadsCursor: null,
-      threadInProgress: null,
-      streamsInProgress: false,
-      streamOrder: undefined,
-      deltaCursor: undefined,
-    });
-
-    // Continue until first thread is done
-    while (currentResult.threadInProgress !== null) {
-      currentResult = await t.mutation(internal.users._deletePageForUserId, {
-        userId: "multiUser",
-        messagesCursor: currentResult.messagesCursor,
-        threadsCursor: currentResult.threadsCursor,
-        threadInProgress: currentResult.threadInProgress,
-        streamsInProgress: currentResult.streamsInProgress,
-        streamOrder: currentResult.streamOrder,
-        deltaCursor: currentResult.deltaCursor,
-      });
-    }
-
-    // Should move to second thread
-    currentResult = await t.mutation(internal.users._deletePageForUserId, {
-      userId: "multiUser",
-      messagesCursor: currentResult.messagesCursor,
-      threadsCursor: currentResult.threadsCursor,
-      threadInProgress: currentResult.threadInProgress,
-      streamsInProgress: currentResult.streamsInProgress,
-      streamOrder: currentResult.streamOrder,
-      deltaCursor: currentResult.deltaCursor,
-    });
-
-    expect(currentResult.threadInProgress).toBeTruthy();
-    expect(currentResult.isDone).toBe(false);
-
-    // Complete second thread
-    while (!currentResult.isDone) {
-      currentResult = await t.mutation(internal.users._deletePageForUserId, {
-        userId: "multiUser",
-        messagesCursor: currentResult.messagesCursor,
-        threadsCursor: currentResult.threadsCursor,
-        threadInProgress: currentResult.threadInProgress,
-        streamsInProgress: currentResult.streamsInProgress,
-        streamOrder: currentResult.streamOrder,
-        deltaCursor: currentResult.deltaCursor,
-      });
-    }
-
-    // All threads should be deleted
-    const threadsAfter = await t.query(api.threads.listThreadsByUserId, {
-      userId: "multiUser",
-    });
-    expect(threadsAfter.page).toHaveLength(0);
+    expect(
+      await t.run(async (ctx) => ({
+        threads: await ctx.db.query("threads").collect(),
+        messages: await ctx.db.query("messages").collect(),
+      })),
+    ).toEqual({ threads: [], messages: [] });
   });
 
   test("deleteAllForUserIdAsync with multiple scheduled iterations", async () => {
