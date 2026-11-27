@@ -2,7 +2,12 @@ import type { FunctionHandle } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import type { MutationCtx } from "./_generated/server.js";
 import { finalizePending, getMaxMessage } from "./messages.js";
-import { abortById, finishHandler } from "./streams.js";
+import {
+  abortById,
+  endStoppedStream,
+  finishHandler,
+  stopStream,
+} from "./streams.js";
 
 type Turn = Doc<"turns">;
 type Row = Doc<"messages">;
@@ -67,14 +72,27 @@ async function roleOf(
 
 type Write =
   | { as: "turn"; turnId: Id<"turns">; caller: string }
+  // A stopped job's save into its own stopped open row: that row's ending.
+  | { as: "ending"; turnId: Id<"turns">; caller: string }
   | { as: "app"; liveTurn?: Turn };
 
 /** Who may write an existing row: its turn's job, the app, or no one. */
-export async function authorizeRow(ctx: MutationCtx, row: Row): Promise<Write> {
+export async function authorizeRow(ctx: MutationCtx, row: Row) {
+  const write = await authorizeEnding(ctx, row);
+  if (write.as === "ending") throw new Error(REFUSED);
+  return write;
+}
+
+/** authorizeRow for a write that closes the row, which a stopped job may make once. */
+export async function authorizeEnding(
+  ctx: MutationCtx,
+  row: Row,
+): Promise<Write> {
   const caller = await callerJob(ctx);
-  // handOff changes a row's job copy with its turn's job, so a match is the holder.
+  // handOff changes a row's job copy with its turn's job, so a match is the
+  // holder, or, on a row its stop marked, the stopped job ending it.
   if (caller && row.jobId === caller) {
-    return { as: "turn", turnId: row.turnId!, caller };
+    return { as: row.abort ? "ending" : "turn", turnId: row.turnId!, caller };
   }
   const turn = await turnOf(ctx, row);
   const role = await roleOf(ctx, caller, turn);
@@ -288,7 +306,8 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     await ctx.db.patch("turns", turn._id, { jobId: undefined });
     return;
   }
-  if (!("end" in to && to.byOwnJob)) await cancelQueued(ctx, turn);
+  const running =
+    !("end" in to && to.byOwnJob) && (await cancelQueued(ctx, turn));
   if ("job" in to) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, "Retried");
@@ -323,7 +342,14 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
   }
   const { end, byOwnJob } = to;
   const reason = to.reason ?? REASONS[end];
+  // A stop reads no deltas while its job may run: the job's next save into
+  // each marked row is its ending, or the stream's timeout or a retry is.
+  const leftToJob = end === "stopped" && running;
   for (const row of openRows) {
+    if (leftToJob) {
+      await ctx.db.patch("messages", row._id, { abort: { reason } });
+      continue;
+    }
     if (!atOrder(row) && byOwnJob) {
       await ctx.db.patch("messages", row._id, { jobId: undefined });
     } else if (end === "answered") {
@@ -338,7 +364,8 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     }
   }
   for (const s of openStreams) {
-    await closeStream(ctx, s._id, end === "answered", reason);
+    if (leftToJob) await stopStream(ctx, s, reason);
+    else await closeStream(ctx, s._id, end === "answered", reason);
   }
   if (end === "stopped" && !openRows.some(atOrder)) {
     const [newest] = await newestSettled(ctx, turn);
@@ -387,13 +414,15 @@ async function jobRunning(ctx: MutationCtx, turn: Turn) {
   return state === "pending" || state === "inProgress";
 }
 
+/** Cancels a turn's job before it runs; returns whether it may still be running. */
 async function cancelQueued(ctx: MutationCtx, turn: Turn) {
-  if (!turn.jobId) return;
+  if (!turn.jobId) return false;
   const job = await ctx.db.system.get(
     "_scheduled_functions",
     turn.jobId as Id<"_scheduled_functions">,
   );
   if (job?.state.kind === "pending") await ctx.scheduler.cancel(job._id);
+  return job?.state.kind === "inProgress";
 }
 
 // schedule: the only scheduler of a turn's jobs. A new turn records its
@@ -466,7 +495,7 @@ export async function settle(
   });
 }
 
-async function liveTurns(
+async function turnsOf(
   ctx: MutationCtx,
   threadId: Id<"threads">,
   order?: number,
@@ -485,16 +514,39 @@ async function liveTurns(
   return lists.flat();
 }
 
-/** The live turn a row names: its own, else the newest one it prompts. */
-async function liveTurnFor(ctx: MutationCtx, row: Row) {
+/** The turn a row names: its own while live, else the newest live one it prompts. */
+async function turnFor(ctx: MutationCtx, row: Row) {
   const own = await turnOf(ctx, row);
   if (live(own)) return own;
-  return (
-    (await liveTurns(ctx, row.threadId, row.order))
-      .filter((turn) => anchors(turn, row))
-      .sort((a, b) => a._creationTime - b._creationTime)
-      .at(-1) ?? null
+  const prompted = (await turnsOf(ctx, row.threadId, row.order))
+    .filter((turn) => anchors(turn, row))
+    .sort((a, b) => a._creationTime - b._creationTime)
+    .at(-1);
+  return prompted ?? own;
+}
+
+/**
+ * Ends a stopped turn's rows its job left open: those of a stream that went
+ * idle, or, for a retry, those whose job is gone.
+ */
+async function endStopped(ctx: MutationCtx, turn: Turn, idle?: Stream) {
+  for (const row of await members(ctx, turn, "pending")) {
+    if (!row.abort) continue;
+    if (idle ? row.streamId !== idle._id : await rowJobRunning(ctx, row)) {
+      continue;
+    }
+    await closeRow(ctx, row, { status: "success" });
+    if (row.streamId) await endStoppedStream(ctx, row.streamId);
+  }
+}
+
+async function rowJobRunning(ctx: MutationCtx, row: Row) {
+  if (!row.jobId) return false;
+  const job = await ctx.db.system.get(
+    "_scheduled_functions",
+    row.jobId as Id<"_scheduled_functions">,
   );
+  return job?.state.kind === "pending" || job?.state.kind === "inProgress";
 }
 
 async function newestTurn(ctx: MutationCtx, threadId: Id<"threads">) {
@@ -524,7 +576,7 @@ async function supersede(
   order: number | undefined,
   caller: string | null,
 ) {
-  for (const turn of await liveTurns(ctx, threadId)) {
+  for (const turn of await turnsOf(ctx, threadId)) {
     if (caller && turn.jobId === caller) continue;
     // A running turn elsewhere keeps its live job; a dead one is replaced.
     const replaced =
@@ -558,6 +610,8 @@ export type SaveTurn = {
   carry?: Id<"streamingMessages">;
   // The turn's prompt's user, whom its job's saves act for.
   userId?: string;
+  // A stopped job's last save: trailing open rows and new streams are dropped.
+  ending?: true;
   adopt?: { row: Row; turn: Turn; caller: string };
   after?: (
     saved: Row[],
@@ -610,8 +664,9 @@ export async function planSave(
   const beginning =
     args.messages.length === 1 && args.messages[0].status === "pending";
   if (pending) {
-    const write = await authorizeRow(ctx, pending);
+    const write = await authorizeEnding(ctx, pending);
     if (!pending.turnId) return { pending };
+    if (write.as === "ending") return planEnding(ctx, pending, write.turnId);
     if (
       write.as === "turn" || write.liveTurn
         ? args.promptMessage && args.promptMessage.order !== pending.order
@@ -696,7 +751,7 @@ async function positionOf(
 async function planFill(
   ctx: MutationCtx,
   pending: Row,
-  write: Write,
+  write: Exclude<Write, { as: "ending" }>,
   prompt?: Row | null,
 ): Promise<SaveTurn> {
   const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
@@ -745,6 +800,30 @@ async function planFill(
         wroteFailed: saved.some((doc) => doc.status === "failed"),
         ...(opened ? { opened: true as const } : {}),
       });
+      return {};
+    },
+  };
+}
+
+/** A stopped job's save into its own stopped row ends it: no next step. */
+async function planEnding(
+  ctx: MutationCtx,
+  pending: Row,
+  turnId: Id<"turns">,
+): Promise<SaveTurn> {
+  const turn = (await ctx.db.get("turns", turnId))!;
+  return {
+    pending,
+    ending: true,
+    userId: pending.userId,
+    stamp: (order, _status, replaced) =>
+      replaced || (pending.threadId === turn.threadId && order === turn.order)
+        ? { turnId }
+        : {},
+    after: async (_saved, _streamId, finished) => {
+      for (const streamId of new Set([pending.streamId, finished])) {
+        if (streamId) await endStoppedStream(ctx, streamId);
+      }
       return {};
     },
   };
@@ -894,6 +973,13 @@ export async function settleStream(ctx: MutationCtx, stream: Stream) {
   if (stream.turnId) await settle(ctx, stream.turnId, { byApp: false });
 }
 
+/** A stopped stream's timeout: its runner is gone, so its rows end here. */
+export async function timeoutStoppedStream(ctx: MutationCtx, stream: Stream) {
+  const turn = await turnOf(ctx, stream);
+  if (turn) await endStopped(ctx, turn, stream);
+  await endStoppedStream(ctx, stream._id);
+}
+
 export async function timeoutTurnStream(ctx: MutationCtx, stream: Stream) {
   const turn = await turnOf(ctx, stream);
   if (!live(turn) || turn.jobId !== stream.jobId) return false;
@@ -933,10 +1019,10 @@ export async function stopTurns(
   let turns: Turn[];
   if (args.promptMessageId) {
     const prompt = await resolve(ctx, args.threadId, args.promptMessageId);
-    const turn = prompt && (await liveTurnFor(ctx, prompt));
-    turns = turn ? [turn] : [];
+    const turn = prompt && (await turnFor(ctx, prompt));
+    turns = live(turn) ? [turn] : [];
   } else {
-    turns = await liveTurns(ctx, args.threadId, args.order);
+    turns = await turnsOf(ctx, args.threadId, args.order);
   }
   for (const turn of turns) {
     await handOff(ctx, turn, { end: "stopped", byOwnJob: false, reason });
@@ -1054,10 +1140,11 @@ export async function retryTurn(
   let turn: Turn | null;
   if (args.promptMessageId) {
     const prompt = await resolve(ctx, args.threadId, args.promptMessageId);
-    turn = prompt && (await liveTurnFor(ctx, prompt));
+    turn = prompt && (await turnFor(ctx, prompt));
   } else {
     turn = await newestTurn(ctx, args.threadId);
   }
+  if (turn?.outcome === "stopped") await endStopped(ctx, turn);
   if (!turn || turn.status !== "running") return null;
   if (turn.jobId) {
     const state = await jobState(ctx, turn);

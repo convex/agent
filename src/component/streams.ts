@@ -39,6 +39,7 @@ import {
   stopStreamReply,
   stopTurns,
   streamLease,
+  timeoutStoppedStream,
   timeoutTurnStream,
 } from "./turns.js";
 
@@ -451,6 +452,42 @@ export async function abortById(
   return true;
 }
 
+/**
+ * A stop while the stream's job may still run. It reads no deltas, so the
+ * runner still writing them doesn't conflict with it, and it keeps the
+ * timeout, which ends the reply if the runner is gone.
+ */
+export async function stopStream(
+  ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
+  reason: string,
+) {
+  if (stream.state.kind !== "streaming") return;
+  await ctx.db.patch("streamingMessages", stream._id, {
+    state: { kind: "aborted", reason, timeoutFnId: stream.state.timeoutFnId },
+  });
+}
+
+/** Ends a stream a stop left to its reply's ending. */
+export async function endStoppedStream(
+  ctx: MutationCtx,
+  streamId: Id<"streamingMessages">,
+) {
+  const stream = await ctx.db.get("streamingMessages", streamId);
+  if (stream?.state.kind !== "aborted" || !stream.state.timeoutFnId) return;
+  const timeoutFn = await ctx.db.system.get(
+    "_scheduled_functions",
+    stream.state.timeoutFnId,
+  );
+  if (timeoutFn?.state.kind === "pending") {
+    await ctx.scheduler.cancel(timeoutFn._id);
+  }
+  const cleanupFnId = await scheduleStreamDeletion(ctx, streamId);
+  await ctx.db.patch("streamingMessages", streamId, {
+    state: { kind: "aborted", reason: stream.state.reason, cleanupFnId },
+  });
+}
+
 async function cleanupTimeoutFn(
   ctx: MutationCtx,
   stream: Doc<"streamingMessages">,
@@ -620,6 +657,9 @@ export async function timeoutStreamHandler(
   args: { streamId: Id<"streamingMessages"> },
 ) {
   const stream = await ctx.db.get("streamingMessages", args.streamId);
+  if (stream?.state.kind === "aborted" && stream.state.timeoutFnId) {
+    return timeoutStoppedStream(ctx, stream);
+  }
   if (!stream || stream.state.kind !== "streaming") {
     console.warn("Stream not found", args.streamId);
     return;

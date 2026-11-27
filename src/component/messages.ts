@@ -52,6 +52,7 @@ import {
   abortStreamsAtOrder,
   abortById,
   createStream,
+  endStoppedStream,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -60,6 +61,7 @@ import {
 } from "../approvals.js";
 import {
   adoptOpenRow,
+  authorizeEnding,
   authorizeRow,
   endTurnsForDeleted,
   failPlainReplies,
@@ -604,7 +606,11 @@ async function addMessagesHandler(
       "embeddings.vectors.length must match messages.length",
     );
   }
-  for (let i = 0; i < messages.length; i++) {
+  // A stopped job's ending keeps its steps, as the AI SDK keeps an aborted
+  // one, and opens no next step.
+  let saving = messages.length;
+  while (plan.ending && messages[saving - 1]?.status === "pending") saving--;
+  for (let i = 0; i < saving; i++) {
     const message = messages[i];
     let embeddingId: VectorTableId | undefined;
     if (
@@ -710,6 +716,7 @@ async function addMessagesHandler(
     }
     if (
       streamToCreate &&
+      !plan.ending &&
       i === messages.length - 1 &&
       messageDoc.status === "pending"
     ) {
@@ -748,13 +755,13 @@ async function addMessagesHandler(
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
   const failed = toReturn.find((m) => m.status === "failed");
-  if (finishStreamId && failed) {
+  if (finishStreamId && !plan.ending && failed) {
     await abortById(ctx, {
       streamId: finishStreamId,
       reason: failed.error ?? "The generation failed",
       lease: true,
     });
-  } else if (finishStreamId) {
+  } else if (finishStreamId && !plan.ending) {
     await finishHandler(ctx, {
       streamId: finishStreamId,
       lease: true,
@@ -840,9 +847,21 @@ export const finalizeMessage = mutation({
   handler: async (ctx, { messageId, result, onSaveMessages }) => {
     const stored = await ctx.db.get("messages", messageId);
     assert(stored, `Message ${messageId} not found`);
-    const write = await authorizeRow(ctx, stored);
+    const write = await authorizeEnding(ctx, stored);
     if (!stored.turnId) {
       return finalizePending(ctx, stored, result, onSaveMessages);
+    }
+    if (write.as === "ending") {
+      // A stopped reply ends as stopped, with what it streamed.
+      await finalizePending(
+        ctx,
+        stored,
+        { status: "success" },
+        onSaveMessages,
+        [...(stored.streamId ? [stored.streamId] : [])],
+      );
+      if (stored.streamId) await endStoppedStream(ctx, stored.streamId);
+      return null;
     }
     await finalizePending(
       ctx,

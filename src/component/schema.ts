@@ -148,6 +148,8 @@ export const schema = defineSchema({
         kind: v.literal("aborted"),
         reason: v.string(),
         cleanupFnId: v.optional(v.id("_scheduled_functions")),
+        // Kept by a stop that leaves the reply to its job, until it ends.
+        timeoutFnId: v.optional(v.id("_scheduled_functions")),
       }),
     ),
     turnId: v.optional(v.id("turns")),
