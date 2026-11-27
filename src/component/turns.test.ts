@@ -102,7 +102,10 @@ const delta = (ctx: Ctx, streamId: string, text: string, start = 0) =>
     streamId,
     start,
     end: start + 1,
-    parts: [{ type: "text-delta", id: `t${start}`, delta: text }],
+    parts: [
+      ...(start === 0 ? [{ type: "text-start", id: "t" }] : []),
+      { type: "text-delta", id: "t", delta: text },
+    ],
   }) as Promise<boolean>;
 const fill = (
   ctx: Ctx,
@@ -341,7 +344,7 @@ test("a retry after a stream timeout writes a new reply row; the timed-out row i
   await s.t.finishInProgressScheduledFunctions();
   const timedOut = await s.docs();
   expect(await s.retry()).not.toBeNull();
-  await s.drain();
+  await s.t.finishAllScheduledFunctions(vi.runAllTimers);
   const after = await s.docs();
   expect({
     timedOut: timedOut.map((m) => [m.status, m.text]),
@@ -437,11 +440,11 @@ test("a job that sends at its own prompt starts a second turn: the sent row is t
     });
     seen.sentRow = sent.messages[0]._id;
     seen.delta = await delta(ctx, sent.streamId, "Mine.");
-    seen.finish = await tried(
-      ctx.runMutation(api.streams.finish, { streamId: sent.streamId }),
-    );
     seen.fill = await tried(
       fill(ctx, ids.threadId, sent.messages[0]._id, [assistant("Late.")]),
+    );
+    seen.finish = await tried(
+      ctx.runMutation(api.streams.finish, { streamId: sent.streamId }),
     );
   });
   attempts.push(async () => {

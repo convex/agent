@@ -58,6 +58,18 @@ import {
   APPROVAL_LOOKUP_MESSAGES,
   planToolCallResponses,
 } from "../approvals.js";
+import {
+  adoptOpenRow,
+  authorizeRow,
+  endTurnsForDeleted,
+  planResponse,
+  planSave,
+  resolve,
+  retryTurn,
+  type SaveTurn,
+  settle,
+  stopTurns,
+} from "./turns.js";
 
 export const vOnSaveMessages = v.optional(v.string());
 
@@ -145,8 +157,18 @@ async function abortStreamsForDeleted(
       threadId: message.threadId,
       order: message.order,
       reason: "Message deleted",
+      plainOnly: true,
     });
   }
+}
+
+/** Deleting a turn's prompt, request or open row ends the turn; a plain stream at the order aborts. */
+export async function endDeleted(
+  ctx: MutationCtx,
+  deleted: (Doc<"messages"> | null)[],
+) {
+  if (deleted.some((m) => m?.turnId)) await endTurnsForDeleted(ctx, deleted);
+  await abortStreamsForDeleted(ctx, deleted);
 }
 
 export const deleteByIds = mutation({
@@ -166,7 +188,7 @@ export const deleteByIds = mutation({
         return null;
       }),
     );
-    await abortStreamsForDeleted(ctx, deleted);
+    await endDeleted(ctx, deleted);
     const found = deleted.filter((m) => m !== null);
     await reportSavedMessages(
       ctx,
@@ -241,7 +263,7 @@ export const deleteByOrder = mutation({
       })
       .take(64);
     await Promise.all(messages.map((m) => deleteMessage(ctx, m)));
-    await abortStreamsForDeleted(ctx, messages);
+    await endDeleted(ctx, messages);
     await reportSavedMessages(
       ctx,
       args.onSaveMessages,
@@ -300,10 +322,7 @@ const addMessagesArgs = {
 export const vJobId = baseV.id("_scheduled_functions");
 export const addMessages = mutation({
   args: addMessagesArgs,
-  handler: (ctx, args) => {
-    if (args.generate !== undefined) throw new Error("not implemented");
-    return addMessagesHandler(ctx, args);
-  },
+  handler: (ctx, args) => addMessagesHandler(ctx, args),
   returns: v.object({
     messages: v.array(vMessageDoc),
     streamId: v.optional(v.id("streamingMessages")),
@@ -323,9 +342,8 @@ export const retryGeneration = mutation({
     maxRetries: v.optional(v.number()),
   },
   returns: v.union(v.null(), vJobId),
-  handler: async () => {
-    throw new Error("not implemented");
-  },
+  handler: async (ctx, args) =>
+    (await retryTurn(ctx, args)) as Id<"_scheduled_functions"> | null,
 });
 
 export const abortGeneration = mutation({
@@ -335,8 +353,17 @@ export const abortGeneration = mutation({
     reason: v.optional(v.string()),
   },
   returns: v.boolean(),
-  handler: async () => {
-    throw new Error("not implemented");
+  handler: (ctx, { reason, ...args }) => stopTurns(ctx, args, reason),
+});
+
+export const _recover = internalMutation({
+  args: { ...addMessagesArgs, turnId: v.id("turns") },
+  returns: v.object({ messages: v.array(vMessageDoc) }),
+  handler: async (ctx, { turnId, ...args }) => {
+    const { messages } = await addMessagesHandler(ctx, args, undefined, {
+      stamp: () => ({ turnId }),
+    });
+    return { messages };
   },
 });
 
@@ -353,6 +380,7 @@ async function addMessagesHandler(
   args: ObjectType<typeof addMessagesArgs>,
   // For a caller that already read the prompt and its order's last step.
   prompt?: { message: Doc<"messages">; lastStepOrder: number },
+  turnPlan?: SaveTurn,
 ) {
   let userId = args.userId;
   const threadId = args.threadId;
@@ -374,12 +402,12 @@ async function addMessagesHandler(
     hideFromUserIdSearch,
     onSaveMessages,
     createStream: streamToCreate,
-    generate: _generate,
+    generate,
     ...rest
   } = args;
   const promptMessage =
     prompt?.message ??
-    (promptMessageId && (await ctx.db.get("messages", promptMessageId)));
+    (promptMessageId && (await resolve(ctx, threadId, promptMessageId)));
   assert(
     requestedOrder === undefined ||
       requestedOrder === "next" ||
@@ -402,6 +430,40 @@ async function addMessagesHandler(
         !(pendingMessageId && messages.length === 1)),
     "createStream needs a new pending message last",
   );
+  const plan =
+    turnPlan ??
+    (await planSave(ctx, {
+      threadId,
+      generate,
+      promptMessage: promptMessage || null,
+      pendingMessageId,
+      order: requestedOrder,
+      messages,
+    }));
+  if (plan.adopt) {
+    const adopted = await adoptOpenRow(
+      ctx,
+      plan.adopt,
+      streamToCreate &&
+        ((stamp, row) =>
+          createStream(ctx, {
+            ...streamToCreate,
+            threadId,
+            userId: row.userId,
+            order: row.order,
+            stepOrder: row.stepOrder,
+            ...stamp,
+          })),
+    );
+    return {
+      messages: [publicMessage(adopted.row)],
+      ...(adopted.streamId ? { streamId: adopted.streamId } : {}),
+      turn: adopted.turn as {
+        promptMessageId: Id<"messages">;
+        jobId: Id<"_scheduled_functions">;
+      },
+    };
+  }
   const saved: SavedMessage[] = [];
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
@@ -412,9 +474,11 @@ async function addMessagesHandler(
       )
       .order("desc")
       .take(100);
+    // A row with a job copy is a live turn's, which only its turn ends.
     const restarted = pendingMessages
       .filter((m) => !promptMessage || m.order === promptMessage.order)
-      .filter((m) => !pendingMessageId || m._id !== pendingMessageId);
+      .filter((m) => !pendingMessageId || m._id !== pendingMessageId)
+      .filter((m) => m.jobId === undefined);
     const patch = {
       status: "failed" as const,
       error: "Restarting",
@@ -437,7 +501,7 @@ async function addMessagesHandler(
     );
   }
   let order, stepOrder;
-  let pendingMessage: Doc<"messages"> | null = null;
+  let pendingMessage: Doc<"messages"> | null = plan.pending ?? null;
   let fail = false;
   let error: string | undefined;
   const startsAtNextOrder = requestedOrder === "next";
@@ -469,7 +533,10 @@ async function addMessagesHandler(
       promptMessage.stepOrder;
   } else if (pendingMessageId) {
     // What fills a pending message stays in its turn.
-    pendingMessage = await ctx.db.get("messages", pendingMessageId);
+    pendingMessage =
+      plan.pending !== undefined
+        ? plan.pending
+        : await ctx.db.get("messages", pendingMessageId);
     assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
     order = pendingMessage.order;
     stepOrder =
@@ -526,7 +593,10 @@ async function addMessagesHandler(
     // If there is a pending message, we replace that one with the first message
     // and subsequent ones will follow the regular order/subOrder advancement.
     if (i === 0 && pendingMessageId) {
-      pendingMessage ??= await ctx.db.get("messages", pendingMessageId);
+      pendingMessage ??=
+        plan.pending === undefined
+          ? await ctx.db.get("messages", pendingMessageId)
+          : null;
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
       if (pendingMessage.status === "success") {
         throw new ConvexError(
@@ -552,6 +622,11 @@ async function addMessagesHandler(
         ...messageDoc,
         order: pendingMessage.order,
         stepOrder: pendingMessage.stepOrder,
+        ...plan.stamp?.(
+          pendingMessage.order,
+          messageDoc.status,
+          pendingMessage,
+        ),
       });
       const replaced = (await ctx.db.get("messages", pendingMessage._id))!;
       toReturn.push(replaced);
@@ -593,13 +668,15 @@ async function addMessagesHandler(
         userId,
         order,
         stepOrder,
+        ...plan.streamStamp,
       });
     }
     const messageId = await ctx.db.insert("messages", {
       ...messageDoc,
       order,
       stepOrder,
-      streamId,
+      ...(plan.unlinked ? {} : { streamId }),
+      ...plan.stamp?.(order, messageDoc.status),
     });
     if (message.fileIds) {
       await changeRefcount(ctx, [], message.fileIds);
@@ -616,17 +693,27 @@ async function addMessagesHandler(
     await abortById(ctx, {
       streamId: finishStreamId,
       reason: failed.error ?? "The generation failed",
+      lease: true,
     });
   } else if (finishStreamId) {
     await finishHandler(ctx, {
       streamId: finishStreamId,
+      lease: true,
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
+  const turn = plan.after ? await plan.after(toReturn, streamId) : {};
   await reportSavedMessages(ctx, onSaveMessages, saved);
   return {
     messages: toReturn.map(publicMessage),
     ...(streamId ? { streamId } : {}),
+    ...(turn as {
+      jobId?: Id<"_scheduled_functions">;
+      turn?: {
+        promptMessageId: Id<"messages">;
+        jobId: Id<"_scheduled_functions">;
+      };
+    }),
   };
 }
 
@@ -692,87 +779,121 @@ export const finalizeMessage = mutation({
   handler: async (ctx, { messageId, result, onSaveMessages }) => {
     const stored = await ctx.db.get("messages", messageId);
     assert(stored, `Message ${messageId} not found`);
-    const message = withText(stored);
-    if (message.status !== "pending") {
-      console.debug(
-        "Trying to finalize a message that's already",
-        message.status,
-      );
-      return;
+    if (!stored.turnId) {
+      return finalizePending(ctx, stored, result, onSaveMessages);
     }
-    // See if we can add any in-progress data
-    if (!message.message?.content.length) {
-      const { messages, materializationFailures, streamsToRelease } =
-        await getStreamingMessagesWithMetadata(ctx, message, result);
-      if (materializationFailures.length > 0) {
-        console.error(
-          "Failed to materialize persisted assistant streams",
-          materializationFailures,
-        );
+    const write = await authorizeRow(ctx, stored);
+    await finalizePending(
+      ctx,
+      stored,
+      result,
+      onSaveMessages,
+      stored.streamId ? [stored.streamId] : [],
+    );
+    const turnId = write.as === "turn" ? write.turn._id : write.liveTurn?._id;
+    if (turnId) {
+      await settle(ctx, turnId, {
+        byApp: write.as === "app",
+        wroteFailed: result.status === "failed",
+        reason: result.status === "failed" ? result.error : undefined,
+      });
+    }
+    return null;
+  },
+});
+
+/**
+ * Settles a pending message: recovers what its streams carried, or marks it.
+ * A durable row passes its own stream, so another attempt's stream at its
+ * position is never read into it.
+ */
+export async function finalizePending(
+  ctx: MutationCtx,
+  stored: Doc<"messages">,
+  result: { status: "success" } | { status: "failed"; error: string },
+  onSaveMessages: string | undefined,
+  onlyStreams?: Id<"streamingMessages">[],
+) {
+  const messageId = stored._id;
+  const message = withText(stored);
+  if (message.status !== "pending") {
+    console.debug(
+      "Trying to finalize a message that's already",
+      message.status,
+    );
+    return null;
+  }
+  // See if we can add any in-progress data
+  if (!message.message?.content.length) {
+    const { messages, materializationFailures, streamsToRelease } =
+      await getStreamingMessagesWithMetadata(ctx, message, result, onlyStreams);
+    if (materializationFailures.length > 0) {
+      console.error(
+        "Failed to materialize persisted assistant streams",
+        materializationFailures,
+      );
+      await markPendingMessageFailed(
+        ctx,
+        message,
+        result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
+        onSaveMessages,
+      );
+      return null;
+    }
+    if (messages.length > 0) {
+      // Nested so an oversized recovered message rolls back on its own and
+      // the pending message is marked failed instead of stuck.
+      let recovered;
+      try {
+        const recovery = {
+          messages,
+          threadId: message.threadId,
+          agentName: message.agentName,
+          failPendingSteps: false,
+          pendingMessageId: messageId,
+          userId: message.userId,
+          embeddings: undefined,
+        };
+        ({ messages: recovered } = message.turnId
+          ? await ctx.runMutation(internal.messages._recover, {
+              ...recovery,
+              turnId: message.turnId,
+            })
+          : await ctx.runMutation(api.messages.addMessages, recovery));
+      } catch (error) {
+        console.error("Failed to persist recovered assistant streams", error);
         await markPendingMessageFailed(
           ctx,
           message,
           result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
           onSaveMessages,
         );
-        return;
+        return null;
       }
-      if (messages.length > 0) {
-        // Nested so an oversized recovered message rolls back on its own and
-        // the pending message is marked failed instead of stuck.
-        let recovered;
-        try {
-          ({ messages: recovered } = await ctx.runMutation(
-            api.messages.addMessages,
-            {
-              messages,
-              threadId: message.threadId,
-              agentName: message.agentName,
-              failPendingSteps: false,
-              pendingMessageId: messageId,
-              userId: message.userId,
-              embeddings: undefined,
-            },
-          ));
-        } catch (error) {
-          console.error("Failed to persist recovered assistant streams", error);
-          await markPendingMessageFailed(
-            ctx,
-            message,
-            result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
-            onSaveMessages,
-          );
-          return;
-        }
-        await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
-        // Reported here, not by the nested save, so a report that can't be
-        // scheduled fails the finalize instead of reading as failed recovery.
-        await reportSavedMessages(
-          ctx,
-          onSaveMessages,
-          recovered.map((doc) => ({
-            kind: doc._id === messageId ? "update" : "insert",
-            doc,
-          })),
-        );
-        return;
-      }
-    }
-    if (result.status === "failed") {
-      await markPendingMessageFailed(
+      await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
+      // Reported here, not by the nested save, so a report that can't be
+      // scheduled fails the finalize instead of reading as failed recovery.
+      await reportSavedMessages(
         ctx,
-        message,
-        result.error,
         onSaveMessages,
+        recovered.map((doc) => ({
+          kind: doc._id === messageId ? "update" : "insert",
+          doc,
+        })),
       );
-    } else {
-      await ctx.db.patch("messages", messageId, { status: "success" });
-      await reportSavedMessages(ctx, onSaveMessages, [
-        { kind: "update", doc: { ...message, status: "success" } },
-      ]);
+      return null;
     }
-  },
-});
+  }
+  if (result.status === "failed") {
+    await markPendingMessageFailed(ctx, message, result.error, onSaveMessages);
+  } else {
+    await ctx.db.patch("messages", messageId, { status: "success" });
+    await reportSavedMessages(ctx, onSaveMessages, [
+      { kind: "update", doc: { ...message, status: "success" } },
+    ]);
+  }
+  return null;
+}
 
 export const updateMessage = mutation({
   args: {
@@ -820,7 +941,19 @@ export const updateMessage = mutation({
       patch.embeddingId = undefined;
     }
 
+    const write = message.turnId ? await authorizeRow(ctx, message) : undefined;
+    if (write && patch.status && patch.status !== "pending") {
+      patch.jobId = undefined;
+    }
     await ctx.db.patch("messages", args.messageId, patch);
+    const turnId = write?.as === "turn" ? write.turn._id : write?.liveTurn?._id;
+    if (turnId) {
+      await settle(ctx, turnId, {
+        byApp: write!.as === "app",
+        wroteFailed: patch.status === "failed",
+        reason: patch.error,
+      });
+    }
     const updated = (await ctx.db.get("messages", args.messageId))!;
     await reportSavedMessages(ctx, args.onSaveMessages, [
       { kind: "update", doc: updated },
@@ -866,7 +999,6 @@ export const respondToToolCallApprovals = mutation({
     jobId: v.optional(vJobId),
   }),
   handler: async (ctx, args) => {
-    if (args.generate !== undefined) throw new Error("not implemented");
     const read: Doc<"messages">[] = [];
     const plan = await planToolCallResponses(
       recentMessages(ctx, args.threadId, read),
@@ -877,6 +1009,10 @@ export const respondToToolCallApprovals = mutation({
     // Read newest first through the request, so the first message read at
     // the request's order is that order's last step.
     const last = read.find((doc) => doc.order === request.order)!;
+    const turnPlan =
+      request.turnId || args.generate !== undefined
+        ? await planResponse(ctx, request, args.generate)
+        : undefined;
     const saved = await addMessagesHandler(
       ctx,
       {
@@ -888,8 +1024,12 @@ export const respondToToolCallApprovals = mutation({
         onSaveMessages: args.onSaveMessages,
       },
       { message: request, lastStepOrder: last.stepOrder },
+      turnPlan,
     );
-    return { messageId: saved.messages[0]._id as Id<"messages"> };
+    return {
+      messageId: saved.messages[0]._id as Id<"messages">,
+      ...(saved.jobId ? { jobId: saved.jobId } : {}),
+    };
   },
 });
 

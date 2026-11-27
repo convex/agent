@@ -30,6 +30,15 @@ import {
   projectPersistedUIMessageChunks,
 } from "../streaming/materializePersistedUIMessageChunks.js";
 import { changeRefcount } from "./files.js";
+import {
+  authorizeStream,
+  callerJob,
+  endStream,
+  planStream,
+  settleStream,
+  stopTurns,
+  timeoutTurnStream,
+} from "./turns.js";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -177,6 +186,9 @@ export const addDelta = mutation({
     if (stream.state.kind !== "streaming") {
       return false;
     }
+    if (stream.jobId !== undefined && stream.jobId !== (await callerJob(ctx))) {
+      return false;
+    }
     const { fileRefs, ...delta } = args;
     if (fileRefs?.length) {
       const previous = stream.fileRefs ?? [];
@@ -265,10 +277,12 @@ export const create = mutation({
     promptMessageId: v.optional(v.id("messages")),
   },
   returns: v.id("streamingMessages"),
-  handler: (ctx, { promptMessageId, ...args }) => {
-    if (promptMessageId !== undefined) throw new Error("not implemented");
-    return createStream(ctx, args);
-  },
+  handler: (ctx, { promptMessageId, ...args }) =>
+    promptMessageId === undefined
+      ? createStream(ctx, args)
+      : planStream(ctx, args.threadId, promptMessageId).then((stamp) =>
+          createStream(ctx, { ...args, ...stamp }),
+        ),
 });
 
 export async function createStream(
@@ -350,7 +364,13 @@ function publicStreamMessage(m: Doc<"streamingMessages">): StreamMessage {
 
 export async function abortStreamsAtOrder(
   ctx: MutationCtx,
-  args: { threadId: Id<"threads">; order: number; reason: string },
+  args: {
+    threadId: Id<"threads">;
+    order: number;
+    reason: string;
+    // Leaves live turns' streams, which only their turn ends.
+    plainOnly?: true;
+  },
 ) {
   const streams = await ctx.db
     .query("streamingMessages")
@@ -361,16 +381,22 @@ export async function abortStreamsAtOrder(
         .eq("order", args.order),
     )
     .take(100);
+  let aborted = false;
   for (const stream of streams) {
+    if (args.plainOnly && stream.jobId !== undefined) continue;
     await abortById(ctx, { streamId: stream._id, reason: args.reason });
+    aborted = true;
   }
-  return streams.length > 0;
+  return aborted;
 }
 
 export const abortByOrder = mutation({
   args: { threadId: v.id("threads"), order: v.number(), reason: v.string() },
   returns: v.boolean(),
-  handler: abortStreamsAtOrder,
+  handler: async (ctx, args) => {
+    const stopped = await stopTurns(ctx, args, args.reason);
+    return (await abortStreamsAtOrder(ctx, args)) || stopped;
+  },
 });
 
 export const abort = mutation({
@@ -380,7 +406,11 @@ export const abort = mutation({
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.boolean(),
-  handler: abortById,
+  handler: async (ctx, args) => {
+    const stream = await ctx.db.get("streamingMessages", args.streamId);
+    if (stream?.jobId !== undefined) return endStream(ctx, stream, args);
+    return abortById(ctx, args);
+  },
 });
 
 export async function abortById(
@@ -389,11 +419,15 @@ export async function abortById(
     streamId: Id<"streamingMessages">;
     reason: string;
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
+    lease?: true;
   },
 ) {
   const stream = await ctx.db.get("streamingMessages", args.streamId);
   if (!stream) {
     throw new Error(`Stream not found: ${args.streamId}`);
+  }
+  if (args.lease && stream.jobId !== undefined) {
+    await authorizeStream(ctx, stream);
   }
   if (args.finalDelta) {
     await ctx.db.insert("streamDeltas", args.finalDelta);
@@ -435,7 +469,14 @@ export const fail = mutation({
   returns: v.boolean(),
   handler: async (ctx, { streamId, reason, finalDelta }) => {
     const stream = await ctx.db.get("streamingMessages", streamId);
-    if (!stream || stream.state.kind !== "streaming") return false;
+    if (!stream) return false;
+    if (stream.jobId !== undefined) {
+      return endStream(ctx, stream, {
+        reason,
+        ...(finalDelta?.streamId === streamId ? { finalDelta } : {}),
+      });
+    }
+    if (stream.state.kind !== "streaming") return false;
     return abortById(ctx, {
       streamId,
       reason,
@@ -450,7 +491,10 @@ export const finish = mutation({
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.null(),
-  handler: finishHandler,
+  handler: async (ctx, args) => {
+    const stream = await finishHandler(ctx, { ...args, lease: true });
+    if (stream?.turnId) await settleStream(ctx, stream);
+  },
 });
 
 export async function finishHandler(
@@ -458,6 +502,8 @@ export async function finishHandler(
   args: {
     streamId: Id<"streamingMessages">;
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
+    // Set by a writer's own finish, which a durable stream checks.
+    lease?: true;
   },
 ) {
   if (args.finalDelta) {
@@ -467,17 +513,21 @@ export async function finishHandler(
   if (!stream) {
     throw new Error(`Stream not found: ${args.streamId}`);
   }
+  if (args.lease && stream.jobId !== undefined) {
+    await authorizeStream(ctx, stream);
+  }
   if (stream.state.kind !== "streaming") {
     console.warn(
       `Stream trying to finish ${args.streamId} but is ${stream.state.kind}`,
     );
-    return;
+    return null;
   }
   await cleanupTimeoutFn(ctx, stream);
   const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
   await ctx.db.patch("streamingMessages", args.streamId, {
     state: { kind: "finished", endedAt: Date.now(), cleanupFnId },
   });
+  return stream;
 }
 
 export const heartbeat = mutation({
@@ -566,6 +616,7 @@ export async function timeoutStreamHandler(
     console.warn("Stream not found", args.streamId);
     return;
   }
+  if (stream.turnId && (await timeoutTurnStream(ctx, stream))) return;
   const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
   await ctx.db.patch("streamingMessages", args.streamId, {
     state: { kind: "aborted", reason: "timeout", cleanupFnId },
@@ -872,6 +923,7 @@ export async function getStreamingMessagesWithMetadata(
     stepOrder,
   }: { threadId: Id<"threads">; order: number; stepOrder: number },
   metadata: { status: "success" | "failed"; error?: string },
+  onlyStreams?: Id<"streamingMessages">[],
 ): Promise<{
   messages: MessageWithMetadataInternal[];
   materializationFailures: Array<{
@@ -880,12 +932,13 @@ export async function getStreamingMessagesWithMetadata(
   }>;
   streamsToRelease: Id<"streamingMessages">[];
 }> {
-  const streamingMessages = await getStreamingMessages(
-    ctx,
-    threadId,
-    order,
-    stepOrder,
-  );
+  const streamingMessages = onlyStreams
+    ? (
+        await Promise.all(
+          onlyStreams.map((id) => ctx.db.get("streamingMessages", id)),
+        )
+      ).filter((s) => s !== null)
+    : await getStreamingMessages(ctx, threadId, order, stepOrder);
   const failure = (streamId: Id<"streamingMessages">, reason: string) => ({
     messages: [],
     materializationFailures: [{ streamId, reason }],
