@@ -299,7 +299,9 @@ export async function startGeneration<
       ? await saveInputMessages(ctx, component, {
           ...opts,
           onSaveMessagesHandle: onSaveMessages,
-          userId,
+          // At a saved prompt the save picks the user it didn't get: a job's
+          // rows are its prompt's user's, a plain reply's the thread's.
+          userId: args.promptMessageId ? (opts.userId ?? undefined) : userId,
           threadId,
           prompt: args.prompt,
           messages: args.messages,
@@ -321,7 +323,7 @@ export async function startGeneration<
           turn: undefined,
         };
 
-  userId ??= pendingMessage?.userId;
+  userId = opts.userId ?? pendingMessage?.userId ?? userId;
 
   const order = pendingMessage?.order ?? context.order;
   const stepOrder = pendingMessage?.stepOrder ?? context.stepOrder;

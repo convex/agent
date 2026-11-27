@@ -831,3 +831,46 @@ test("a plain generation's mutation tool runs its mutation, keyed by the step's 
   ).toEqual([`${call._id}:p1`]);
   expect(model.doStreamCalls).toHaveLength(2);
 });
+
+test("a job whose context handler reads the user before its first save runs its tools for the user who saved its prompt", async () => {
+  const t = createTest();
+  const threadId = await t.mutation((ctx) =>
+    createThread(ctx, components.agent, { userId: "owner" }),
+  );
+  let actingFor: string | undefined;
+  const whoami = createTool({
+    inputSchema: z.object({}),
+    execute: async (ctx) => (actingFor = ctx.userId),
+  });
+  attempts.push((ctx, ids) =>
+    agent
+      .streamText(
+        ctx,
+        { threadId: ids.threadId },
+        {
+          ...ids,
+          model: scripted(toolStep([{ id: "w", tool: "whoami" }]), "Done."),
+          tools: { whoami },
+          stopWhen: stepCountIs(2),
+        },
+        {
+          ...deltas,
+          contextHandler: async (_ctx, { recent, inputPrompt }) => [
+            ...recent,
+            ...inputPrompt,
+          ],
+        },
+      )
+      .then((result) => result.consumeStream()),
+  );
+  await t.mutation((ctx) =>
+    agent.saveMessage(ctx, {
+      threadId,
+      userId: "guest",
+      prompt: "Go.",
+      generate,
+    }),
+  );
+  await t.finishAllScheduledFunctions(() => {});
+  expect(actingFor).toBe("guest");
+});
