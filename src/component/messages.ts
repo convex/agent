@@ -250,7 +250,13 @@ async function markPendingMessageFailed(
     const { tableName } = getVectorIdInfo(ctx, message.embeddingId);
     await ctx.db.delete(tableName, message.embeddingId);
   }
-  const patch = { status: "failed" as const, error, embeddingId: undefined };
+  // A closed row keeps no job copy: only an open row is leased.
+  const patch = {
+    status: "failed" as const,
+    error,
+    embeddingId: undefined,
+    jobId: undefined,
+  };
   await ctx.db.patch("messages", message._id, patch);
   await reportSavedMessages(ctx, onSaveMessages, [
     { kind: "update", doc: { ...message, ...patch } },
@@ -958,7 +964,10 @@ export async function finalizePending(
   if (result.status === "failed") {
     await markPendingMessageFailed(ctx, message, result.error, onSaveMessages);
   } else {
-    await ctx.db.patch("messages", messageId, { status: "success" });
+    await ctx.db.patch("messages", messageId, {
+      status: "success",
+      jobId: undefined,
+    });
     await reportSavedMessages(ctx, onSaveMessages, [
       { kind: "update", doc: { ...message, status: "success" } },
     ]);

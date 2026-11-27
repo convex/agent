@@ -242,26 +242,25 @@ const REASONS: Record<Ending, string> = {
 
 type Result = { status: "success" } | { status: "failed"; error: string };
 
-// A closed row is built from its stream's deltas later: reading the delta
-// log here would race the streamer's writes and stall a stop under load.
+// While its job may still be streaming, a closed row is built from its
+// stream later: reading the delta log as the streamer appends would conflict
+// with every delta and stall a stop under load.
 async function closeRow(
   ctx: MutationCtx,
   row: Row,
   result: Result,
+  writing: boolean,
   abort?: { reason: string },
 ) {
-  await ctx.db.patch("messages", row._id, {
-    jobId: undefined,
-    ...(abort ? { abort } : {}),
-  });
-  await ctx.scheduler.runAfter(0, internal.messages._finalize, {
-    messageId: row._id,
-    result,
-  });
-}
-
-/** A row whose writer is gone, built now: no streamer races its deltas. */
-async function closeRowNow(ctx: MutationCtx, row: Row, result: Result) {
+  const mark = { jobId: undefined, ...(abort ? { abort } : {}) };
+  if (writing) {
+    await ctx.db.patch("messages", row._id, mark);
+    await ctx.scheduler.runAfter(0, internal.messages._finalize, {
+      messageId: row._id,
+      result,
+    });
+    return;
+  }
   await finalizePending(
     ctx,
     row,
@@ -269,7 +268,7 @@ async function closeRowNow(ctx: MutationCtx, row: Row, result: Result) {
     undefined,
     row.streamId ? [row.streamId] : [],
   );
-  await ctx.db.patch("messages", row._id, { jobId: undefined });
+  await ctx.db.patch("messages", row._id, mark);
 }
 
 async function closeStream(
@@ -298,12 +297,13 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, TIMED_OUT);
     for (const row of openRows) {
-      await closeRowNow(ctx, row, { status: "failed", error: TIMED_OUT });
+      await closeRow(ctx, row, { status: "failed", error: TIMED_OUT }, false);
     }
     await ctx.db.patch("turns", turn._id, { jobId: undefined });
     return;
   }
   if (!("end" in to && to.byOwnJob)) await cancelQueued(ctx, turn);
+  const writing = openRows.length > 0 && (await jobRunning(ctx, turn));
   if ("job" in to) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, "Retried");
@@ -314,7 +314,12 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
           streamId: undefined,
         });
       } else {
-        await closeRow(ctx, row, { status: "failed", error: "Retried" });
+        await closeRow(
+          ctx,
+          row,
+          { status: "failed", error: "Retried" },
+          writing,
+        );
       }
     }
     if (to.newRow) {
@@ -347,9 +352,9 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
         jobId: undefined,
       });
     } else if (end === "stopped") {
-      await closeRow(ctx, row, { status: "success" }, { reason });
+      await closeRow(ctx, row, { status: "success" }, writing, { reason });
     } else {
-      await closeRow(ctx, row, { status: "failed", error: reason });
+      await closeRow(ctx, row, { status: "failed", error: reason }, writing);
     }
   }
   for (const s of openStreams) {
