@@ -11,9 +11,12 @@ import {
   type ProviderMetadata,
 } from "ai";
 import type { JSONValue } from "@ai-sdk/provider";
-import type { PaginationOptions, PaginationResult } from "convex/server";
+import type {
+  FunctionReturnType,
+  PaginationOptions,
+  PaginationResult,
+} from "convex/server";
 import {
-  convexToJson,
   getConvexSize,
   getDocumentSize,
   type Infer,
@@ -22,7 +25,12 @@ import {
 import { assert } from "convex-helpers";
 import { fetchContextWithPrompt } from "./search.js";
 import { serializeUsage } from "../mapping.js";
-import { answersQuestion } from "../../decisions.js";
+import {
+  answersQuestion,
+  decodeAnswer,
+  decodeQuestions,
+  encodeAnswer,
+} from "../../decisions.js";
 import type {
   ActionCtx,
   AgentComponent,
@@ -32,19 +40,17 @@ import type {
   Options,
   QueryCtx,
 } from "./types.js";
-import type {
-  vDecisionAnswer,
-  vDecisionDoc,
-  vDecisionQuestion,
-} from "../../validators.js";
+import type { vDecisionAnswer, vDecisionDoc } from "../../validators.js";
 
 export type DecisionQuestions = Record<string, Experimental_DecisionQuestion>;
 
 type DecisionAnswers<QUESTIONS extends DecisionQuestions> =
   Experimental_DecisionResult<QUESTIONS>["answers"];
 type StoredAnswer = Infer<typeof vDecisionAnswer>;
-type StoredQuestion = Infer<typeof vDecisionQuestion>;
 type StoredDecisionDoc = Infer<typeof vDecisionDoc>;
+type StoredDecision = NonNullable<
+  FunctionReturnType<AgentComponent["decisions"]["findCached"]>
+>;
 
 export type DecideArgs<QUESTIONS extends DecisionQuestions> = Omit<
   Parameters<typeof experimental_decide>[0],
@@ -149,19 +155,6 @@ function answerShape(question: Experimental_DecisionQuestion) {
   return { type: question.type };
 }
 
-// Questions and answers are stored as Convex values, so this fails before the
-// model is called rather than after.
-function assertStorable(what: string, value: unknown, advice: string) {
-  try {
-    convexToJson(value as Value);
-  } catch (error) {
-    throw new Error(
-      `Decision ${what} can't be stored: ${error instanceof Error ? error.message : String(error)} ${advice}`,
-      { cause: error },
-    );
-  }
-}
-
 type StateFilePart = Extract<Experimental_DecisionStatePart, { type: "file" }>;
 
 // Files in the context follow the JSON part as file parts, so multimodal
@@ -256,20 +249,6 @@ function toUsage(
   };
 }
 
-// Convex validators infer mutable arrays where the AI SDK has readonly ones.
-function toStoredQuestions(
-  questions: DecisionQuestions,
-): Record<string, StoredQuestion> {
-  return Object.fromEntries(
-    Object.entries(questions).map(([id, question]) => [
-      id,
-      question.type === "score"
-        ? { ...question, criteria: [...question.criteria] }
-        : question,
-    ]),
-  );
-}
-
 function isAnswerTo<QUESTION extends Experimental_DecisionQuestion>(
   question: QUESTION,
   answer: StoredAnswer,
@@ -278,27 +257,44 @@ function isAnswerTo<QUESTION extends Experimental_DecisionQuestion>(
 }
 
 function decodeDecision<QUESTIONS extends DecisionQuestions>(
-  doc: StoredDecisionDoc,
-  questions: QUESTIONS,
+  {
+    answers: rows,
+    questions: storedQuestions,
+    settings,
+    ...doc
+  }: StoredDecision,
+  asked?: QUESTIONS,
 ): DecisionDoc<QUESTIONS> {
-  const answers: DecisionDoc<QUESTIONS>["answers"] = {};
-  const corrections: DecisionDoc<QUESTIONS>["corrections"] = {};
-  for (const id in questions) {
-    const answer = doc.answers[id];
-    if (answer && isAnswerTo(questions[id], answer)) answers[id] = answer;
-    const correction = doc.corrections[id];
-    if (correction && isAnswerTo(questions[id], correction.answer)) {
-      corrections[id] = { answer: correction.answer, by: correction.by };
+  const questions = decodeQuestions(storedQuestions);
+  const askedQuestions: DecisionQuestions = asked ?? questions;
+  const answers: [string, StoredAnswer][] = [];
+  const corrections: [string, { answer: StoredAnswer; by?: string }][] = [];
+  for (const { questionId, answer, correction } of rows) {
+    if (!Object.hasOwn(askedQuestions, questionId)) continue;
+    const question = askedQuestions[questionId];
+    const decoded = decodeAnswer(answer);
+    if (isAnswerTo(question, decoded)) answers.push([questionId, decoded]);
+    const corrected = correction && decodeAnswer(correction.answer);
+    if (corrected && isAnswerTo(question, corrected)) {
+      corrections.push([questionId, { answer: corrected, by: correction.by }]);
     }
   }
-  return { ...doc, answers, corrections };
+  return {
+    ...doc,
+    questions,
+    settings: settings === undefined ? undefined : JSON.parse(settings),
+    answers: Object.fromEntries(answers) as DecisionDoc<QUESTIONS>["answers"],
+    corrections: Object.fromEntries(
+      corrections,
+    ) as DecisionDoc<QUESTIONS>["corrections"],
+  };
 }
 
 function answersAll<QUESTIONS extends DecisionQuestions>(
   questions: QUESTIONS,
   answers: DecisionDoc<QUESTIONS>["answers"],
 ): answers is DecisionAnswers<QUESTIONS> {
-  return Object.keys(questions).every((id) => id in answers);
+  return Object.keys(questions).every((id) => Object.hasOwn(answers, id));
 }
 
 export async function decide<const QUESTIONS extends DecisionQuestions>(
@@ -324,18 +320,6 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
   } = args;
   const model = modelArg ?? opts.experimental_decisionModel;
   assert(model, "experimental_decide needs an experimental_decisionModel");
-  assertStorable(
-    "questions",
-    questions,
-    `Use ASCII question IDs and option keys that don't start with "$", and put labels in the criteria text.`,
-  );
-  if (settings.providerOptions) {
-    assertStorable(
-      "providerOptions",
-      settings.providerOptions,
-      `Use ASCII keys that don't start with "$".`,
-    );
-  }
   const requestedModel = typeof model === "string" ? model : model.modelId;
   const provider =
     typeof model === "string" ? model.split("/")[0] : model.provider;
@@ -401,10 +385,10 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
                 ),
           stateHash,
           cacheKey,
-          questions: toStoredQuestions(questions),
+          questions: JSON.stringify(questions),
           requestedModel,
           provider,
-          settings: callSettings,
+          settings: callSettings && JSON.stringify(callSettings),
         }
       : undefined;
   const limit = MAX_DOCUMENT_BYTES - MODEL_OUTPUT_RESERVE_BYTES;
@@ -437,7 +421,10 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
     return ctx.runMutation(component.decisions.create, {
       ...row,
       ...decision,
-      answers: asked.map((a) => ({ ...a, answer: answers[a.questionId] })),
+      answers: asked.map((a) => ({
+        ...a,
+        answer: encodeAnswer(answers[a.questionId]),
+      })),
     });
   };
 
@@ -549,15 +536,9 @@ export async function listDecisions<const QUESTIONS extends DecisionQuestions>(
         })),
       )),
   });
-  if (questions) {
-    return {
-      ...result,
-      page: result.page.map((doc) => decodeDecision(doc, questions)),
-    };
-  }
   return {
     ...result,
-    page: result.page.map((doc) => decodeDecision(doc, doc.questions)),
+    page: result.page.map((doc) => decodeDecision(doc, questions)),
   };
 }
 
@@ -585,7 +566,7 @@ export async function correctDecision<
     threadId: args.threadId,
     decisionId: args.decisionId,
     questionId: args.questionId,
-    answer: args.answer,
+    answer: encodeAnswer(args.answer),
     by: args.by,
   });
 }

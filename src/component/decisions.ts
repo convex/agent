@@ -3,15 +3,26 @@ import { mergedStream, stream } from "convex-helpers/server/stream";
 import { assert, pick } from "convex-helpers";
 import { mutation, query, type QueryCtx } from "./_generated/server.js";
 import type { Doc, Id } from "./_generated/dataModel.js";
-import { schema, v } from "./schema.js";
-import { answersQuestion, sumsToOne } from "../decisions.js";
+import { schema, v, vStoredDecisionAnswer } from "./schema.js";
 import {
-  vDecisionAnswer,
-  vDecisionDoc,
-  vPaginationResult,
-} from "../validators.js";
+  answersQuestion,
+  decodeAnswer,
+  decodeQuestions,
+  sumsToOne,
+} from "../decisions.js";
+import { vPaginationResult } from "../validators.js";
 
 const answerFields = schema.tables.decisionAnswers.validator.fields;
+
+// As stored: the client decodes the JSON text.
+const vStoredDecision = v.object({
+  ...schema.tables.decisions.validator.fields,
+  _id: v.id("decisions"),
+  _creationTime: v.number(),
+  answers: v.array(
+    v.object(pick(answerFields, ["questionId", "answer", "correction"])),
+  ),
+});
 
 export const create = mutation({
   args: {
@@ -53,10 +64,7 @@ function answersOf(ctx: QueryCtx, decisionId: Id<"decisions">) {
 function toDoc(decision: Doc<"decisions">, rows: Doc<"decisionAnswers">[]) {
   return {
     ...decision,
-    answers: Object.fromEntries(rows.map((r) => [r.questionId, r.answer])),
-    corrections: Object.fromEntries(
-      rows.flatMap((r) => (r.correction ? [[r.questionId, r.correction]] : [])),
-    ),
+    answers: rows.map((r) => pick(r, ["questionId", "answer", "correction"])),
   };
 }
 
@@ -69,7 +77,7 @@ export const list = query({
     asked: v.optional(v.array(vAsked)),
     paginationOpts: paginationOptsValidator,
   },
-  returns: vPaginationResult(vDecisionDoc),
+  returns: vPaginationResult(vStoredDecision),
   handler: async (ctx, { threadId, asked, paginationOpts }) => {
     if (asked?.length === 0) {
       return { page: [], isDone: true, continueCursor: "" };
@@ -147,7 +155,7 @@ export const findCached = query({
       v.object(pick(answerFields, ["questionId", "definitionHash"])),
     ),
   },
-  returns: v.union(vDecisionDoc, v.null()),
+  returns: v.union(vStoredDecision, v.null()),
   handler: async (ctx, args) => {
     const decision = await ctx.db
       .query("decisions")
@@ -178,7 +186,7 @@ export const correct = mutation({
     threadId: v.id("threads"),
     decisionId: v.id("decisions"),
     questionId: v.string(),
-    answer: vDecisionAnswer,
+    answer: vStoredDecisionAnswer,
     by: v.optional(v.string()),
   },
   returns: v.null(),
@@ -196,9 +204,13 @@ export const correct = mutation({
     if (!row) {
       throw new Error(`Decision ${decisionId} has no question ${questionId}`);
     }
+    const decoded = decodeAnswer(answer);
     if (
-      !answersQuestion(decision.questions[questionId], answer) ||
-      !sumsToOne(answer)
+      !answersQuestion(
+        decodeQuestions(decision.questions)[questionId],
+        decoded,
+      ) ||
+      !sumsToOne(decoded)
     ) {
       throw new Error(
         `That isn't an answer to ${questionId} as decision ${decisionId} asked it`,

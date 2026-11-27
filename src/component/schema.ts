@@ -11,12 +11,35 @@ import {
   vProviderOptions,
   vProviderMetadata,
   vReasoningDetails,
-  vDecisionAnswer,
-  vDecisionQuestion,
-  vDecisionSettings,
 } from "../validators.js";
 import { typedV } from "convex-helpers/validators";
 import vectorTables, { vVectorId } from "./vector/tables.js";
+
+// The caller's question IDs and option keys are JSON text wherever they'd be
+// object keys, as Convex limits keys and how many an object has.
+const vStoredProbabilities = v.optional(v.string());
+export const vStoredDecisionAnswer = v.union(
+  v.object({
+    type: v.literal("choice"),
+    choice: v.string(),
+    probabilities: vStoredProbabilities,
+  }),
+  v.object({
+    type: v.literal("score"),
+    score: v.number(),
+    probabilities: vStoredProbabilities,
+  }),
+  v.object({
+    type: v.literal("box"),
+    box: v.object({
+      top: v.number(),
+      bottom: v.number(),
+      left: v.number(),
+      right: v.number(),
+    }),
+  }),
+  v.object({ type: v.literal("boolean"), probability: v.number() }),
+);
 
 export const schema = defineSchema({
   threads: defineTable({
@@ -177,19 +200,19 @@ export const schema = defineSchema({
     promptMessageId: v.optional(v.id("messages")),
     order: v.optional(v.number()),
     contextMessageIds: v.array(v.id("messages")),
-    // JSON text, as the caller's keys needn't be valid Convex field names.
-    // File bytes are replaced by their SHA-256.
+    // JSON text, like questions and settings. File bytes are replaced by their
+    // SHA-256.
     state: v.optional(v.string()),
     // Of the context, then the caller's state, as the model saw them.
     stateHash: v.string(),
     // Of the state hash, requested model, provider and settings: what the cache
     // matches.
     cacheKey: v.string(),
-    questions: v.record(v.string(), vDecisionQuestion),
+    questions: v.string(),
     requestedModel: v.string(),
     model: v.string(),
     provider: v.string(),
-    settings: v.optional(vDecisionSettings),
+    settings: v.optional(v.string()),
     usage: v.optional(vUsage),
     providerMetadata: v.optional(vProviderMetadata),
   })
@@ -205,9 +228,9 @@ export const schema = defineSchema({
     questionId: v.string(),
     definitionHash: v.string(),
     shapeHash: v.string(),
-    answer: vDecisionAnswer,
+    answer: vStoredDecisionAnswer,
     correction: v.optional(
-      v.object({ answer: vDecisionAnswer, by: v.optional(v.string()) }),
+      v.object({ answer: vStoredDecisionAnswer, by: v.optional(v.string()) }),
     ),
   })
     .index("decisionId_questionId", ["decisionId", "questionId"])

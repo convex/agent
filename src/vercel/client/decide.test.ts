@@ -281,35 +281,6 @@ describe("a stored decision", () => {
     expect(out).toEqual({ ids: [null, null], stored: 0 });
   });
 
-  test("question IDs and option keys Convex can't store are refused before the model is called", async () => {
-    const calls: Calls = [];
-    const agent = makeAgent({
-      experimental_decisionModel: decisionModel(calls),
-    });
-    const attempt = (q: Record<string, unknown>) =>
-      initConvexTest()
-        .action((ctx) =>
-          agent.experimental_decide(
-            ctx,
-            {},
-            { questions: q as typeof questions, state: "x" },
-          ),
-        )
-        .then(
-          () => "decided",
-          (e: Error) => e.message,
-        );
-    expect(
-      await attempt({ $release: { type: "boolean", instructions: "?" } }),
-    ).toMatch(/can't be stored.*\$release starts with a '\$'/);
-    expect(
-      await attempt({
-        release: { type: "choice", criteria: { Café: "previous", v7: "x" } },
-      }),
-    ).toMatch(/can't be stored.*Café has invalid character/);
-    expect(calls).toHaveLength(0);
-  });
-
   test("a decision over a missing thread throws before the model is called", async () => {
     const calls: Calls = [];
     const agent = makeAgent({
@@ -334,32 +305,75 @@ describe("a stored decision", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("providerOptions keys Convex can't store are refused before the model is called", async () => {
+  test("question IDs, option keys and providerOptions keys are stored as given, however many and whatever their characters", async () => {
     const calls: Calls = [];
     const agent = makeAgent({
       experimental_decisionModel: decisionModel(calls),
     });
-    const attempt = (providerOptions: Record<string, Record<string, number>>) =>
-      initConvexTest()
-        .action(async (ctx) => {
-          const { threadId } = await seedThread(ctx);
-          return agent.experimental_decide(
-            ctx,
-            { threadId },
-            { questions, providerOptions },
-          );
-        })
-        .then(
-          () => "decided",
-          (e: Error) => e.message,
+    const asked = {
+      $release: { type: "boolean", instructions: "Is it the release?" },
+      _meta: { type: "boolean", instructions: "Is it about this chat?" },
+      team: {
+        type: "choice",
+        criteria: {
+          _none: "no team",
+          Café: "the cafe",
+          ...Object.fromEntries(
+            Array.from({ length: 1100 }, (_, i) => [`o${i}`, `option ${i}`]),
+          ),
+        },
+      },
+      level: {
+        type: "score",
+        criteria: Array.from({ length: 1026 }, (_, i) => `level ${i}`),
+      },
+    } satisfies Record<string, Experimental_DecisionQuestion>;
+    const providerOptions = { typesafe: { $seed: 1, température: 1 } };
+    // An action's return value is a Convex value, which these keys can't be.
+    const json = await initConvexTest().action(async (ctx) => {
+      const { threadId } = await seedThread(ctx);
+      const decide = () =>
+        agent.experimental_decide(
+          ctx,
+          { threadId },
+          { questions: asked, providerOptions, cache: { ttlMs: 60_000 } },
         );
-    expect(await attempt({ typesafe: { $seed: 1 } })).toMatch(
-      /providerOptions can't be stored.*\$seed starts with a '\$'/,
-    );
-    expect(await attempt({ typesafe: { température: 1 } })).toMatch(
-      /providerOptions can't be stored.*température has invalid character/,
-    );
-    expect(calls).toHaveLength(0);
+      const decided = await decide();
+      const hit = await decide();
+      await experimental_correctDecision(ctx, components.agent, {
+        threadId,
+        decisionId: decided.decisionId!,
+        questions: asked,
+        questionId: "team",
+        answer: {
+          type: "choice",
+          choice: "Café",
+          probabilities: Object.fromEntries(
+            Object.keys(asked.team.criteria).map((key) => [
+              key,
+              key === "Café" ? 1 : 0,
+            ]),
+          ) as Record<keyof typeof asked.team.criteria, number>,
+        },
+      });
+      const [stored] = (await list(ctx, threadId, asked)).page;
+      return JSON.stringify({ decided, hit, stored });
+    });
+    const out: {
+      decided: { decisionId: string; answers: unknown };
+      hit: unknown;
+      stored: DecisionDoc<typeof asked>;
+    } = JSON.parse(json);
+    expect(calls).toHaveLength(1);
+    expect(out.hit).toMatchObject({
+      cached: true,
+      decisionId: out.decided.decisionId,
+      answers: out.decided.answers,
+    });
+    expect(out.stored.questions).toEqual(asked);
+    expect(out.stored.settings).toEqual({ providerOptions });
+    expect(out.stored.answers).toEqual(out.decided.answers);
+    expect(out.stored.corrections.team?.answer.choice).toBe("Café");
   });
 
   test("a decision too large to store with room for the model's output is refused before the model is called", async () => {

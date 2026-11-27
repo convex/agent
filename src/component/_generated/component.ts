@@ -55,16 +55,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {
           answer:
-            | {
-                choice: string;
-                probabilities?: Record<string, number>;
-                type: "choice";
-              }
-            | {
-                probabilities?: Record<string, number>;
-                score: number;
-                type: "score";
-              }
+            | { choice: string; probabilities?: string; type: "choice" }
+            | { probabilities?: string; score: number; type: "score" }
             | {
                 box: {
                   bottom: number;
@@ -90,16 +82,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           agentName?: string;
           answers: Array<{
             answer:
-              | {
-                  choice: string;
-                  probabilities?: Record<string, number>;
-                  type: "choice";
-                }
-              | {
-                  probabilities?: Record<string, number>;
-                  score: number;
-                  type: "score";
-                }
+              | { choice: string; probabilities?: string; type: "choice" }
+              | { probabilities?: string; score: number; type: "score" }
               | {
                   box: {
                     bottom: number;
@@ -121,35 +105,9 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           promptMessageId?: string;
           provider: string;
           providerMetadata?: Record<string, Record<string, any>>;
-          questions: Record<
-            string,
-            | {
-                criteria: Record<string, any>;
-                instructions?: any;
-                type: "choice";
-              }
-            | { criteria: Array<any>; instructions?: any; type: "score" }
-            | { instructions: any; type: "box" }
-            | {
-                criteria?: { false?: any; true?: any };
-                instructions?: any;
-                type: "boolean";
-              }
-          >;
+          questions: string;
           requestedModel: string;
-          settings?: {
-            maxOutputTokens?: number;
-            providerOptions?: Record<string, Record<string, any>>;
-            reasoning?:
-              | "provider-default"
-              | "none"
-              | "minimal"
-              | "low"
-              | "medium"
-              | "high"
-              | "xhigh"
-              | "max";
-          };
+          settings?: string;
           state?: string;
           stateHash: string;
           threadId: string;
@@ -181,45 +139,24 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           _creationTime: number;
           _id: string;
           agentName?: string;
-          answers: Record<
-            string,
-            | {
-                choice: string;
-                probabilities?: Record<string, number>;
-                type: "choice";
-              }
-            | {
-                probabilities?: Record<string, number>;
-                score: number;
-                type: "score";
-              }
-            | {
-                box: {
-                  bottom: number;
-                  left: number;
-                  right: number;
-                  top: number;
-                };
-                type: "box";
-              }
-            | { probability: number; type: "boolean" }
-          >;
-          cacheKey: string;
-          contextMessageIds: Array<string>;
-          corrections: Record<
-            string,
-            {
+          answers: Array<{
+            answer:
+              | { choice: string; probabilities?: string; type: "choice" }
+              | { probabilities?: string; score: number; type: "score" }
+              | {
+                  box: {
+                    bottom: number;
+                    left: number;
+                    right: number;
+                    top: number;
+                  };
+                  type: "box";
+                }
+              | { probability: number; type: "boolean" };
+            correction?: {
               answer:
-                | {
-                    choice: string;
-                    probabilities?: Record<string, number>;
-                    type: "choice";
-                  }
-                | {
-                    probabilities?: Record<string, number>;
-                    score: number;
-                    type: "score";
-                  }
+                | { choice: string; probabilities?: string; type: "choice" }
+                | { probabilities?: string; score: number; type: "score" }
                 | {
                     box: {
                       bottom: number;
@@ -231,42 +168,19 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                   }
                 | { probability: number; type: "boolean" };
               by?: string;
-            }
-          >;
+            };
+            questionId: string;
+          }>;
+          cacheKey: string;
+          contextMessageIds: Array<string>;
           model: string;
           order?: number;
           promptMessageId?: string;
           provider: string;
           providerMetadata?: Record<string, Record<string, any>>;
-          questions: Record<
-            string,
-            | {
-                criteria: Record<string, any>;
-                instructions?: any;
-                type: "choice";
-              }
-            | { criteria: Array<any>; instructions?: any; type: "score" }
-            | { instructions: any; type: "box" }
-            | {
-                criteria?: { false?: any; true?: any };
-                instructions?: any;
-                type: "boolean";
-              }
-          >;
+          questions: string;
           requestedModel: string;
-          settings?: {
-            maxOutputTokens?: number;
-            providerOptions?: Record<string, Record<string, any>>;
-            reasoning?:
-              | "provider-default"
-              | "none"
-              | "minimal"
-              | "low"
-              | "medium"
-              | "high"
-              | "xhigh"
-              | "max";
-          };
+          settings?: string;
           state?: string;
           stateHash: string;
           threadId: string;
@@ -306,45 +220,24 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             _creationTime: number;
             _id: string;
             agentName?: string;
-            answers: Record<
-              string,
-              | {
-                  choice: string;
-                  probabilities?: Record<string, number>;
-                  type: "choice";
-                }
-              | {
-                  probabilities?: Record<string, number>;
-                  score: number;
-                  type: "score";
-                }
-              | {
-                  box: {
-                    bottom: number;
-                    left: number;
-                    right: number;
-                    top: number;
-                  };
-                  type: "box";
-                }
-              | { probability: number; type: "boolean" }
-            >;
-            cacheKey: string;
-            contextMessageIds: Array<string>;
-            corrections: Record<
-              string,
-              {
+            answers: Array<{
+              answer:
+                | { choice: string; probabilities?: string; type: "choice" }
+                | { probabilities?: string; score: number; type: "score" }
+                | {
+                    box: {
+                      bottom: number;
+                      left: number;
+                      right: number;
+                      top: number;
+                    };
+                    type: "box";
+                  }
+                | { probability: number; type: "boolean" };
+              correction?: {
                 answer:
-                  | {
-                      choice: string;
-                      probabilities?: Record<string, number>;
-                      type: "choice";
-                    }
-                  | {
-                      probabilities?: Record<string, number>;
-                      score: number;
-                      type: "score";
-                    }
+                  | { choice: string; probabilities?: string; type: "choice" }
+                  | { probabilities?: string; score: number; type: "score" }
                   | {
                       box: {
                         bottom: number;
@@ -356,42 +249,19 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
                     }
                   | { probability: number; type: "boolean" };
                 by?: string;
-              }
-            >;
+              };
+              questionId: string;
+            }>;
+            cacheKey: string;
+            contextMessageIds: Array<string>;
             model: string;
             order?: number;
             promptMessageId?: string;
             provider: string;
             providerMetadata?: Record<string, Record<string, any>>;
-            questions: Record<
-              string,
-              | {
-                  criteria: Record<string, any>;
-                  instructions?: any;
-                  type: "choice";
-                }
-              | { criteria: Array<any>; instructions?: any; type: "score" }
-              | { instructions: any; type: "box" }
-              | {
-                  criteria?: { false?: any; true?: any };
-                  instructions?: any;
-                  type: "boolean";
-                }
-            >;
+            questions: string;
             requestedModel: string;
-            settings?: {
-              maxOutputTokens?: number;
-              providerOptions?: Record<string, Record<string, any>>;
-              reasoning?:
-                | "provider-default"
-                | "none"
-                | "minimal"
-                | "low"
-                | "medium"
-                | "high"
-                | "xhigh"
-                | "max";
-            };
+            settings?: string;
             state?: string;
             stateHash: string;
             threadId: string;

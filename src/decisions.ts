@@ -1,10 +1,36 @@
 import type { Infer } from "convex/values";
-import type { vDecisionAnswer } from "./validators.js";
+import type { vDecisionAnswer, vDecisionQuestion } from "./validators.js";
+import type { vStoredDecisionAnswer } from "./component/schema.js";
 
 // Shared by the component's decisions module and the client. It's not in
 // shared.ts because the component's delete path imports shared.ts, and a second
 // importer there makes the bundler split it into one more chunk that every
 // delete function then loads.
+
+type DecisionAnswer = Infer<typeof vDecisionAnswer>;
+type StoredDecisionAnswer = Infer<typeof vStoredDecisionAnswer>;
+
+export function encodeAnswer(answer: DecisionAnswer): StoredDecisionAnswer {
+  if (answer.type !== "choice" && answer.type !== "score") return answer;
+  const { probabilities, ...rest } = answer;
+  return probabilities
+    ? { ...rest, probabilities: JSON.stringify(probabilities) }
+    : rest;
+}
+
+export function decodeAnswer(answer: StoredDecisionAnswer): DecisionAnswer {
+  if (answer.type !== "choice" && answer.type !== "score") return answer;
+  const { probabilities, ...rest } = answer;
+  return probabilities
+    ? { ...rest, probabilities: JSON.parse(probabilities) }
+    : rest;
+}
+
+export function decodeQuestions(
+  questions: string,
+): Record<string, Infer<typeof vDecisionQuestion>> {
+  return JSON.parse(questions);
+}
 
 const inUnitRange = (n: number) => n >= 0 && n <= 1;
 
@@ -33,7 +59,7 @@ type DecisionQuestionLike =
  */
 export function answersQuestion(
   question: DecisionQuestionLike,
-  answer: Infer<typeof vDecisionAnswer>,
+  answer: DecisionAnswer,
 ): boolean {
   if (answer.type === "choice" && question.type === "choice") {
     const options = Object.keys(question.criteria);
@@ -71,7 +97,7 @@ const ROUNDING_PER_PROBABILITY = 0.005;
 const MAX_ROUNDING = 0.05;
 
 /** Whether an answer's probabilities, if it has any, sum to 1 within rounding. */
-export function sumsToOne(answer: Infer<typeof vDecisionAnswer>): boolean {
+export function sumsToOne(answer: DecisionAnswer): boolean {
   if (!("probabilities" in answer) || !answer.probabilities) return true;
   const values = Object.values(answer.probabilities);
   const sum = values.reduce((total, p) => total + p, 0);

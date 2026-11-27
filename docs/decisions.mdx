@@ -69,10 +69,8 @@ optional, plus:
 The model sees a JSON part with the context messages, then any files from them
 as file parts, then your `state`.
 
-Question IDs and choice option keys are stored as Convex field names, so they
-must be ASCII and can't start with `$`. Put labels in the criteria text. The
-same goes for `providerOptions` keys, which are stored with the decision. A call
-that breaks this throws before the model is called.
+Question IDs, choice option keys and `providerOptions` keys can be any strings:
+they're stored as JSON text.
 
 ## Stored decisions
 
