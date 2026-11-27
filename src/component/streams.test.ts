@@ -74,7 +74,7 @@ async function scheduledRuns(t: ReturnType<typeof initConvexTest>) {
 }
 
 describe("streams", () => {
-  test("listDeltas rejects streams belonging to another thread", async () => {
+  test("listDeltas reads a stream of another thread as missing", async () => {
     const t = initConvexTest();
     const { streamId } = await seedStream(t);
     const otherThread = await t.mutation(api.threads.createThread, {});
@@ -85,12 +85,12 @@ describe("streams", () => {
       parts: ["private delta"],
     });
 
-    await expect(
-      t.query(api.streams.listDeltas, {
+    expect(
+      await t.query(api.streams.listDeltas, {
         threadId: otherThread._id as Id<"threads">,
         cursors: [{ streamId, cursor: 0 }],
       }),
-    ).rejects.toThrow("Stream does not belong to the given thread");
+    ).toEqual([]);
   });
 
   test("listDeltas skips deleted streams even if deltas remain", async () => {
