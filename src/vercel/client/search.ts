@@ -236,6 +236,7 @@ export async function fetchRecentAndSearchMessages(
             component.messages.getMessageSearchFields,
             {
               messageId: targetMessageId,
+              threadId,
             },
           );
           text = targetSearchFields.text;

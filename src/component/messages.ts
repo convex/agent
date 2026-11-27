@@ -1107,6 +1107,7 @@ export const searchMessages = action({
             api.messages.getMessageSearchFields,
             {
               messageId: args.targetMessageId,
+              threadId: args.threadId,
             },
           );
           assert(target, "Target message embedding not found.");
@@ -1295,7 +1296,7 @@ export const textSearch = query({
     );
     const targetMessage =
       args.targetMessageId &&
-      (await ctx.db.get("messages", args.targetMessageId));
+      (await getMessageInThread(ctx, args.targetMessageId, args.threadId));
     const text = args.text || targetMessage?.text;
     if (!text) {
       console.warn("No text to search", targetMessage, args.text);
@@ -1340,9 +1341,20 @@ export const textSearch = query({
   returns: v.array(vMessageDoc),
 });
 
+async function getMessageInThread(
+  ctx: QueryCtx,
+  messageId: Id<"messages">,
+  threadId: Id<"threads"> | undefined,
+) {
+  const message = await ctx.db.get("messages", messageId);
+  if (threadId && message?.threadId !== threadId) return null;
+  return message;
+}
+
 export const getMessageSearchFields = query({
   args: {
     messageId: v.id("messages"),
+    threadId: v.optional(v.id("threads")),
   },
   returns: v.object({
     text: v.optional(v.string()),
@@ -1357,7 +1369,11 @@ export const getMessageSearchFields = query({
     embedding?: number[] | undefined;
     embeddingModel?: string | undefined;
   }> => {
-    const message = await ctx.db.get("messages", args.messageId);
+    const message = await getMessageInThread(
+      ctx,
+      args.messageId,
+      args.threadId,
+    );
     const text = message?.text;
     let embedding = undefined;
     let embeddingModel = undefined;

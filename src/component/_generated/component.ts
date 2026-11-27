@@ -2455,7 +2455,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       getMessageSearchFields: FunctionReference<
         "query",
         "internal",
-        { messageId: string },
+        { messageId: string; threadId?: string },
         { embedding?: Array<number>; embeddingModel?: string; text?: string },
         Name
       >;
