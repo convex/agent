@@ -3,6 +3,7 @@ import { mergedStream, stream } from "convex-helpers/server/stream";
 import {
   paginationOptsValidator,
   type FunctionHandle,
+  type PaginationResult,
   type WithoutSystemFields,
 } from "convex/server";
 import { ConvexError, getDocumentSize, type ObjectType } from "convex/values";
@@ -139,12 +140,16 @@ export async function deleteDecisionsPage(
 ): Promise<boolean> {
   let rows = limit;
   let bytes = MAX_BYTES_READ_PER_DELETE;
+  // A cursor past each deleted decision, as reading from the start of the
+  // range again scans every decision deleted so far in this transaction.
+  let cursor: string | null = null;
   while (rows > 0 && bytes > 0) {
-    const decision = await ctx.db
+    const decisions: PaginationResult<Doc<"decisions">> = await ctx.db
       .query("decisions")
       .withIndex("threadId", (q) => q.eq("threadId", threadId))
-      .first();
-    if (!decision) return true;
+      .paginate({ numItems: 1, cursor });
+    const [decision] = decisions.page;
+    if (!decision) return decisions.isDone;
     const answers = await ctx.db
       .query("decisionAnswers")
       .withIndex("decisionId_questionId", (q) =>
@@ -159,6 +164,8 @@ export async function deleteDecisionsPage(
     bytes -= getDocumentSize(decision);
     if (!answers.isDone) return false;
     await ctx.db.delete("decisions", decision._id);
+    if (decisions.isDone) return true;
+    cursor = decisions.continueCursor;
   }
   return false;
 }
