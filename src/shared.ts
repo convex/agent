@@ -1,3 +1,9 @@
+import {
+  convexToJson,
+  jsonToConvex,
+  type JSONValue,
+  type Value,
+} from "convex/values";
 import type { MessageDoc } from "./validators.js";
 
 type MessagePartLike = {
@@ -118,4 +124,33 @@ export function getProviderName(embeddingModel: ModelOrMetadata): string {
     return embeddingModel.split("/").at(0)!;
   }
   return embeddingModel.provider;
+}
+
+/**
+ * A durable tool call's result as its record stores it: its output in
+ * Convex's JSON encoding, since outputs are saved as Convex values, or its
+ * error. Throws for an output that isn't a Convex value.
+ */
+export function encodeToolResult(
+  result: { output: unknown } | { error: string },
+): string {
+  if ("error" in result) return JSON.stringify(result);
+  return JSON.stringify(
+    result.output === undefined
+      ? {}
+      : { output: convexToJson(result.output as Value) },
+  );
+}
+
+export function decodeToolResult(
+  result: string,
+): { output: unknown } | { error: string } {
+  const parsed = JSON.parse(result) as
+    | { output?: JSONValue }
+    | { error: string };
+  if ("error" in parsed) return parsed;
+  return {
+    output:
+      parsed.output === undefined ? undefined : jsonToConvex(parsed.output),
+  };
 }

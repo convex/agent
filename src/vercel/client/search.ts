@@ -617,9 +617,11 @@ export async function fetchContextWithPrompt(
   order: number | undefined;
   stepOrder: number | undefined;
 }> {
-  const { responseDocs: _, ...context } = await fetchContextAndResponses(
-    ...args,
-  );
+  const {
+    responseDocs: _,
+    approvedCalls: __,
+    ...context
+  } = await fetchContextAndResponses(...args);
   return context;
 }
 
@@ -644,6 +646,8 @@ export async function fetchContextAndResponses(
   order: number | undefined;
   stepOrder: number | undefined;
   responseDocs: MessageDoc[];
+  /** Each approved call's id, to the message its request's step saved. */
+  approvedCalls: Map<string, string>;
 }> {
   const { threadId, userId, textEmbeddingModel, embeddingModel } = args;
   const effectiveEmbeddingModel = embeddingModel ?? textEmbeddingModel;
@@ -775,6 +779,7 @@ export async function fetchContextAndResponses(
     order: promptMessage?.order,
     stepOrder: promptMessage?.stepOrder,
     responseDocs: existingResponseDocs,
+    approvedCalls: continuation?.approvedCalls ?? new Map(),
   };
 }
 
@@ -784,7 +789,13 @@ function approvalContinuation(
   promptMessage: MessageDoc | undefined,
   searchMessages: MessageDoc[],
   recentMessages: MessageDoc[],
-): { approvalIds: Set<string>; storedContext: ModelMessage[] } | undefined {
+):
+  | {
+      approvalIds: Set<string>;
+      approvedCalls: Map<string, string>;
+      storedContext: ModelMessage[];
+    }
+  | undefined {
   if (promptMessage?.message?.role !== "tool") return undefined;
   const responseIds = new Set(
     promptMessage.message.content.flatMap((part) =>
@@ -798,7 +809,7 @@ function approvalContinuation(
   );
   // A client tool's result continues its step like a decision does when that
   // step also requested approvals.
-  const requestContents = recentMessages.flatMap((doc) =>
+  const requests = recentMessages.flatMap((doc) =>
     doc.order === promptMessage.order &&
     doc.message?.role === "assistant" &&
     Array.isArray(doc.message.content) &&
@@ -809,20 +820,28 @@ function approvalContinuation(
           responseIds.has(part.approvalId)) ||
         (part.type === "tool-call" && resultCallIds.has(part.toolCallId)),
     )
-      ? [doc.message.content]
+      ? [{ id: doc._id, content: doc.message.content }]
       : [],
   );
-  if (responseIds.size === 0 && requestContents.length === 0) {
+  if (responseIds.size === 0 && requests.length === 0) {
     return undefined;
   }
-  if (requestContents.length !== 1) {
+  if (requests.length !== 1) {
     throw new Error(
       "Approval continuation requires one complete request message",
     );
   }
+  const [request] = requests;
   const approvalIds = new Set(
-    requestContents[0].flatMap((part) =>
+    request.content.flatMap((part) =>
       part.type === "tool-approval-request" ? [part.approvalId] : [],
+    ),
+  );
+  const approved = new Set(
+    promptMessage.message.content.flatMap((part) =>
+      part.type === "tool-approval-response" && part.approved
+        ? [part.approvalId]
+        : [],
     ),
   );
   if ([...responseIds].some((approvalId) => !approvalIds.has(approvalId))) {
@@ -832,6 +851,13 @@ function approvalContinuation(
   }
   return {
     approvalIds,
+    approvedCalls: new Map(
+      request.content.flatMap((part) =>
+        part.type === "tool-approval-request" && approved.has(part.approvalId)
+          ? [[part.toolCallId, request.id] as const]
+          : [],
+      ),
+    ),
     storedContext: docsToModelMessages(
       structuredClone([...searchMessages, ...recentMessages]),
     ),

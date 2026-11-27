@@ -12,7 +12,13 @@ import type {
   ToolSet,
 } from "ai";
 import { tool } from "ai";
-import type { GenericActionCtx, GenericDataModel } from "convex/server";
+import type {
+  FunctionReference,
+  FunctionReturnType,
+  GenericActionCtx,
+  GenericDataModel,
+  OptionalRestArgs,
+} from "convex/server";
 import type { ProviderOptions } from "../../validators.js";
 import type { Agent } from "../index.js";
 
@@ -31,7 +37,35 @@ export type ToolCtx<DataModel extends GenericDataModel = GenericDataModel> =
     userId?: string;
     threadId?: string;
     promptMessageId?: string;
+    /**
+     * The message the call's step saves into. With the call's `toolCallId`,
+     * `${messageId}:${toolCallId}` is a key that a durable generation's retry
+     * keeps for the same call, e.g. for an idempotency key.
+     */
+    messageId?: string;
   };
+
+/**
+ * How a durable generation runs a tool, beyond its `execute`: read by the
+ * generation, not part of the AI SDK's tool.
+ */
+export type DurableTool =
+  /** Its one `ctx.runMutation` is recorded, for exactly once. */
+  | { kind: "mutation" }
+  /** Run again on a replay: it has nothing to record. */
+  | { kind: "query" }
+  /** Run for a call a crashed job started without recording a result. */
+  | {
+      kind: "execute";
+      resume: (
+        ctx: ToolCtx,
+        input: any,
+        options: ToolExecutionOptions<any>,
+      ) => unknown;
+    };
+const DURABLE = Symbol.for("@convex-dev/agent/durableTool");
+export const durableTool = (tool: unknown): DurableTool | undefined =>
+  (tool as { [DURABLE]?: DurableTool } | undefined)?.[DURABLE];
 
 export type AgentToolExecutionOptions<TOOL_CONTEXT extends Context = Context> =
   ToolExecutionOptions<TOOL_CONTEXT>;
@@ -76,6 +110,32 @@ export type ToolExecuteFunctionCtx<
   options: AgentToolExecutionOptions<TOOL_CONTEXT>,
 ) => AsyncIterable<OUTPUT> | PromiseLike<OUTPUT>;
 
+/**
+ * A mutation tool's ctx: its one `ctx.runMutation`, of an internal mutation,
+ * is what a durable generation records. Its body runs again on a replay, so
+ * it has no `runAction` or `scheduler`.
+ */
+export type MutationToolCtx<Ctx extends ToolCtx = ToolCtx> = Omit<
+  Ctx,
+  "runMutation" | "runAction" | "scheduler"
+> & {
+  runMutation<Mutation extends FunctionReference<"mutation", "internal">>(
+    mutation: Mutation,
+    ...args: OptionalRestArgs<Mutation>
+  ): Promise<FunctionReturnType<Mutation>>;
+};
+
+/** A query tool's ctx: it runs again on a replay, so it can't write. */
+export type QueryToolCtx<Ctx extends ToolCtx = ToolCtx> = Omit<
+  Ctx,
+  "runMutation" | "runAction" | "scheduler"
+>;
+
+const ONE_MUTATION =
+  "A mutation tool runs one ctx.runMutation, the call a durable generation records.";
+const READ_ONLY =
+  "A query tool can't write: a durable generation's replay runs it again.";
+
 type NeverOptional<N, T> = 0 extends 1 & N
   ? Partial<T>
   : [N] extends [never]
@@ -89,6 +149,71 @@ type NeverOptional<N, T> = 0 extends 1 & N
 type HANDLER_REMOVED_ERROR =
   "⚠️ 'handler' was removed in @convex-dev/agent v0.6.0. Rename to 'execute'. See: node_modules/@convex-dev/agent/MIGRATION.md";
 
+type ToolRunsOne<
+  INPUT,
+  OUTPUT,
+  Ctx extends ToolCtx,
+  TOOL_CONTEXT extends Context,
+> =
+  | {
+      /**
+       * An async function that is called with the arguments from the tool call and produces a result.
+       * If `execute` is not provided, the tool will not be executed automatically.
+       *
+       * @param input - The input of the tool call.
+       * @param options.abortSignal - A signal that can be used to abort the tool call.
+       */
+      execute?: ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>;
+      /**
+       * Run for a call that a crashed durable generation started without
+       * recording its result, with the same `toolCallId`, in place of telling
+       * the model its outcome is unknown: for a tool that's safe to run again,
+       * such as an API that dedupes on an idempotency key.
+       */
+      resume?: ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>;
+      mutation?: never;
+      query?: never;
+    }
+  | {
+      /**
+       * Run the tool as one internal mutation, called with
+       * `ctx.runMutation`. In a durable generation that call runs in a
+       * transaction that records its result, so a retry after a crash
+       * neither runs it again nor loses its result, and a step that can't be
+       * recorded refuses the tool. A replay runs the body again, and the
+       * call returns its recorded result. Take identity from `ctx`, never
+       * from the input: the model chooses the input.
+       *
+       * On an Agent, or exported, annotate its return type, e.g.
+       * `(ctx, input): Promise<Order> => ...`: without it the agent's type
+       * depends on `internal`, which depends on the agent, and TypeScript
+       * reports that it "implicitly has type 'any'" (TS7022).
+       */
+      mutation: (
+        ctx: MutationToolCtx<Ctx>,
+        input: INPUT,
+        options: AgentToolExecutionOptions<TOOL_CONTEXT>,
+      ) => PromiseLike<OUTPUT>;
+      query?: never;
+      execute?: never;
+      resume?: never;
+    }
+  | {
+      /**
+       * Run the tool as reads, such as `ctx.runQuery` of an internal query.
+       * A durable generation's replay runs it again. Annotate its return
+       * type as for `mutation`.
+       */
+      query: (
+        ctx: QueryToolCtx<Ctx>,
+        input: INPUT,
+        options: AgentToolExecutionOptions<TOOL_CONTEXT>,
+      ) => PromiseLike<OUTPUT>;
+      mutation?: never;
+      execute?: never;
+      resume?: never;
+    };
+
 export type ToolOutputPropertiesCtx<
   INPUT,
   OUTPUT,
@@ -96,15 +221,7 @@ export type ToolOutputPropertiesCtx<
   TOOL_CONTEXT extends Context = Context,
 > = NeverOptional<
   OUTPUT,
-  {
-    /**
-     * An async function that is called with the arguments from the tool call and produces a result.
-     * If `execute` is not provided, the tool will not be executed automatically.
-     *
-     * @param input - The input of the tool call.
-     * @param options.abortSignal - A signal that can be used to abort the tool call.
-     */
-    execute?: ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>;
+  ToolRunsOne<INPUT, OUTPUT, Ctx, TOOL_CONTEXT> & {
     outputSchema?: FlexibleSchema<OUTPUT>;
     /**
      * @deprecated Removed in v0.6.0. Use `execute` instead.
@@ -279,7 +396,28 @@ export function createTool<
     );
   }
 
-  const executeHandler = def.execute ?? (def as any).handler;
+  const { mutation, query, resume } = def;
+  const executeHandler:
+    | ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>
+    | undefined = mutation
+    ? async (ctx, input, options) => {
+        let ran = false;
+        return mutation(
+          {
+            ...readOnly(ctx),
+            runMutation: (reference, ...args) => {
+              if (ran) throw new Error(ONE_MUTATION);
+              ran = true;
+              return ctx.runMutation(reference, ...args);
+            },
+          } as MutationToolCtx<Ctx>,
+          input,
+          options,
+        );
+      }
+    : query
+      ? async (ctx, input, options) => query(readOnly(ctx), input, options)
+      : (def.execute ?? (def as any).handler);
   if (!executeHandler && def.needsApproval) {
     throw new Error(
       "A client tool (one without execute) cannot need approval." +
@@ -360,6 +498,14 @@ export function createTool<
       return origOnInputAvailable.call(this, getCtx(this), options);
     };
   }
+  const durable: DurableTool | undefined = mutation
+    ? { kind: "mutation" }
+    : query
+      ? { kind: "query" }
+      : resume
+        ? { kind: "execute", resume: resume as never }
+        : undefined;
+  if (durable) (t as { [DURABLE]?: DurableTool })[DURABLE] = durable;
   if (def.toModelOutput) {
     const origToModelOutput = def.toModelOutput;
     t.toModelOutput = function (
@@ -370,6 +516,18 @@ export function createTool<
     };
   }
   return t;
+}
+
+function readOnly<Ctx extends ToolCtx>(ctx: Ctx): QueryToolCtx<Ctx> {
+  const refuse = () => {
+    throw new Error(READ_ONLY);
+  };
+  return {
+    ...ctx,
+    runMutation: refuse,
+    runAction: refuse,
+    scheduler: undefined,
+  };
 }
 
 function getCtx<Ctx extends ToolCtx>(tool: any): Ctx {
