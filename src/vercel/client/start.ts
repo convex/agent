@@ -517,6 +517,13 @@ export async function startGeneration<
     Boolean(opts.rawRequestResponseHandler),
     _operation,
   );
+  const stopWhen = [args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat();
+  const saved = savedSteps<Tools, RUNTIME_CONTEXT>(turn?.saved ?? []);
+  // A resumed job checks its stop conditions after its saved steps, as the
+  // job it replaces would have, before its first model call.
+  if (saved.length > 0) {
+    await Promise.all(stopWhen.map((condition) => condition({ steps: saved })));
+  }
   const aiArgs = {
     ...opts.callSettings,
     providerOptions: opts.providerOptions,
@@ -527,10 +534,7 @@ export async function startGeneration<
     allowSystemInMessages,
     // A step that streamed an error is not continued past.
     stopWhen: [
-      ...afterSavedSteps(
-        [args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat(),
-        savedSteps<Tools, RUNTIME_CONTEXT>(turn?.saved ?? []),
-      ),
+      ...afterSavedSteps(stopWhen, saved),
       () => held?.error !== undefined,
     ],
     tools,
