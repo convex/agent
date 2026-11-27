@@ -79,8 +79,10 @@ that breaks this throws before the model is called.
 With a thread, each call the model answers stores a decision with what the model
 saw: the IDs of the stored messages its context was built from, your `state` as
 JSON text with file bytes replaced by their SHA-256, and a hash of the whole
-state exactly as the model saw it. It also stores the exact questions, the
-requested and resolved model, the `maxOutputTokens`, `reasoning` and
+state exactly as the model saw it. File data passed as a string (base64 or a
+URL) is stored as passed, because the AI SDK doesn't export how it reads one:
+https://github.com/vercel/ai/issues/25547. It also stores the exact questions,
+the requested and resolved model, the `maxOutputTokens`, `reasoning` and
 `providerOptions` it was called with as `settings`, usage and provider metadata.
 It is anchored to the turn by `promptMessageId` and `order`. A cache hit returns
 the decision from the turn that made it, with that turn's `promptMessageId` and
