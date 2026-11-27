@@ -429,7 +429,6 @@ async function cleanupTimeoutFn(
   }
 }
 
-// No longer used from the DeltaStreamer
 // The stream's own writer ending it with an error.
 export const fail = mutation({
   args: {

@@ -638,9 +638,18 @@ describe("plain streams with their pending message", () => {
       threadId,
       cursors: [{ streamId, cursor: 0 }],
     });
-    expect({ failed, status: stream.status, deltas: deltas.length }).toEqual({
+    const state = await t.run(
+      async (ctx) => (await ctx.db.get("streamingMessages", streamId))?.state,
+    );
+    expect({
+      failed,
+      status: stream.status,
+      reason: state?.kind === "aborted" && state.reason,
+      deltas: deltas.length,
+    }).toEqual({
       failed: true,
       status: "aborted",
+      reason: "Broke.",
       deltas: 1,
     });
   });

@@ -404,7 +404,8 @@ export class DeltaStreamer<T> {
   }
 
   // A delta of only a message's or a step's opening chunks shows nothing, so
-  // it waits for the next part, or goes with the stream's end or failure.
+  // it waits for the next part, or goes with the stream's end, or with a
+  // failure that has nothing else buffered.
   #hasVisibleParts() {
     return this.#nextParts.some(
       (part) => !OPENING_CHUNKS.has((part as { type?: unknown }).type),
@@ -785,6 +786,8 @@ export class DeltaStreamer<T> {
         writeFailure = { error };
       }
     }
+    // Other buffered parts can have arrived after a stop, so a failure drops
+    // them.
     const opening = waitForOngoingWrite ? this.#nextParts : [];
     let abortFailure: { error: unknown } | undefined;
     try {
