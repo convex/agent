@@ -49,6 +49,240 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Name
       >;
     };
+    decisions: {
+      correct: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          answer:
+            | { choice: string; probabilities?: string; type: "choice" }
+            | { probabilities?: string; score: number; type: "score" }
+            | {
+                box: {
+                  bottom: number;
+                  left: number;
+                  right: number;
+                  top: number;
+                };
+                type: "box";
+              }
+            | { probability: number; type: "boolean" };
+          by?: string;
+          decisionId: string;
+          questionId: string;
+          threadId: string;
+        },
+        null,
+        Name
+      >;
+      create: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          agentName?: string;
+          answers: Array<{
+            answer:
+              | { choice: string; probabilities?: string; type: "choice" }
+              | { probabilities?: string; score: number; type: "score" }
+              | {
+                  box: {
+                    bottom: number;
+                    left: number;
+                    right: number;
+                    top: number;
+                  };
+                  type: "box";
+                }
+              | { probability: number; type: "boolean" };
+            definitionHash: string;
+            questionId: string;
+            shapeHash: string;
+          }>;
+          cacheKey: string;
+          contextMessageIds: Array<string>;
+          model: string;
+          order?: number;
+          promptMessageId?: string;
+          provider: string;
+          providerMetadata?: Record<string, Record<string, any>>;
+          questions: string;
+          requestedModel: string;
+          settings?: string;
+          state?: string;
+          stateHash: string;
+          threadId: string;
+          usage?: {
+            cacheWriteInputTokens?: number;
+            cachedInputTokens?: number;
+            completionTokens?: number;
+            nonCachedInputTokens?: number;
+            promptTokens?: number;
+            raw?: Record<string, any>;
+            reasoningTokens?: number;
+            textOutputTokens?: number;
+            totalTokens?: number;
+          };
+        },
+        string,
+        Name
+      >;
+      findCached: FunctionReference<
+        "query",
+        "internal",
+        {
+          asked: Array<{ definitionHash: string; questionId: string }>;
+          cacheKey: string;
+          notBefore: number;
+          threadId: string;
+        },
+        {
+          _creationTime: number;
+          _id: string;
+          agentName?: string;
+          answers: Array<{
+            answer:
+              | { choice: string; probabilities?: string; type: "choice" }
+              | { probabilities?: string; score: number; type: "score" }
+              | {
+                  box: {
+                    bottom: number;
+                    left: number;
+                    right: number;
+                    top: number;
+                  };
+                  type: "box";
+                }
+              | { probability: number; type: "boolean" };
+            correction?: {
+              answer:
+                | { choice: string; probabilities?: string; type: "choice" }
+                | { probabilities?: string; score: number; type: "score" }
+                | {
+                    box: {
+                      bottom: number;
+                      left: number;
+                      right: number;
+                      top: number;
+                    };
+                    type: "box";
+                  }
+                | { probability: number; type: "boolean" };
+              by?: string;
+            };
+            questionId: string;
+          }>;
+          cacheKey: string;
+          contextMessageIds: Array<string>;
+          model: string;
+          order?: number;
+          promptMessageId?: string;
+          provider: string;
+          providerMetadata?: Record<string, Record<string, any>>;
+          questions: string;
+          requestedModel: string;
+          settings?: string;
+          state?: string;
+          stateHash: string;
+          threadId: string;
+          usage?: {
+            cacheWriteInputTokens?: number;
+            cachedInputTokens?: number;
+            completionTokens?: number;
+            nonCachedInputTokens?: number;
+            promptTokens?: number;
+            raw?: Record<string, any>;
+            reasoningTokens?: number;
+            textOutputTokens?: number;
+            totalTokens?: number;
+          };
+        } | null,
+        Name
+      >;
+      list: FunctionReference<
+        "query",
+        "internal",
+        {
+          asked?: Array<{ questionId: string; shapeHash: string }>;
+          paginationOpts: {
+            cursor: string | null;
+            endCursor?: string | null;
+            id?: number;
+            maximumBytesRead?: number;
+            maximumRowsRead?: number;
+            numItems: number;
+          };
+          threadId: string;
+        },
+        {
+          continueCursor: string;
+          isDone: boolean;
+          page: Array<{
+            _creationTime: number;
+            _id: string;
+            agentName?: string;
+            answers: Array<{
+              answer:
+                | { choice: string; probabilities?: string; type: "choice" }
+                | { probabilities?: string; score: number; type: "score" }
+                | {
+                    box: {
+                      bottom: number;
+                      left: number;
+                      right: number;
+                      top: number;
+                    };
+                    type: "box";
+                  }
+                | { probability: number; type: "boolean" };
+              correction?: {
+                answer:
+                  | { choice: string; probabilities?: string; type: "choice" }
+                  | { probabilities?: string; score: number; type: "score" }
+                  | {
+                      box: {
+                        bottom: number;
+                        left: number;
+                        right: number;
+                        top: number;
+                      };
+                      type: "box";
+                    }
+                  | { probability: number; type: "boolean" };
+                by?: string;
+              };
+              questionId: string;
+            }>;
+            cacheKey: string;
+            contextMessageIds: Array<string>;
+            model: string;
+            order?: number;
+            promptMessageId?: string;
+            provider: string;
+            providerMetadata?: Record<string, Record<string, any>>;
+            questions: string;
+            requestedModel: string;
+            settings?: string;
+            state?: string;
+            stateHash: string;
+            threadId: string;
+            usage?: {
+              cacheWriteInputTokens?: number;
+              cachedInputTokens?: number;
+              completionTokens?: number;
+              nonCachedInputTokens?: number;
+              promptTokens?: number;
+              raw?: Record<string, any>;
+              reasoningTokens?: number;
+              textOutputTokens?: number;
+              totalTokens?: number;
+            };
+          }>;
+          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+          splitCursor?: string | null;
+        },
+        Name
+      >;
+    };
     files: {
       addFile: FunctionReference<
         "mutation",

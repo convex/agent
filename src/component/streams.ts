@@ -150,7 +150,7 @@ function isTransactionLimitError(error: unknown) {
 
 // Half the 16 MiB read limit across a request's cursors.
 const MAX_DELTA_BYTES_PER_REQUEST = 8 * 1024 * 1024;
-const MAX_BYTES_READ_PER_DELETE = 1024 * 1024;
+export const MAX_BYTES_READ_PER_DELETE = 1024 * 1024;
 // Pages are read twice (paginate, then delete), so this is ~8 MiB per transaction.
 const MAX_SYNC_DELETE_PAGES = 4;
 const TIMEOUT_INTERVAL = 10 * MINUTE;

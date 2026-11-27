@@ -15,6 +15,32 @@ import {
 import { typedV } from "convex-helpers/validators";
 import vectorTables, { vVectorId } from "./vector/tables.js";
 
+// The caller's question IDs and option keys are JSON text wherever they'd be
+// object keys, as Convex limits keys and how many an object has.
+const vStoredProbabilities = v.optional(v.string());
+export const vStoredDecisionAnswer = v.union(
+  v.object({
+    type: v.literal("choice"),
+    choice: v.string(),
+    probabilities: vStoredProbabilities,
+  }),
+  v.object({
+    type: v.literal("score"),
+    score: v.number(),
+    probabilities: vStoredProbabilities,
+  }),
+  v.object({
+    type: v.literal("box"),
+    box: v.object({
+      top: v.number(),
+      bottom: v.number(),
+      left: v.number(),
+      right: v.number(),
+    }),
+  }),
+  v.object({ type: v.literal("boolean"), probability: v.number() }),
+);
+
 export const schema = defineSchema({
   threads: defineTable({
     userId: v.optional(v.string()), // Unset for anonymous
@@ -166,6 +192,53 @@ export const schema = defineSchema({
   })
     .index("hash", ["hash"])
     .index("refcount_lastTouchedAt", ["refcount", "lastTouchedAt"]),
+
+  // One experimental_decide call, and what its model saw.
+  decisions: defineTable({
+    threadId: v.id("threads"),
+    agentName: v.optional(v.string()),
+    promptMessageId: v.optional(v.id("messages")),
+    order: v.optional(v.number()),
+    contextMessageIds: v.array(v.id("messages")),
+    // JSON text, like questions and settings. File bytes are replaced by their
+    // SHA-256.
+    state: v.optional(v.string()),
+    // Of the context, then the caller's state, as the model saw them.
+    stateHash: v.string(),
+    // Of the state hash, requested model, provider and settings: what the cache
+    // matches.
+    cacheKey: v.string(),
+    questions: v.string(),
+    requestedModel: v.string(),
+    model: v.string(),
+    provider: v.string(),
+    settings: v.optional(v.string()),
+    usage: v.optional(vUsage),
+    providerMetadata: v.optional(vProviderMetadata),
+  })
+    .index("threadId", ["threadId"])
+    .index("cacheKey_threadId", ["cacheKey", "threadId"]),
+
+  // A question's identity is its ID. definitionHash is its version, and
+  // shapeHash what types its answer: the type, a choice's option keys and a
+  // score's number of levels.
+  decisionAnswers: defineTable({
+    decisionId: v.id("decisions"),
+    threadId: v.id("threads"),
+    questionId: v.string(),
+    definitionHash: v.string(),
+    shapeHash: v.string(),
+    answer: vStoredDecisionAnswer,
+    correction: v.optional(
+      v.object({ answer: vStoredDecisionAnswer, by: v.optional(v.string()) }),
+    ),
+  })
+    .index("decisionId_questionId", ["decisionId", "questionId"])
+    .index("threadId_questionId_shapeHash", [
+      "threadId",
+      "questionId",
+      "shapeHash",
+    ]),
   ...vectorTables,
   // To authenticate playground usage
   // Delete a key to invalidate it

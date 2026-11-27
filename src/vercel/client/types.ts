@@ -8,6 +8,7 @@ import type {
 import type { JSONValue, LanguageModelV4 } from "@ai-sdk/provider";
 import type {
   EmbeddingModel,
+  Experimental_DecisionModel,
   GenerateObjectResult,
   generateText,
   GenerateTextResult,
@@ -146,6 +147,17 @@ export type Config = {
    *   embeddingModel: openai.embedding("text-embedding-3-small")
    */
   embeddingModel?: EmbeddingModel;
+  /**
+   * The model `agent.experimental_decide` answers typed questions with.
+   * `convexGateway.decisionModel` needs the next `@convex-dev/ai-sdk-provider`
+   * release.
+   * e.g.
+   * import { convexGateway } from "@convex-dev/ai-sdk-provider"
+   * const myAgent = new Agent(components.agent, {
+   *   ...
+   *   experimental_decisionModel: convexGateway.decisionModel("typesafe/jev-1.14")
+   */
+  experimental_decisionModel?: Experimental_DecisionModel;
   /**
    * Options to determine what messages are included as context in message
    * generation. To disable any messages automatically being added, pass:

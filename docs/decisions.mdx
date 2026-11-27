@@ -1,0 +1,358 @@
+---
+title: Decisions
+sidebar_label: "Decisions"
+sidebar_position: 520
+description: "Typed, calibrated decisions over a thread with decision models"
+---
+
+Decision models answer typed questions (a choice, a score, a yes or no) about a
+shared state, with probabilities. They suit the places where an agent should
+pick from a closed set instead of writing text: routing a turn, choosing a tool
+set, triage, or asking "is this request ambiguous?".
+
+`agent.experimental_decide` wraps the AI SDK's `experimental_decide`. It decides
+over the thread's context, built the same way `generateText` builds its prompt,
+and stores the decision in the thread. The API is experimental and may change in
+patch releases.
+
+## Setup
+
+Give the agent a decision model:
+
+```ts
+import { Agent } from "@convex-dev/agent";
+import { convexGateway } from "@convex-dev/ai-sdk-provider";
+import { components } from "./_generated/api";
+
+const agent = new Agent(components.agent, {
+  name: "support",
+  languageModel: convexGateway("openai/gpt-4.1-nano"),
+  experimental_decisionModel: convexGateway.decisionModel("typesafe/jev-1.14"),
+});
+```
+
+`convexGateway.decisionModel` needs the next `@convex-dev/ai-sdk-provider`
+release. Any AI SDK decision model works, as does a per-call `model`.
+
+## Deciding over a thread
+
+```ts
+const triage = {
+  team: {
+    type: "choice",
+    instructions: "Which team should handle this?",
+    criteria: { billing: "payments and refunds", tech: "login and bugs" },
+  },
+  urgent: { type: "boolean", instructions: "Is it urgent?" },
+} as const;
+
+const { answers, decisionId } = await agent.experimental_decide(
+  ctx,
+  { threadId },
+  { questions: triage, promptMessageId, state: { page: "billing" } },
+);
+answers.team.choice; // "billing" | "tech"
+answers.team.probabilities; // { billing: 0.91, tech: 0.09 }
+answers.urgent.probability; // P(true)
+```
+
+The arguments are the same as the AI SDK's `experimental_decide`, with `model`
+optional, plus:
+
+- `promptMessageId`, `prompt` and `messages`: they pick the context the same way
+  as for `generateText`, and [context options](./context.mdx) and
+  `contextHandler` apply. Nothing is saved to the thread's messages.
+- `state`: added after the thread context. It can be a string, JSON, or text,
+  JSON and file parts.
+- `cache`: see [the cache](#the-cache).
+
+The model sees each context message as a JSON part, followed by that message's
+files as file parts, then your `state`.
+
+Question IDs, choice option keys and `providerOptions` keys can be any strings:
+they're stored as JSON text.
+
+## Stored decisions
+
+With a thread, each call the model answers stores a decision with what the model
+saw: the IDs of the stored messages its context was built from, your `state` as
+JSON text with file bytes replaced by their SHA-256, and a hash of the whole
+state exactly as the model saw it. File data passed as a string (base64 or a
+URL) is stored as passed, because the AI SDK doesn't export how it reads one:
+https://github.com/vercel/ai/issues/25547. It also stores the exact questions,
+the requested and resolved model, the `maxOutputTokens`, `reasoning` and
+`providerOptions` it was called with as `settings`, usage and provider metadata.
+It is anchored to the turn by `promptMessageId` and `order`. A cache hit returns
+the decision from the turn that made it, with that turn's `promptMessageId` and
+`order`, so it isn't listed under the later turn. A call over a missing thread
+throws before the model is called. Pass
+`storageOptions: { saveMessages: "none" }` to skip storing it. A decision and
+its answers, corrections included, can take 1 MiB in all, a Convex document's
+limit. A call throws before the model is called if the state, questions, context
+message IDs and settings leave less than 64 KiB of that for what the model
+returns, or if its context is more than 8,192 messages, a Convex array's limit.
+If the decision still doesn't fit with what the model returned, the call throws
+after reporting usage, with the model's result as the error's `cause`. Deleting
+the thread or its user deletes its decisions.
+
+List them, newest first, typed by the questions you pass:
+
+```ts
+import { experimental_listDecisions } from "@convex-dev/agent";
+
+const { page } = await experimental_listDecisions(ctx, components.agent, {
+  threadId,
+  questions: triage,
+  paginationOpts: { numItems: 10, cursor: null },
+});
+page[0].answers.team?.choice; // "billing" | "tech" | undefined
+```
+
+A question's identity is its ID, and its version is its definition. Listing with
+`questions` returns the decisions that answered any of them with the same answer
+type, so rewording a question or adding and removing questions keeps the
+history. Changing a choice's option keys or a score's number of levels changes
+its answer type, so earlier answers are left out. Listing with empty `questions`
+returns an empty page. Without `questions`, every decision is listed with the
+questions it was asked. A page of large decisions can hold fewer than
+`numItems`, so it stays within a query's read limits: keep paging until
+`isDone`. A page refreshed up to its `endCursor` can come back with
+`pageStatus: "SplitRequired"` and a `splitCursor`, as Convex's paginated queries
+do, and `usePaginatedQuery` splits it.
+
+Record the right answer to a question next to the model's:
+
+```ts
+import { experimental_correctDecision } from "@convex-dev/agent";
+
+await experimental_correctDecision(ctx, components.agent, {
+  threadId,
+  decisionId,
+  questions: triage,
+  questionId: "team",
+  answer: { type: "choice", choice: "tech" },
+  by: userId,
+});
+```
+
+The correction must answer the question as the decision asked it, and the
+decision must be in `threadId`. A later correction of the same question replaces
+it. A choice or score correction with probabilities must give one for every
+option or level, summing to 1. Corrections aren't yet checked for the AI SDK's
+other rules for answers: that a choice is a highest-probability option, a score
+equals the probability-weighted mean, and a box has positive area, as the AI SDK
+doesn't export those checks: https://github.com/vercel/ai/issues/25554. A
+correction that would take the decision and its answers past 1 MiB throws.
+
+## The cache
+
+```ts
+await agent.experimental_decide(
+  ctx,
+  { threadId },
+  { questions: triage, cache: { ttlMs: 60_000 } },
+);
+```
+
+With `cache`, a call looks up the thread's newest decision made within `ttlMs`
+with the same provider, requested model, `settings` and state, by an indexed
+`cacheKey` hash of them. It returns that decision if it answered every asked
+question with the same definition and none of those answers was corrected, so a
+subset of its questions hits, and a reworded question or a correction misses.
+Older decisions with the same inputs are never returned. A hit calls no decision
+model and stores nothing: it returns that decision's answers and `decisionId`
+with `cached: true`, so the thread lists one decision per model call and the TTL
+counts from when the model made it. The cache never reads other threads.
+
+## Usage and errors
+
+The agent's `usageHandler` gets each decision's usage. A cache hit reports none,
+though a vector search for the context still reports its embedding usage.
+Decision models often report input tokens alone, so `totalTokens` is the input
+tokens then, and [rate limits](./rate-limiting.mdx) count them. A refusal
+currently reports no usage: https://github.com/vercel/ai/issues/25546.
+
+Errors reach the caller unchanged, such as a provider with no endpoint for a
+zero-data-retention policy.
+
+## Recipes
+
+These build on the APIs above. The replay and React recipes are tests in
+[`decideRecipes.test.ts`](https://github.com/convex/agent/blob/main/src/vercel/client/decideRecipes.test.ts).
+
+### Confidence thresholds: clarify, escalate or throw
+
+Keep thresholds per question and per model, since models calibrate differently.
+They are keyed by `requestedModel`, the model ID as requested:
+
+```ts
+import type { DecisionDoc } from "@convex-dev/agent";
+
+const minConfidence: Record<string, Record<string, number>> = {
+  "typesafe/jev-1.14": { team: 0.65 },
+  "cloudflare/clef-flash": { team: 0.9 },
+};
+
+function confidence(answer: NonNullable<DecisionDoc["answers"][string]>) {
+  if (answer.type === "boolean") {
+    return Math.max(answer.probability, 1 - answer.probability);
+  }
+  if (answer.type === "box" || !answer.probabilities) return undefined;
+  return Math.max(...Object.values(answer.probabilities));
+}
+
+function unsure(decision: Pick<DecisionDoc, "answers" | "requestedModel">) {
+  return Object.entries(minConfidence[decision.requestedModel] ?? {})
+    .filter(([id, min]) => {
+      const answer = decision.answers[id];
+      return answer && (confidence(answer) ?? 0) < min;
+    })
+    .map(([id]) => id);
+}
+```
+
+Below the threshold:
+
+- **Clarify:** show the top options from `answers.team.probabilities` and store
+  the user's pick with `experimental_correctDecision`.
+- **Escalate:** ask the language model with
+  `agent.generateObject(ctx, { threadId }, { schema, prompt }, { storageOptions: { saveMessages: "none" } })`
+  and store its answer as a correction, `by: "escalation"`.
+- **Throw:** `throw new Error("not sure about team")`.
+
+### A decision tool
+
+The language model can ask the decision model as a tool call. The decision lands
+in the turn:
+
+```ts
+const route = createTool({
+  description: "Pick the team for this request",
+  inputSchema: z.object({ context: z.string().optional() }),
+  execute: async (ctx, { context }) => {
+    const { answers, decisionId } = await ctx.agent!.experimental_decide(
+      ctx,
+      { threadId: ctx.threadId, userId: ctx.userId },
+      {
+        questions: triage,
+        state: context,
+        promptMessageId: ctx.promptMessageId,
+      },
+    );
+    return { team: answers.team.choice, decisionId };
+  },
+});
+```
+
+### Decision-routed steps
+
+The agent's `prepareStep` gets the ctx its tools get, so a decision can pick
+each step's tools and instructions. Deciding again before a later step sees what
+the earlier steps saved:
+
+```ts
+const agent = new Agent(components.agent, {
+  name: "support",
+  languageModel,
+  experimental_decisionModel,
+  tools: { refund, resetPassword },
+  stopWhen: stepCountIs(3),
+  prepareStep: async (ctx) => {
+    const { answers } = await ctx.agent!.experimental_decide(
+      ctx,
+      { threadId: ctx.threadId, userId: ctx.userId },
+      { questions: triage, promptMessageId: ctx.promptMessageId },
+    );
+    return answers.team.choice === "billing"
+      ? { activeTools: ["refund"], instructions: "Billing desk." }
+      : { activeTools: ["resetPassword"] };
+  },
+});
+```
+
+To decide once per turn, decide when `step.stepNumber` is 0 and read the stored
+decision with `experimental_listDecisions` after that. After a cache hit, that
+decision is the one from the earlier turn that made it, with that turn's
+`promptMessageId` and `order`.
+
+### Choices grounded in documents
+
+Use document IDs as option keys and their titles as criteria, so the choice is
+always a document that exists:
+
+```ts
+const { answers } = await agent.experimental_decide(
+  ctx,
+  { threadId },
+  {
+    questions: {
+      release: {
+        type: "choice",
+        instructions: "Which release is the user asking about?",
+        criteria: Object.fromEntries(releases.map((r) => [r._id, r.title])),
+      },
+    },
+  },
+);
+const release = releases.find((r) => r._id === answers.release.choice);
+```
+
+### Replay against another model
+
+Before moving to another model, replay stored decisions with the state the first
+model saw and compare the answers with the corrections:
+
+```ts
+for (const decision of page) {
+  const docs = await ctx.runQuery(components.agent.messages.getMessagesByIds, {
+    messageIds: decision.contextMessageIds,
+  });
+  const { answers } = await agent.experimental_decide(
+    ctx,
+    { threadId },
+    {
+      questions: triage,
+      model: convexGateway.decisionModel("cloudflare/clef-flash"),
+      messages: docsToModelMessages(docs.flatMap((d) => (d ? [d] : []))),
+      state: decision.state && JSON.parse(decision.state),
+    },
+    {
+      contextOptions: { recentMessages: 0 },
+      storageOptions: { saveMessages: "none" },
+    },
+  );
+  // Compare answers.team with decision.answers.team and decision.corrections.team.
+}
+```
+
+Skip decisions whose state has files: only each file's SHA-256 is stored, so
+replaying one throws. A call whose `contextHandler` changed the context, or that
+passed `prompt` or `messages`, can't be replayed exactly, since only the stored
+messages' IDs are kept.
+
+### React
+
+List decisions from an app query and read it with `usePaginatedQuery`:
+
+```ts
+export const listTriage = query({
+  args: { threadId: v.string(), paginationOpts: paginationOptsValidator },
+  returns: vPaginationResult(vDecisionDoc),
+  handler: async (ctx, args) => {
+    // await authorizeThreadAccess(ctx, args.threadId);
+    return experimental_listDecisions(ctx, components.agent, {
+      ...args,
+      questions: triage,
+    });
+  },
+});
+```
+
+```tsx
+const { results } = usePaginatedQuery(
+  api.decisions.listTriage,
+  { threadId },
+  { initialNumItems: 10 },
+);
+const toClarify = results.filter((d) => unsure(d).includes("team"));
+```

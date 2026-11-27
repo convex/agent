@@ -624,6 +624,8 @@ export async function fetchContextWithPrompt(
     Config,
 ): Promise<{
   messages: ModelMessage[];
+  /** The stored messages in the context, before the contextHandler. */
+  messageIds: string[];
   order: number | undefined;
   stepOrder: number | undefined;
 }> {
@@ -677,6 +679,7 @@ export async function fetchContextWithPrompt(
   let prePromptDocs = recentMessages;
   const messages = args.messages ?? [];
   let existingResponseDocs: MessageDoc[] = [];
+  let promptDocs: MessageDoc[] = [];
   if (promptMessage) {
     prePromptDocs = recentMessages.slice(0, promptMessageIndex);
     existingResponseDocs = recentMessages.slice(promptMessageIndex + 1);
@@ -684,6 +687,7 @@ export async function fetchContextWithPrompt(
       // If they didn't override the prompt, use the existing prompt message.
       if (promptMessage.message) {
         promptArray.push(promptMessage.message);
+        promptDocs = [promptMessage];
       }
     }
     if (!promptMessage.embeddingId && effectiveEmbeddingModel) {
@@ -754,6 +758,12 @@ export async function fetchContextWithPrompt(
 
   return {
     messages: processedMessages,
+    messageIds: [
+      ...searchMessages,
+      ...prePromptDocs,
+      ...promptDocs,
+      ...existingResponseDocs,
+    ].map((doc) => doc._id),
     order: promptMessage?.order,
     stepOrder: promptMessage?.stepOrder,
   };

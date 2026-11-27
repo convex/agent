@@ -796,3 +796,96 @@ export const vThreadDoc = v.object({
   status: vThreadStatus,
 });
 export type ThreadDoc = Infer<typeof vThreadDoc>;
+
+const vDecisionProbabilities = v.optional(v.record(v.string(), v.number()));
+export const vDecisionAnswer = v.union(
+  v.object({
+    type: v.literal("choice"),
+    choice: v.string(),
+    probabilities: vDecisionProbabilities,
+  }),
+  v.object({
+    type: v.literal("score"),
+    score: v.number(),
+    probabilities: vDecisionProbabilities,
+  }),
+  v.object({
+    type: v.literal("box"),
+    box: v.object({
+      top: v.number(),
+      bottom: v.number(),
+      left: v.number(),
+      right: v.number(),
+    }),
+  }),
+  v.object({ type: v.literal("boolean"), probability: v.number() }),
+);
+
+// Instructions and criteria are any JSON, which a validator can't recurse into.
+const vDecisionInput = v.any();
+export const vDecisionQuestion = v.union(
+  v.object({
+    type: v.literal("choice"),
+    instructions: v.optional(vDecisionInput),
+    criteria: v.record(v.string(), vDecisionInput),
+  }),
+  v.object({
+    type: v.literal("score"),
+    instructions: v.optional(vDecisionInput),
+    criteria: v.array(vDecisionInput),
+  }),
+  v.object({ type: v.literal("box"), instructions: vDecisionInput }),
+  v.object({
+    type: v.literal("boolean"),
+    instructions: v.optional(vDecisionInput),
+    criteria: v.optional(
+      v.object({
+        true: v.optional(vDecisionInput),
+        false: v.optional(vDecisionInput),
+      }),
+    ),
+  }),
+);
+
+// The experimental_decide options that change the answer.
+export const vDecisionSettings = v.object({
+  maxOutputTokens: v.optional(v.number()),
+  reasoning: v.optional(
+    v.union(
+      v.literal("provider-default"),
+      v.literal("none"),
+      v.literal("minimal"),
+      v.literal("low"),
+      v.literal("medium"),
+      v.literal("high"),
+      v.literal("xhigh"),
+      v.literal("max"),
+    ),
+  ),
+  providerOptions: v.optional(vProviderOptions),
+});
+
+export const vDecisionDoc = v.object({
+  _id: v.string(),
+  _creationTime: v.number(),
+  threadId: v.string(),
+  agentName: v.optional(v.string()),
+  promptMessageId: v.optional(v.string()),
+  order: v.optional(v.number()),
+  contextMessageIds: v.array(v.string()),
+  state: v.optional(v.string()),
+  stateHash: v.string(),
+  cacheKey: v.string(),
+  questions: v.record(v.string(), vDecisionQuestion),
+  requestedModel: v.string(),
+  model: v.string(),
+  provider: v.string(),
+  settings: v.optional(vDecisionSettings),
+  usage: v.optional(vUsage),
+  providerMetadata: v.optional(vProviderMetadata),
+  answers: v.record(v.string(), vDecisionAnswer),
+  corrections: v.record(
+    v.string(),
+    v.object({ answer: vDecisionAnswer, by: v.optional(v.string()) }),
+  ),
+});
