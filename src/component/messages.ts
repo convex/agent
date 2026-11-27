@@ -64,6 +64,7 @@ import {
   authorizeEnding,
   authorizeRow,
   endStopped,
+  endOwnTurn,
   endStoppedInThread,
   stoppedOpen,
   endTurnsForDeleted,
@@ -407,6 +408,13 @@ export const abortGeneration = mutation({
   },
   returns: v.boolean(),
   handler: (ctx, { reason, ...args }) => stopTurns(ctx, args, reason),
+});
+
+/** Called by a durable job whose generation returned without an answer. */
+export const endGeneration = mutation({
+  args: { threadId: v.id("threads") },
+  returns: v.boolean(),
+  handler: (ctx, { threadId }) => endOwnTurn(ctx, threadId),
 });
 
 export const _recover = internalMutation({
