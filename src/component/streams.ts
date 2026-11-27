@@ -265,7 +265,7 @@ export const create = mutation({
     promptMessageId: v.optional(v.id("messages")),
   },
   returns: v.id("streamingMessages"),
-  handler: async (ctx, { promptMessageId, ...args }) => {
+  handler: (ctx, { promptMessageId, ...args }) => {
     if (promptMessageId !== undefined) throw new Error("not implemented");
     return createStream(ctx, args);
   },
