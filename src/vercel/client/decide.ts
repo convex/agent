@@ -16,12 +16,7 @@ import type {
   PaginationOptions,
   PaginationResult,
 } from "convex/server";
-import {
-  getConvexSize,
-  getDocumentSize,
-  type Infer,
-  type Value,
-} from "convex/values";
+import type { Infer } from "convex/values";
 import { assert } from "convex-helpers";
 import { fetchContextWithPrompt } from "./search.js";
 import { serializeUsage } from "../mapping.js";
@@ -30,6 +25,9 @@ import {
   decodeAnswer,
   decodeQuestions,
   encodeAnswer,
+  MAX_DOCUMENT_BYTES,
+  sizeOf,
+  tooLarge,
 } from "../../decisions.js";
 import type {
   ActionCtx,
@@ -46,8 +44,8 @@ export type DecisionQuestions = Record<string, Experimental_DecisionQuestion>;
 
 type DecisionAnswers<QUESTIONS extends DecisionQuestions> =
   Experimental_DecisionResult<QUESTIONS>["answers"];
-type StoredAnswer = Infer<typeof vDecisionAnswer>;
-type StoredDecisionDoc = Infer<typeof vDecisionDoc>;
+type AnyAnswer = Infer<typeof vDecisionAnswer>;
+type DecisionDocFields = Infer<typeof vDecisionDoc>;
 type StoredDecision = NonNullable<
   FunctionReturnType<AgentComponent["decisions"]["findCached"]>
 >;
@@ -82,7 +80,7 @@ export type DecideResult<QUESTIONS extends DecisionQuestions> =
 
 export type DecisionDoc<
   QUESTIONS extends DecisionQuestions = DecisionQuestions,
-> = Omit<StoredDecisionDoc, "answers" | "corrections" | "providerMetadata"> & {
+> = Omit<DecisionDocFields, "answers" | "corrections" | "providerMetadata"> & {
   providerMetadata?: ProviderMetadata;
   /**
    * Answers to the listed questions whose answer type still matches theirs.
@@ -101,22 +99,9 @@ export type DecisionDoc<
   };
 };
 
-const MAX_DOCUMENT_BYTES = 1 << 20;
 // Kept free in a decision's document for what the model returns with its
 // answers: the model ID, usage and provider metadata.
 const MODEL_OUTPUT_RESERVE_BYTES = 64 << 10;
-
-// Undefined fields aren't stored and add nothing to the size.
-function sizeOf(row: object) {
-  const fields = Object.entries(row).map(
-    ([field, value]) => [field, getConvexSize(value as Value)] as const,
-  );
-  const [largest, largestSize] = fields.reduce((a, b) => (b[1] > a[1] ? b : a));
-  return {
-    size: getDocumentSize(row as Record<string, Value>),
-    largest: `${largest} (${largestSize} bytes)`,
-  };
-}
 
 function stableStringify(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) =>
@@ -251,8 +236,8 @@ function toUsage(
 
 function isAnswerTo<QUESTION extends Experimental_DecisionQuestion>(
   question: QUESTION,
-  answer: StoredAnswer,
-): answer is StoredAnswer & Experimental_DecisionAnswer<QUESTION> {
+  answer: AnyAnswer,
+): answer is AnyAnswer & Experimental_DecisionAnswer<QUESTION> {
   return answersQuestion(question, answer);
 }
 
@@ -267,8 +252,8 @@ function decodeDecision<QUESTIONS extends DecisionQuestions>(
 ): DecisionDoc<QUESTIONS> {
   const questions = decodeQuestions(storedQuestions);
   const askedQuestions: DecisionQuestions = asked ?? questions;
-  const answers: [string, StoredAnswer][] = [];
-  const corrections: [string, { answer: StoredAnswer; by?: string }][] = [];
+  const answers: [string, AnyAnswer][] = [];
+  const corrections: [string, { answer: AnyAnswer; by?: string }][] = [];
   for (const { questionId, answer, correction } of rows) {
     if (!Object.hasOwn(askedQuestions, questionId)) continue;
     const question = askedQuestions[questionId];
@@ -404,27 +389,38 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
       ...decision
     }: {
       model: string;
-      answers: Readonly<Record<string, StoredAnswer>>;
+      answers: Readonly<Record<string, AnyAnswer>>;
       usage?: DecisionDoc["usage"];
       providerMetadata?: ProviderMetadata;
     },
     result?: Experimental_DecisionResult<QUESTIONS>,
   ) => {
     if (!row) return undefined;
-    const after = sizeOf({ ...row, ...decision });
-    if (after.size > MAX_DOCUMENT_BYTES) {
-      throw new Error(
-        `The decision is ${after.size} bytes with what the model returned, over Convex's 1 MiB document limit; the largest field is ${after.largest}. The model's result is this error's cause.`,
-        { cause: result },
-      );
+    const answerRows = asked.map((a) => ({
+      ...a,
+      answer: encodeAnswer(answers[a.questionId]),
+    }));
+    const error = [
+      tooLarge("The decision with what the model returned", {
+        ...row,
+        ...decision,
+      }),
+      ...answerRows.map((answerRow) =>
+        tooLarge(`The answer to ${answerRow.questionId}`, {
+          ...answerRow,
+          threadId: row.threadId,
+        }),
+      ),
+    ].find((e) => e !== undefined);
+    if (error) {
+      throw new Error(`${error} The model's result is this error's cause.`, {
+        cause: result,
+      });
     }
     return ctx.runMutation(component.decisions.create, {
       ...row,
       ...decision,
-      answers: asked.map((a) => ({
-        ...a,
-        answer: encodeAnswer(answers[a.questionId]),
-      })),
+      answers: answerRows,
     });
   };
 

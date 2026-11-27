@@ -1,4 +1,9 @@
-import type { Infer } from "convex/values";
+import {
+  getConvexSize,
+  getDocumentSize,
+  type Infer,
+  type Value,
+} from "convex/values";
 import type { vDecisionAnswer, vDecisionQuestion } from "./validators.js";
 import type { vStoredDecisionAnswer } from "./component/schema.js";
 
@@ -6,6 +11,27 @@ import type { vStoredDecisionAnswer } from "./component/schema.js";
 // shared.ts because the component's delete path imports shared.ts, and a second
 // importer there makes the bundler split it into one more chunk that every
 // delete function then loads.
+
+export const MAX_DOCUMENT_BYTES = 1 << 20;
+
+// Undefined fields aren't stored and add nothing to the size.
+export function sizeOf(row: object) {
+  const fields = Object.entries(row).map(
+    ([field, value]) => [field, getConvexSize(value as Value)] as const,
+  );
+  const [largest, largestSize] = fields.reduce((a, b) => (b[1] > a[1] ? b : a));
+  return {
+    size: getDocumentSize(row as Record<string, Value>),
+    largest: `${largest} (${largestSize} bytes)`,
+  };
+}
+
+/** Why a row can't be stored, if it's over Convex's document limit. */
+export function tooLarge(what: string, row: object): string | undefined {
+  const { size, largest } = sizeOf(row);
+  if (size <= MAX_DOCUMENT_BYTES) return undefined;
+  return `${what} is ${size} bytes, over Convex's 1 MiB document limit; the largest field is ${largest}.`;
+}
 
 type DecisionAnswer = Infer<typeof vDecisionAnswer>;
 type StoredDecisionAnswer = Infer<typeof vStoredDecisionAnswer>;

@@ -437,6 +437,120 @@ describe("a stored decision", () => {
     expect(seen).toEqual([120]);
   });
 
+  test("an answer, or a correction, too large to store is refused, naming the largest field", async () => {
+    const agent = makeAgent({});
+    const choice = (n: number) =>
+      ({
+        type: "choice",
+        criteria: Object.fromEntries(
+          Array.from({ length: n }, (_, i) => [
+            `option-${String(i).padStart(113, "0")}`,
+            "",
+          ]),
+        ),
+      }) as const;
+    const fits = { team: choice(5_000) };
+    const out = await initConvexTest().action(async (ctx) => {
+      const { threadId } = await seedThread(ctx);
+      const tooLarge = await agent
+        .experimental_decide(
+          ctx,
+          { threadId },
+          { questions: { team: choice(7_300) } },
+        )
+        .then(
+          () => undefined,
+          (e: Error) => e,
+        );
+      const { decisionId } = await agent.experimental_decide(
+        ctx,
+        { threadId },
+        { questions: fits },
+      );
+      const keys = Object.keys(fits.team.criteria);
+      const correction = await experimental_correctDecision(
+        ctx,
+        components.agent,
+        {
+          threadId,
+          decisionId: decisionId!,
+          questions: fits,
+          questionId: "team",
+          answer: {
+            type: "choice",
+            choice: keys[1],
+            probabilities: Object.fromEntries(
+              keys.map((key, i) => [key, i === 1 ? 1 : 0]),
+            ),
+          },
+        },
+      ).then(
+        () => "corrected",
+        (e: Error) => e.message,
+      );
+      const { page } = await experimental_listDecisions(ctx, components.agent, {
+        threadId,
+        paginationOpts: firstPage,
+      });
+      return {
+        answer: tooLarge?.message,
+        hasResult: !!(tooLarge?.cause as { answers?: unknown })?.answers,
+        correction,
+        stored: page.map((d) => Object.keys(d.corrections).length),
+      };
+    });
+    expect(out.answer).toMatch(
+      /over Convex's 1 MiB document limit; the largest field is answer/,
+    );
+    expect(out.hasResult).toBe(true);
+    expect(out.correction).toMatch(
+      /over Convex's 1 MiB document limit; the largest field is answer/,
+    );
+    expect(out.stored).toEqual([0]);
+  });
+
+  test("a listed page stops short of the read limit, however large its decisions, and the next continues it", async () => {
+    const agent = makeAgent({});
+    const out = await initConvexTest({ transactionLimits: true }).action(
+      async (ctx) => {
+        const { threadId } = await seedThread(ctx);
+        for (let i = 0; i < 20; i++) {
+          await agent.experimental_decide(
+            ctx,
+            { threadId },
+            { questions, state: String(i).padEnd(900_000, "x") },
+          );
+        }
+        const pages = async (asked?: typeof questions) => {
+          const sizes: number[] = [];
+          const ids = new Set<string>();
+          let cursor: string | null = null;
+          for (;;) {
+            const result: {
+              page: { _id: string }[];
+              isDone: boolean;
+              continueCursor: string;
+            } = await experimental_listDecisions(ctx, components.agent, {
+              threadId,
+              questions: asked as typeof questions,
+              paginationOpts: { numItems: 20, cursor },
+            });
+            sizes.push(result.page.length);
+            for (const d of result.page) ids.add(d._id);
+            if (result.isDone) return { sizes, listed: ids.size };
+            cursor = result.continueCursor;
+          }
+        };
+        return { all: await pages(), asked: await pages(questions) };
+      },
+    );
+    for (const { sizes, listed } of [out.all, out.asked]) {
+      expect(sizes.length).toBeGreaterThan(1);
+      expect(sizes.reduce((a, b) => a + b)).toBe(20);
+      expect(listed).toBe(20);
+    }
+  });
+
   test("is not stored once its thread is deleted during the call", async () => {
     const out = await initConvexTest().action(async (ctx) => {
       const { threadId } = await seedThread(ctx);

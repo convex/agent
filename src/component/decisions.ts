@@ -1,4 +1,8 @@
-import { paginationOptsValidator } from "convex/server";
+import {
+  paginationOptsValidator,
+  type PaginationOptions,
+  type PaginationResult,
+} from "convex/server";
 import { mergedStream, stream } from "convex-helpers/server/stream";
 import { assert, pick } from "convex-helpers";
 import { mutation, query, type QueryCtx } from "./_generated/server.js";
@@ -9,6 +13,7 @@ import {
   decodeAnswer,
   decodeQuestions,
   sumsToOne,
+  tooLarge,
 } from "../decisions.js";
 import { vPaginationResult } from "../validators.js";
 
@@ -70,6 +75,43 @@ function toDoc(decision: Doc<"decisions">, rows: Doc<"decisionAnswers">[]) {
 
 const vAsked = v.object(pick(answerFields, ["questionId", "shapeHash"]));
 
+// Half a query's read limits, as listDeltas keeps, leaving the rest for the
+// decision that crosses it: how large a decision is shows only once it's read.
+async function hasReadHeadroom(ctx: QueryCtx) {
+  const { bytesRead, documentsRead } = await ctx.meta.getTransactionMetrics();
+  return [bytesRead, documentsRead].every(
+    ({ used, remaining }) => used <= (used + remaining) / 2,
+  );
+}
+
+/**
+ * Reads `source` an item at a time, so a page ends early while it has
+ * headroom for more. A refresh up to its `endCursor` returns that whole range,
+ * as a paginated query's pages must stay adjacent.
+ */
+async function pageWithinReadLimits<T, D>(
+  ctx: QueryCtx,
+  source: { paginate(opts: PaginationOptions): Promise<PaginationResult<T>> },
+  opts: PaginationOptions,
+  load: (item: T) => Promise<D>,
+): Promise<PaginationResult<D>> {
+  if (opts.endCursor) {
+    const result = await source.paginate(opts);
+    return { ...result, page: await Promise.all(result.page.map(load)) };
+  }
+  const page: D[] = [];
+  let cursor = opts.cursor;
+  for (;;) {
+    const result = await source.paginate({ numItems: 1, cursor });
+    for (const item of result.page) page.push(await load(item));
+    cursor = result.continueCursor;
+    if (result.isDone) return { page, isDone: true, continueCursor: cursor };
+    if (page.length >= opts.numItems || !(await hasReadHeadroom(ctx))) {
+      return { page, isDone: false, continueCursor: cursor };
+    }
+  }
+}
+
 export const list = query({
   args: {
     threadId: v.id("threads"),
@@ -83,15 +125,15 @@ export const list = query({
       return { page: [], isDone: true, continueCursor: "" };
     }
     if (!asked) {
-      const result = await ctx.db
-        .query("decisions")
-        .withIndex("threadId", (q) => q.eq("threadId", threadId))
-        .order("desc")
-        .paginate(paginationOpts);
-      const page = await Promise.all(
-        result.page.map(async (d) => toDoc(d, await answersOf(ctx, d._id))),
+      return pageWithinReadLimits(
+        ctx,
+        stream(ctx.db, schema)
+          .query("decisions")
+          .withIndex("threadId", (q) => q.eq("threadId", threadId))
+          .order("desc"),
+        paginationOpts,
+        async (d) => toDoc(d, await answersOf(ctx, d._id)),
       );
-      return { ...result, page };
     }
     const wanted = new Set(asked.map((a) => `${a.questionId}\n${a.shapeHash}`));
     const matching = new Map<string, Promise<Doc<"decisionAnswers">[]>>();
@@ -108,7 +150,7 @@ export const list = query({
     // Paged over the matching answer rows, so a page is never short for the
     // decisions that don't match. A decision is listed at its first matching
     // row only, so it appears once.
-    const result = await mergedStream(
+    const matchingRows = mergedStream(
       asked.map(({ questionId, shapeHash }) =>
         stream(ctx.db, schema)
           .query("decisionAnswers")
@@ -121,13 +163,14 @@ export const list = query({
           .order("desc"),
       ),
       ["_creationTime"],
-    )
-      .filterWith(
-        async (row) => (await matchingOf(row.decisionId))[0]._id === row._id,
-      )
-      .paginate(paginationOpts);
-    const page = await Promise.all(
-      result.page.map(async (row) => {
+    ).filterWith(
+      async (row) => (await matchingOf(row.decisionId))[0]._id === row._id,
+    );
+    return pageWithinReadLimits(
+      ctx,
+      matchingRows,
+      paginationOpts,
+      async (row) => {
         const decision = await ctx.db.get("decisions", row.decisionId);
         if (!decision) {
           throw new Error(
@@ -135,9 +178,8 @@ export const list = query({
           );
         }
         return toDoc(decision, await matchingOf(row.decisionId));
-      }),
+      },
     );
-    return { ...result, page };
   },
 });
 
@@ -216,9 +258,13 @@ export const correct = mutation({
         `That isn't an answer to ${questionId} as decision ${decisionId} asked it`,
       );
     }
-    await ctx.db.patch("decisionAnswers", row._id, {
-      correction: { answer, by },
+    const correction = { answer, by };
+    const error = tooLarge(`The answer to ${questionId} with that correction`, {
+      ...row,
+      correction,
     });
+    if (error) throw new Error(error);
+    await ctx.db.patch("decisionAnswers", row._id, { correction });
     return null;
   },
 });
