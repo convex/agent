@@ -13,6 +13,7 @@ import {
   decodeAnswer,
   decodeQuestions,
   decisionTooLarge,
+  MAX_ANSWER_ROWS,
   MAX_DOCUMENT_BYTES,
   sumsToOne,
 } from "../decisions.js";
@@ -79,16 +80,17 @@ function toDoc(decision: Doc<"decisions">, rows: Doc<"decisionAnswers">[]) {
 const vAsked = v.object(pick(answerFields, ["questionId", "shapeHash"]));
 
 /**
- * Reads `source` in batches that leave room for a full decision with its
- * answers per item read, ending the page once half the query's read limits are
- * used, as listDeltas keeps. A decision's size shows only once it's read. A
- * refresh up to its `endCursor` that runs out first asks for a split, as a
- * paginated query's pages must stay adjacent.
+ * Reads `source` in batches that leave room for each item's most reads, a full
+ * decision with its answers and `rowsPerItem` documents, ending the page once
+ * half the query's read limits are used, as listDeltas keeps. A decision's size
+ * shows only once it's read. A refresh up to its `endCursor` that runs out
+ * first asks for a split, as a paginated query's pages must stay adjacent.
  */
 async function pageWithinReadLimits<T, D>(
   ctx: QueryCtx,
   source: { paginate(opts: PaginationOptions): Promise<PaginationResult<T>> },
   opts: PaginationOptions,
+  rowsPerItem: number,
   load: (item: T) => Promise<D>,
 ): Promise<PaginationResult<D>> {
   const { endCursor } = opts;
@@ -110,7 +112,13 @@ async function pageWithinReadLimits<T, D>(
           }
         : { page, isDone: false, continueCursor: cursor! };
     }
-    const batch = Math.max(1, Math.floor(bytesLeft / MAX_DOCUMENT_BYTES));
+    const batch = Math.max(
+      1,
+      Math.min(
+        Math.floor(bytesLeft / MAX_DOCUMENT_BYTES),
+        Math.floor(documentsLeft / rowsPerItem),
+      ),
+    );
     const result = await source.paginate(
       endCursor
         ? { numItems: batch, cursor, endCursor, maximumRowsRead: batch }
@@ -151,6 +159,7 @@ export const list = query({
           .withIndex("threadId", (q) => q.eq("threadId", threadId))
           .order("desc"),
         paginationOpts,
+        1 + MAX_ANSWER_ROWS,
         async (d) => toDoc(d, await answersOf(ctx, d._id)),
       );
     }
@@ -189,6 +198,9 @@ export const list = query({
       ctx,
       matchingRows,
       paginationOpts,
+      // The decision and its answer rows, and per asked question one matching
+      // row of it and one the stream reads ahead.
+      1 + MAX_ANSWER_ROWS + 2 * asked.length,
       async (row) => {
         const decision = await ctx.db.get("decisions", row.decisionId);
         if (!decision) {

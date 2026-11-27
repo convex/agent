@@ -621,6 +621,48 @@ describe("a stored decision", () => {
     }
   });
 
+  test("a page of decisions with many answers, listed by many questions, stays within the documents read limit", async () => {
+    const agent = makeAgent({});
+    const many = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [
+        `q${i}`,
+        { type: "boolean", instructions: `Is ${i} true?` } as const,
+      ]),
+    );
+    const out = await initConvexTest({
+      transactionLimits: { documentsRead: 400 },
+    }).action(async (ctx) => {
+      const { threadId } = await seedThread(ctx);
+      const decided: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const { decisionId } = await agent.experimental_decide(
+          ctx,
+          { threadId },
+          { questions: many, state: `decision ${i}` },
+        );
+        decided.unshift(decisionId!);
+      }
+      const listed: string[] = [];
+      let cursor: string | null = null;
+      for (;;) {
+        const result: {
+          page: { _id: string }[];
+          isDone: boolean;
+          continueCursor: string;
+        } = await experimental_listDecisions(ctx, components.agent, {
+          threadId,
+          questions: many,
+          paginationOpts: { numItems: 10, cursor },
+        });
+        listed.push(...result.page.map((d) => d._id));
+        if (result.isDone) break;
+        cursor = result.continueCursor;
+      }
+      return { decided, listed };
+    });
+    expect(out.listed).toEqual(out.decided);
+  });
+
   test("a listed page stops short of the read limit, however large its decisions, and the next continues it", async () => {
     const agent = makeAgent({});
     const out = await initConvexTest({ transactionLimits: true }).action(

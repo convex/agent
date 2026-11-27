@@ -17,6 +17,22 @@ export const MAX_DOCUMENT_BYTES = 1 << 20;
 // What getDocumentSize assumes for an _id it isn't given.
 const ESTIMATED_ID = "0".repeat(32);
 
+// The smallest answer row: an empty question ID answered with an empty choice
+// and no probabilities. Its hashes are SHA-256 hex.
+const MIN_ANSWER_ROW_BYTES = getDocumentSize({
+  decisionId: ESTIMATED_ID,
+  threadId: ESTIMATED_ID,
+  questionId: "",
+  definitionHash: "0".repeat(64),
+  shapeHash: "0".repeat(64),
+  answer: { type: "choice", choice: "" },
+});
+
+/** The most answer rows a decision can have within MAX_DOCUMENT_BYTES. */
+export const MAX_ANSWER_ROWS = Math.floor(
+  MAX_DOCUMENT_BYTES / MIN_ANSWER_ROW_BYTES,
+);
+
 // Undefined fields aren't stored and add nothing to the size.
 function sizeOf(row: object, label: (field: string) => string) {
   const fields = Object.entries(row).map(
