@@ -869,11 +869,17 @@ async function planFill(
         saved.some(
           (doc) => doc.status === "pending" && at(position as Turn)(doc),
         );
-      await settle(ctx, write.as === "app" ? write.liveTurn! : turnId, {
-        byApp: write.as === "app",
-        wroteFailed: saved.some((doc) => doc.status === "failed"),
-        ...(opened ? { opened: true as const } : {}),
-      });
+      // The turn positionOf read, if it read one: no save writes a turn.
+      const read = position && "status" in position ? (position as Turn) : null;
+      await settle(
+        ctx,
+        write.as === "app" ? write.liveTurn! : (read ?? turnId),
+        {
+          byApp: write.as === "app",
+          wroteFailed: saved.some((doc) => doc.status === "failed"),
+          ...(opened ? { opened: true as const } : {}),
+        },
+      );
       return {};
     },
   };
