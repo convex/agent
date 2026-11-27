@@ -1109,3 +1109,41 @@ test("ending a turn ends the row and stream its job opened in another thread", a
   }));
   expect(left).toEqual({ rows: 0, streams: 0 });
 });
+
+test("a stop by a plain prompt stops that prompt's inline generation", async () => {
+  const t = createTest();
+  const stop = await t.mutation(async (ctx) => {
+    const thread = await ctx.runMutation(api.threads.createThread, {});
+    const threadId = thread._id;
+    const sent = await ctx.runMutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "Go." } }],
+    });
+    const promptMessageId = sent.messages[0]._id;
+    await ctx.runMutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    return { threadId, promptMessageId };
+  });
+  expect(
+    await t.mutation((ctx) =>
+      ctx.runMutation(api.messages.abortGeneration, {
+        ...stop,
+        reason: "Stopped",
+      }),
+    ),
+  ).toBe(true);
+  const { page } = await t.query((ctx) =>
+    ctx.runQuery(api.messages.listMessagesByThreadId, {
+      threadId: stop.threadId,
+      order: "asc",
+      statuses: ["pending", "success", "failed"],
+      paginationOpts: { numItems: 10, cursor: null },
+    }),
+  );
+  expect(page.at(-1)?.abort).toEqual({ reason: "Stopped" });
+});
