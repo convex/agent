@@ -1029,23 +1029,6 @@ export async function endStream(
   return abortById(ctx, { streamId: stream._id, ...args });
 }
 
-/**
- * A job's last write: its own running turn ends as unanswered (E4, D6) only if
- * `detect` finds it unanswered. True once the caller's turn has ended; false
- * when there is no running turn of the caller's here, or it is open or answered.
- */
-export async function endOwnTurn(ctx: MutationCtx, threadId: Id<"threads">) {
-  const caller = await callerJob(ctx);
-  const role = await roleOf(ctx, caller);
-  if (role.kind === "revoked") throw new Error(REFUSED);
-  if (role.kind === "stopped") return role.turn.threadId === threadId;
-  if (role.kind !== "holder" || role.turn.threadId !== threadId) return false;
-  if (role.turn.status !== "running") return false;
-  if ((await detect(ctx, role.turn, false)).kind !== "none") return false;
-  await handOff(ctx, role.turn, { end: "unanswered", byOwnJob: true });
-  return true;
-}
-
 /** After a durable stream finishes, its turn may be answered. */
 export async function settleStream(ctx: MutationCtx, stream: Stream) {
   if (stream.turnId) await settle(ctx, stream.turnId, { byApp: false });

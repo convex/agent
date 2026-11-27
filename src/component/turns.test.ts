@@ -1010,15 +1010,11 @@ test("a stop by stream id is control: another thread's job stops a turn's stream
   });
 });
 
-test("a send at a new order ends an older turn whose job returned without answering (D6)", async () => {
-  let ended: unknown;
+test("a send at a new order leaves an older turn whose job returned without answering open, and retryGeneration fails it (D6, E4)", async () => {
   attempts.push(async (ctx, ids) => {
     await ctx.runMutation(api.messages.addMessages, {
       ...ids,
       messages: [{ message: { role: "system", content: "Noted." } }],
-    });
-    ended = await ctx.runMutation(api.messages.endGeneration, {
-      threadId: ids.threadId,
     });
   });
   attempts.push(async () => {});
@@ -1032,34 +1028,14 @@ test("a send at a new order ends an older turn whose job returned without answer
     }),
   );
   await s.drain();
-  const failed = (await s.docs()).find((m) => m.status === "failed")!;
-  expect({
-    ended,
-    stopped: await s.control((ctx) =>
-      ctx.runMutation(api.messages.abortGeneration, s.ids),
-    ),
-    reply: [failed.status, failed.error],
-  }).toEqual({
-    ended: true,
-    stopped: false,
-    reply: ["failed", "The generation returned without answering"],
+  const openAfterSend = !(await s.docs()).some((m) => m.status === "failed");
+  const retried = await s.control((ctx) =>
+    ctx.runMutation(api.messages.retryGeneration, s.ids),
+  );
+  const failed = (await s.docs()).find((m) => m.status === "failed");
+  expect({ openAfterSend, retried, error: failed?.error }).toEqual({
+    openAfterSend: true,
+    retried: null,
+    error: "The generation returned without answering",
   });
-});
-
-test("endGeneration leaves a turn its job left open running, and returns false", async () => {
-  let ended: unknown;
-  attempts.push(async (ctx, ids) => {
-    await begin(ctx, ids);
-    ended = await ctx.runMutation(api.messages.endGeneration, {
-      threadId: ids.threadId,
-    });
-  });
-  const s = await submitted();
-  await s.drain();
-  expect({
-    ended,
-    stopped: await s.control((ctx) =>
-      ctx.runMutation(api.messages.abortGeneration, s.ids),
-    ),
-  }).toEqual({ ended: false, stopped: true });
 });

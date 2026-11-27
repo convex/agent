@@ -1748,13 +1748,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         { isDone: boolean; lastOrder?: number; lastStepOrder?: number },
         Name
       >;
-      endGeneration: FunctionReference<
-        "mutation",
-        "internal",
-        { threadId: string },
-        boolean,
-        Name
-      >;
       finalizeMessage: FunctionReference<
         "mutation",
         "internal",
