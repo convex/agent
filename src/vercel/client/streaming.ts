@@ -248,13 +248,6 @@ export function mergeTransforms<TOOLS extends ToolSet>(
   return transforms;
 }
 
-/**
- * DeltaStreamer can be used to save a stream of "parts" by writing
- * batches of them in "deltas" to the database so clients can subscribe
- * (using the syncStreams utility and client hooks) and re-hydrate the stream.
- * You can optionally compress the parts, e.g. concatenating text deltas, to
- * optimize the data in transit.
- */
 const OPENING_CHUNKS = new Set<unknown>(["start", "start-step"]);
 
 let holdDeltas: <T, R>(
@@ -285,6 +278,13 @@ export function streamerClosedItsReply<T>(streamer: DeltaStreamer<T>) {
   return closedItsReply(streamer);
 }
 
+/**
+ * DeltaStreamer can be used to save a stream of "parts" by writing
+ * batches of them in "deltas" to the database so clients can subscribe
+ * (using the syncStreams utility and client hooks) and re-hydrate the stream.
+ * You can optionally compress the parts, e.g. concatenating text deltas, to
+ * optimize the data in transit.
+ */
 export class DeltaStreamer<T> {
   static {
     holdDeltas = (streamer, during) => streamer.#hold(during);
