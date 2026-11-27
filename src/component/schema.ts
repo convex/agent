@@ -194,7 +194,10 @@ export const schema = defineSchema({
   jobs: defineTable({
     jobId: v.string(),
     turnId: v.id("turns"),
-  }).index("jobId", ["jobId"]),
+    threadId: v.id("threads"),
+  })
+    .index("jobId", ["jobId"])
+    .index("threadId", ["threadId"]),
 
   // A durable step's model response, recorded on its pending message before
   // its tools run, so a retry replays the step. JSON, as the model returned

@@ -452,12 +452,37 @@ async function schedule(
     turn.generate as FunctionHandle<"action">,
     { threadId: turn.threadId, promptMessageId: anchor },
   );
-  if (turn._id) await recordJob(ctx, jobId, turn._id);
+  if (turn._id) await recordJob(ctx, jobId, turn._id, turn.threadId);
   return jobId;
 }
 
-function recordJob(ctx: MutationCtx, jobId: string, turnId: Id<"turns">) {
-  return ctx.db.insert("jobs", { jobId, turnId });
+function recordJob(
+  ctx: MutationCtx,
+  jobId: string,
+  turnId: Id<"turns">,
+  threadId: Id<"threads">,
+) {
+  return ctx.db.insert("jobs", { jobId, turnId, threadId });
+}
+
+const DELETE_PAGE = 100;
+
+/** A deleted thread's turns and jobs go a page at a time; true once none are left. */
+export async function deleteTurnsPage(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+) {
+  const turns = await ctx.db
+    .query("turns")
+    .withIndex("threadId_status_order", (q) => q.eq("threadId", threadId))
+    .take(DELETE_PAGE);
+  const jobs = await ctx.db
+    .query("jobs")
+    .withIndex("threadId", (q) => q.eq("threadId", threadId))
+    .take(DELETE_PAGE);
+  for (const turn of turns) await ctx.db.delete("turns", turn._id);
+  for (const job of jobs) await ctx.db.delete("jobs", job._id);
+  return turns.length < DELETE_PAGE && jobs.length < DELETE_PAGE;
 }
 
 type Settle = {
@@ -916,7 +941,7 @@ async function planSend(
         retries: 0,
         status: "running",
       });
-      await recordJob(ctx, jobId, turnId);
+      await recordJob(ctx, jobId, turnId, args.threadId);
       // Stamped in the save's own transaction: the turn needs the rows' ids.
       // A send never restamps a row: an existing prompt keeps its turn.
       const stamped =

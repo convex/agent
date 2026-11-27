@@ -1,5 +1,5 @@
 import { stream } from "convex-helpers/server/stream";
-import { endTurnsForDeleted } from "./turns.js";
+import { deleteTurnsPage, endTurnsForDeleted } from "./turns.js";
 import { nullable } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
 import type { ObjectType } from "convex/values";
@@ -225,7 +225,7 @@ async function deletePageForUserId(
       await endTurnsForDeleted(ctx, messages.page);
     }
 
-    if (messages.isDone) {
+    if (messages.isDone && (await deleteTurnsPage(ctx, threadInProgress!))) {
       // Messages are done, move to streams deletion phase
       streamsInProgress = true;
       messagesCursor = null;

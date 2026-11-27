@@ -1,5 +1,5 @@
 import { assert, omit, pick } from "convex-helpers";
-import { endTurnsForDeleted } from "./turns.js";
+import { deleteTurnsPage, endTurnsForDeleted } from "./turns.js";
 import { partial } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
 import type { ObjectType } from "convex/values";
@@ -311,14 +311,12 @@ async function deletePageForThreadIdHandler(
     args.onSaveMessages,
     messages.page.map((doc) => ({ kind: "delete", doc })),
   );
-  if (messages.isDone) {
+  const isDone = messages.isDone && (await deleteTurnsPage(ctx, args.threadId));
+  if (isDone) {
     const thread = await ctx.db.get("threads", args.threadId);
     if (thread) {
       await ctx.db.delete("threads", args.threadId);
     }
   }
-  return {
-    cursor: messages.continueCursor,
-    isDone: messages.isDone,
-  };
+  return { cursor: messages.continueCursor, isDone };
 }
