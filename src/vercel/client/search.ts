@@ -611,6 +611,23 @@ export async function generateAndSaveEmbeddings(
  * promptMessageId message.
  */
 export async function fetchContextWithPrompt(
+  ...args: Parameters<typeof fetchContextAndResponses>
+): Promise<{
+  messages: ModelMessage[];
+  order: number | undefined;
+  stepOrder: number | undefined;
+}> {
+  const { responseDocs: _, ...context } = await fetchContextAndResponses(
+    ...args,
+  );
+  return context;
+}
+
+/**
+ * {@link fetchContextWithPrompt}, with the messages already saved after the
+ * prompt at its order.
+ */
+export async function fetchContextAndResponses(
   ctx: ActionCtx,
   component: AgentComponent,
   args: {
@@ -626,6 +643,7 @@ export async function fetchContextWithPrompt(
   messages: ModelMessage[];
   order: number | undefined;
   stepOrder: number | undefined;
+  responseDocs: MessageDoc[];
 }> {
   const { threadId, userId, textEmbeddingModel, embeddingModel } = args;
   const effectiveEmbeddingModel = embeddingModel ?? textEmbeddingModel;
@@ -756,6 +774,7 @@ export async function fetchContextWithPrompt(
     messages: processedMessages,
     order: promptMessage?.order,
     stepOrder: promptMessage?.stepOrder,
+    responseDocs: existingResponseDocs,
   };
 }
 

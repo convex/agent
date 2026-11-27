@@ -1,4 +1,9 @@
-import type { PaginationOptions, PaginationResult } from "convex/server";
+import type {
+  FunctionArgs,
+  FunctionReturnType,
+  PaginationOptions,
+  PaginationResult,
+} from "convex/server";
 import type { MessageDoc } from "../validators.js";
 import { validateVectorDimension } from "../component/vector/tables.js";
 import {
@@ -66,6 +71,8 @@ export async function listMessages(
 
 export type MessageOrder = number | "next";
 
+type AddMessagesArgs = FunctionArgs<AgentComponent["messages"]["addMessages"]>;
+
 export type SaveMessagesArgs = {
   threadId: string;
   userId?: string | null;
@@ -123,6 +130,22 @@ export async function saveMessages(
     onSaveMessages?: string;
   },
 ): Promise<{ messages: MessageDoc[] }> {
+  const { messages } = await addMessages(ctx, component, args);
+  return { messages };
+}
+
+// Not exported from the package: a save that can also start a stream or a
+// durable turn, with everything the component returns.
+export async function addMessages(
+  ctx: MutationCtx | ActionCtx,
+  component: AgentComponent,
+  args: SaveMessagesArgs & {
+    agentName?: string;
+    onSaveMessages?: string;
+    createStream?: AddMessagesArgs["createStream"];
+    generate?: string;
+  },
+): Promise<FunctionReturnType<AgentComponent["messages"]["addMessages"]>> {
   let embeddings: MessageEmbeddingsWithDimension | undefined;
   if (args.embeddings) {
     const dimension = args.embeddings.vectors.find((v) => v !== null)?.length;
@@ -135,7 +158,7 @@ export async function saveMessages(
       };
     }
   }
-  const result = await sendToolJson(
+  return sendToolJson(
     args.messages.map((message, i) =>
       parse(vMessageWithMetadata, {
         ...args.metadata?.[i],
@@ -155,7 +178,8 @@ export async function saveMessages(
         messages,
         failPendingSteps: args.failPendingSteps ?? false,
         onSaveMessages: args.onSaveMessages,
+        createStream: args.createStream,
+        generate: args.generate,
       }),
   );
-  return { messages: result.messages };
 }

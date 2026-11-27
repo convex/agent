@@ -44,6 +44,8 @@ import {
   createFunctionHandle,
   internalActionGeneric,
   internalMutationGeneric,
+  type FunctionReference,
+  type FunctionVisibility,
   type GenericActionCtx,
   type GenericDataModel,
   type PaginationOptions,
@@ -51,6 +53,13 @@ import {
   type WithoutSystemFields,
 } from "convex/server";
 import { convexToJson, v, type Value } from "convex/values";
+
+/** An action that generates a durable turn's reply to its prompt. */
+type GenerateAction = FunctionReference<
+  "action",
+  FunctionVisibility,
+  { threadId: string; promptMessageId: string }
+>;
 import type { threadFieldsSupportingPatch } from "../component/threads.js";
 import { type VectorDimension } from "../component/vector/tables.js";
 import {
@@ -311,6 +320,12 @@ export class Agent<
    */
   private getEmbeddingModel(): EmbeddingModel | undefined {
     return this.options.embeddingModel ?? this.options.textEmbeddingModel;
+  }
+
+  private async generateHandle(
+    generate: GenerateAction | undefined,
+  ): Promise<string | undefined> {
+    return generate && (await createFunctionHandle(generate));
   }
 
   private async onSaveMessagesHandle(): Promise<string | undefined> {
@@ -861,9 +876,16 @@ export class Agent<
        * action later that calls `agent.generateAndSaveEmbeddings`.
        */
       skipEmbeddings?: boolean;
+      /**
+       * An action that answers the message, scheduled with
+       * `{ threadId, promptMessageId }`. The save starts a durable turn:
+       * `retryGeneration` runs it again if it crashes, and `abortGeneration`
+       * stops it.
+       */
+      generate?: GenerateAction;
     },
   ) {
-    const { messages } = await this.saveMessages(ctx, {
+    const { messages, jobId } = await this.saveMessages(ctx, {
       threadId: args.threadId,
       userId: args.userId,
       embeddings: args.embedding
@@ -878,9 +900,14 @@ export class Agent<
       promptMessageId: args.promptMessageId,
       order: args.order,
       pendingMessageId: args.pendingMessageId,
+      generate: args.generate,
     });
     const message = messages.at(-1)!;
-    return { messageId: message._id, message };
+    return {
+      messageId: message._id,
+      message,
+      ...(jobId !== undefined ? { jobId } : {}),
+    };
   }
 
   /**
@@ -901,10 +928,15 @@ export class Agent<
        * action later that calls `agent.generateAndSaveEmbeddings`.
        */
       skipEmbeddings?: boolean;
+      /**
+       * An action that answers the last message, scheduled with
+       * `{ threadId, promptMessageId }`. The save starts a durable turn.
+       */
+      generate?: GenerateAction;
     },
-  ): Promise<{ messages: MessageDoc[] }> {
+  ): Promise<{ messages: MessageDoc[]; jobId?: string }> {
     let embeddings: { vectors: (number[] | null)[]; model: string } | undefined;
-    const { skipEmbeddings, ...rest } = args;
+    const { skipEmbeddings, generate, ...rest } = args;
     if (args.embeddings) {
       embeddings = args.embeddings;
     } else if (!skipEmbeddings && this.getEmbeddingModel()) {
@@ -930,12 +962,48 @@ export class Agent<
         );
       }
     }
-    return saveAgentMessages(ctx, this.component, {
+    const { messages, jobId } = await saveAgentMessages(ctx, this.component, {
       ...rest,
       agentName: this.options.name,
       embeddings,
       onSaveMessages: await this.onSaveMessagesHandle(),
+      generate: await this.generateHandle(generate),
     });
+    return { messages, ...(jobId !== undefined ? { jobId } : {}) };
+  }
+
+  /**
+   * Run a durable turn's generation again, after its job crashed or timed
+   * out. The new job continues after the steps the turn already saved.
+   * @param ctx A ctx object from a mutation.
+   * @param args.threadId The thread of the turn.
+   * @param args.promptMessageId The turn's prompt. Defaults to the thread's
+   * latest unfinished turn.
+   * @param args.maxRetries How many retries the turn may use.
+   * @returns The new job, or null if there was nothing to retry.
+   */
+  async retryGeneration(
+    ctx: MutationCtx,
+    args: { threadId: string; promptMessageId?: string; maxRetries?: number },
+  ): Promise<string | null> {
+    return ctx.runMutation(this.component.messages.retryGeneration, args);
+  }
+
+  /**
+   * Stop the unfinished generations of a thread, or of one prompt: durable
+   * turns and their scheduled jobs, and inline generations' streams. What
+   * streamed is kept as the reply, marked with the reason.
+   * @param ctx A ctx object from a mutation.
+   * @param args.threadId The thread to stop.
+   * @param args.promptMessageId Only the generation answering this message.
+   * @param args.reason Why it stopped. Defaults to "Stopped".
+   * @returns Whether anything was stopped.
+   */
+  async abortGeneration(
+    ctx: MutationCtx,
+    args: { threadId: string; promptMessageId?: string; reason?: string },
+  ): Promise<boolean> {
+    return ctx.runMutation(this.component.messages.abortGeneration, args);
   }
 
   /**
@@ -1181,8 +1249,13 @@ export class Agent<
    */
   async approveToolCall(
     ctx: MutationCtx,
-    args: { threadId: string; approvalId: string; reason?: string },
-  ): Promise<{ messageId: string }> {
+    args: {
+      threadId: string;
+      approvalId: string;
+      reason?: string;
+      generate?: GenerateAction;
+    },
+  ): Promise<{ messageId: string; jobId?: string }> {
     return this.respondToToolCallApproval(ctx, { ...args, approved: true });
   }
 
@@ -1202,8 +1275,13 @@ export class Agent<
    */
   async denyToolCall(
     ctx: MutationCtx,
-    args: { threadId: string; approvalId: string; reason?: string },
-  ): Promise<{ messageId: string }> {
+    args: {
+      threadId: string;
+      approvalId: string;
+      reason?: string;
+      generate?: GenerateAction;
+    },
+  ): Promise<{ messageId: string; jobId?: string }> {
     return this.respondToToolCallApproval(ctx, { ...args, approved: false });
   }
 
@@ -1211,17 +1289,20 @@ export class Agent<
     ctx: MutationCtx,
     {
       threadId,
+      generate,
       ...decision
     }: {
       threadId: string;
       approvalId: string;
       approved: boolean;
       reason?: string;
+      generate?: GenerateAction;
     },
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; jobId?: string }> {
     return this.respondToToolCallApprovals(ctx, {
       threadId,
       decisions: [decision],
+      generate,
     });
   }
 
@@ -1234,13 +1315,19 @@ export class Agent<
     args: {
       threadId: string;
       decisions: ToolCallApprovalDecision[];
+      /**
+       * Continues the request's durable turn once its step is answered, with
+       * this action.
+       */
+      generate?: GenerateAction;
     },
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; jobId?: string }> {
     return ctx.runMutation(this.component.messages.respondToToolCallApprovals, {
       threadId: args.threadId,
       agentName: this.options.name,
       decisions: args.decisions,
       onSaveMessages: await this.onSaveMessagesHandle(),
+      generate: await this.generateHandle(args.generate),
     });
   }
 
@@ -1276,17 +1363,23 @@ export class Agent<
       tool,
       toolCallId,
       tools,
+      generate,
       ...result
     }: {
       threadId: string;
       tool: string;
       toolCallId: string;
       tools?: ToolSet;
+      /**
+       * Continues the call's durable turn once its step is answered, with
+       * this action.
+       */
+      generate?: GenerateAction;
     } & (
       | { state?: "output-available"; output: unknown; errorText?: never }
       | { state: "output-error"; errorText: string; output?: never }
     ),
-  ): Promise<{ messageId: string }> {
+  ): Promise<{ messageId: string; jobId?: string }> {
     const toolSet: ToolSet | undefined = tools ?? this.options.tools;
     if (!toolSet || !Object.hasOwn(toolSet, tool)) {
       throw new Error(
@@ -1317,6 +1410,7 @@ export class Agent<
         },
       ],
       onSaveMessages: await this.onSaveMessagesHandle(),
+      generate: await this.generateHandle(generate),
     });
   }
 

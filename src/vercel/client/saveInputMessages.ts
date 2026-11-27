@@ -32,6 +32,8 @@ export async function saveInputMessages(
     storageOptions?: {
       saveMessages?: "all" | "promptAndOutput";
     };
+    /** Starts the generation's stream with its pending message. */
+    createStream?: Parameters<typeof saveAgentMessages>[2]["createStream"];
   } & Pick<
     Config,
     "usageHandler" | "textEmbeddingModel" | "embeddingModel" | "callSettings"
@@ -40,6 +42,8 @@ export async function saveInputMessages(
   promptMessageId: string | undefined;
   pendingMessage: MessageDoc;
   savedMessages: MessageDoc[];
+  streamId: string | undefined;
+  turn: { promptMessageId: string; jobId: string } | undefined;
 }> {
   const shouldSave = args.storageOptions?.saveMessages ?? "promptAndOutput";
   // If only a promptMessageId is provided, this will be empty.
@@ -95,8 +99,11 @@ export async function saveInputMessages(
     promptMessageId: args.promptMessageId,
     embeddings,
     onSaveMessages: args.onSaveMessagesHandle,
+    createStream: args.createStream,
   });
   return {
+    streamId: saved.streamId,
+    turn: saved.turn,
     promptMessageId: toSave.length
       ? saved.messages.at(-2)!._id
       : args.promptMessageId,

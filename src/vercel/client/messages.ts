@@ -14,8 +14,8 @@ import {
   type UIMessage,
 } from "../UIMessages.js";
 import {
+  addMessages,
   listMessages,
-  saveMessages as saveCanonicalMessages,
   type MessageOrder,
 } from "../../client/messages.js";
 import type {
@@ -118,7 +118,8 @@ export async function saveMessages(
     agentName?: string;
   },
 ): Promise<{ messages: MessageDoc[] }> {
-  return saveAgentMessages(ctx, component, args);
+  const { messages } = await saveAgentMessages(ctx, component, args);
+  return { messages };
 }
 
 // Not exported from the package: only an Agent reports its saves.
@@ -129,12 +130,15 @@ export async function saveAgentMessages(
     agentName?: string;
     /** A handle to the Agent's `onSaveMessages`. */
     onSaveMessages?: string;
+    createStream?: Parameters<typeof addMessages>[2]["createStream"];
+    /** A handle to the action that answers the last message. */
+    generate?: string;
   },
-): Promise<{ messages: MessageDoc[] }> {
+): ReturnType<typeof addMessages> {
   const serialized = await Promise.all(
     args.messages.map((message) => serializeMessage(ctx, component, message)),
   );
-  return saveCanonicalMessages(ctx, component, {
+  return addMessages(ctx, component, {
     threadId: args.threadId,
     userId: args.userId ?? undefined,
     agentName: args.agentName,
@@ -154,6 +158,8 @@ export async function saveAgentMessages(
     }),
     failPendingSteps: args.failPendingSteps ?? false,
     onSaveMessages: args.onSaveMessages,
+    createStream: args.createStream,
+    generate: args.generate,
   });
 }
 

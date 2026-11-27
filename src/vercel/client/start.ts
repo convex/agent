@@ -14,7 +14,8 @@ import {
   serializeResponseMessages,
   serializeObjectResult,
 } from "../mapping.js";
-import { embedMessages, fetchContextWithPrompt } from "./search.js";
+import { embedMessages, fetchContextAndResponses } from "./search.js";
+import { afterSavedSteps, savedSteps } from "./savedSteps.js";
 import type {
   ActionCtx,
   AgentCallSettings,
@@ -167,6 +168,8 @@ export async function startGeneration<
        * AI SDK's hooks, after the steps it finishes.
        */
       endsFromHooks?: boolean;
+      /** Starts the generation's stream with its first save. */
+      createStream?: { format: "UIMessageChunk" | "TextStreamPart" };
     },
   _operation?:
     | "generateText"
@@ -208,6 +211,10 @@ export async function startGeneration<
   }) => Promise<void>;
   end: (options?: { finishStreamId?: string }) => Promise<void>;
   getSavedMessages: () => MessageDoc[];
+  /** The stream the first save started. */
+  streamId: string | undefined;
+  /** Set when this generation is its durable turn's job. */
+  turn: { promptMessageId: string; jobId: string } | undefined;
 }> {
   const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
   // Unless something reads it before the first save, the userId comes back on
@@ -224,7 +231,7 @@ export async function startGeneration<
   const onSaveMessages =
     opts.onSaveMessages && (await createFunctionHandle(opts.onSaveMessages));
 
-  const context = await fetchContextWithPrompt(ctx, component, {
+  const context = await fetchContextAndResponses(ctx, component, {
     ...opts,
     userId,
     threadId,
@@ -246,7 +253,7 @@ export async function startGeneration<
   assert(model, "model is required");
   let activeModel: ModelOrMetadata = model;
 
-  const { promptMessageId, pendingMessage, savedMessages } =
+  const { promptMessageId, pendingMessage, savedMessages, streamId, turn } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
@@ -257,11 +264,20 @@ export async function startGeneration<
           messages: args.messages,
           promptMessageId: args.promptMessageId,
           storageOptions: { saveMessages },
+          createStream: opts.createStream && {
+            ...opts.createStream,
+            agentName: opts.agentName,
+            model: getModelName(model),
+            provider: getProviderName(model),
+            providerOptions: opts.providerOptions,
+          },
         })
       : {
           promptMessageId: args.promptMessageId,
           pendingMessage: undefined,
           savedMessages: [] as MessageDoc[],
+          streamId: undefined,
+          turn: undefined,
         };
 
   userId ??= pendingMessage?.userId;
@@ -389,7 +405,10 @@ export async function startGeneration<
     allowSystemInMessages,
     // A step that streamed an error is not continued past.
     stopWhen: [
-      ...[args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat(),
+      ...afterSavedSteps(
+        [args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat(),
+        savedSteps<Tools, RUNTIME_CONTEXT>(context.responseDocs),
+      ),
       () => held?.error !== undefined,
     ],
     tools,
@@ -534,6 +553,8 @@ export async function startGeneration<
     stepOrder: stepOrder ?? 0,
     userId,
     promptMessageId,
+    streamId,
+    turn,
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {

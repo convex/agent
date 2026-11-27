@@ -101,7 +101,8 @@ export async function streamText<
 > {
   type Tools = TOOLS extends undefined ? AgentTools : TOOLS;
   const { threadId } = options ?? {};
-  const { args, userId, order, stepOrder, promptMessageId, ...call } =
+  const streamsDeltas = Boolean(threadId && options.saveStreamDeltas);
+  const { args, userId, order, stepOrder, promptMessageId, streamId, ...call } =
     await startGeneration<
       StreamingTextArgs<AgentTools, TOOLS, OUTPUT, RUNTIME_CONTEXT>,
       Tools,
@@ -111,7 +112,13 @@ export async function streamText<
       ctx,
       component,
       streamTextArgs,
-      { ...options, endsFromHooks: true },
+      {
+        ...options,
+        endsFromHooks: true,
+        ...(streamsDeltas
+          ? { createStream: { format: "UIMessageChunk" } }
+          : {}),
+      },
       "streamText",
     );
 
@@ -128,7 +135,7 @@ export async function streamText<
   let deltasFailed: string | undefined;
   const deltasStopped = new AbortController();
   const streamer =
-    threadId && options.saveStreamDeltas
+    threadId && streamsDeltas
       ? new DeltaStreamer(
           component,
           ctx,
@@ -145,9 +152,11 @@ export async function streamText<
             materialize: (parts) =>
               materializeUIMessageChunkFiles(ctx, component, parts),
             abortSignal: args.abortSignal,
+            streamId,
           },
           {
             threadId,
+            promptMessageId: savesMessages ? undefined : promptMessageId,
             userId,
             agentName: options?.agentName,
             model: getModelName(args.model),

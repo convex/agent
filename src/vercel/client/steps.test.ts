@@ -374,9 +374,10 @@ const run = app.action({
         }
         const result = await ctx.runMutation(reference, mutationArgs);
         if (failsSave) throw new Error(`${args.failSave} save failed`);
-        const { pendingMessageId, format } = mutationArgs as {
+        const { pendingMessageId, format, createStream } = mutationArgs as {
           pendingMessageId?: string;
           format?: string;
+          createStream?: object;
         };
         // Aborts once a step save has committed, before its reply arrives.
         if (args.abortDuringSave && pendingMessageId) {
@@ -385,9 +386,11 @@ const run = app.action({
         }
         // Someone else aborts the stream as soon as it is created, before
         // the creation's reply arrives.
-        if (args.abortOnCreate && format !== undefined) {
+        if (args.abortOnCreate && (format ?? createStream) !== undefined) {
           await ctx.runMutation(components.agent.streams.abort, {
-            streamId: result as string,
+            streamId: createStream
+              ? (result as { streamId: string }).streamId
+              : (result as string),
             reason: "Stopped elsewhere",
           });
           await sleep(50);
@@ -688,7 +691,10 @@ describe("streamText", () => {
       abortInStepEnd: true,
       failSave: "first",
     });
-    expect(r.saved).toEqual([USER, failed(EMPTY, "Stopped")]);
+    expect(r.saved).toEqual([
+      USER,
+      failed({ ...EMPTY, parts: ["tool-call"] }, "Stopped"),
+    ]);
     expect(r.error).toBe("first save failed");
   });
 
