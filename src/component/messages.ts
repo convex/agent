@@ -747,7 +747,9 @@ async function addMessagesHandler(
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
-  const turn = plan.after ? await plan.after(toReturn, streamId) : {};
+  const turn = plan.after
+    ? await plan.after(toReturn, streamId, finishStreamId)
+    : {};
   await reportSavedMessages(ctx, onSaveMessages, saved);
   return {
     messages: toReturn.map(publicMessage),

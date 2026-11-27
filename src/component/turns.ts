@@ -234,14 +234,12 @@ async function closeRow(
 
 async function closeStream(
   ctx: MutationCtx,
-  stream: Stream,
+  streamId: Id<"streamingMessages">,
   finished: boolean,
   reason: string,
 ) {
-  const fresh = await ctx.db.get("streamingMessages", stream._id);
-  if (fresh?.state.kind !== "streaming") return;
-  if (finished) await finishHandler(ctx, { streamId: stream._id });
-  else await abortById(ctx, { streamId: stream._id, reason });
+  if (finished) await finishHandler(ctx, { streamId });
+  else await abortById(ctx, { streamId, reason });
 }
 
 // handOff: the only writer of a turn's job and status, and of a row's job copy.
@@ -257,16 +255,18 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     return;
   }
   if ("idle" in to) {
-    for (const s of openStreams) await closeStream(ctx, s, false, TIMED_OUT);
+    for (const s of openStreams)
+      await closeStream(ctx, s._id, false, TIMED_OUT);
     for (const row of openRows.filter(atOrder)) {
       await closeRow(ctx, row, { status: "failed", error: TIMED_OUT });
     }
     await ctx.db.patch("turns", turn._id, { jobId: undefined });
     return;
   }
-  await cancelQueued(ctx, turn);
+  if (!("end" in to && to.byOwnJob)) await cancelQueued(ctx, turn);
   if ("job" in to) {
-    for (const s of openStreams) await closeStream(ctx, s, false, "Retried");
+    for (const s of openStreams)
+      await closeStream(ctx, s._id, false, "Retried");
     for (const row of openRows) {
       if (atOrder(row)) {
         await ctx.db.patch("messages", row._id, {
@@ -317,7 +317,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     }
   }
   for (const s of openStreams) {
-    await closeStream(ctx, s, end === "answered", reason);
+    await closeStream(ctx, s._id, end === "answered", reason);
   }
   if (end === "stopped" && !openRows.some(atOrder)) {
     const newest = (await settledMembers(ctx, turn)).at(-1);
@@ -375,10 +375,11 @@ async function cancelQueued(ctx: MutationCtx, turn: Turn) {
   if (job?.state.kind === "pending") await ctx.scheduler.cancel(job._id);
 }
 
-// schedule: the only scheduler of a turn's jobs.
+// schedule: the only scheduler of a turn's jobs. A new turn records its
+// first job once it exists, so the turn is inserted with its job.
 async function schedule(
   ctx: MutationCtx,
-  turn: Pick<Turn, "_id" | "threadId" | "generate">,
+  turn: Pick<Turn, "threadId" | "generate"> & { _id?: Id<"turns"> },
   anchor: Id<"messages">,
 ) {
   const jobId: string = await ctx.scheduler.runAfter(
@@ -386,13 +387,19 @@ async function schedule(
     turn.generate as FunctionHandle<"action">,
     { threadId: turn.threadId, promptMessageId: anchor },
   );
-  await ctx.db.insert("jobs", { jobId, turnId: turn._id });
+  if (turn._id) await recordJob(ctx, jobId, turn._id);
   return jobId;
+}
+
+function recordJob(ctx: MutationCtx, jobId: string, turnId: Id<"turns">) {
+  return ctx.db.insert("jobs", { jobId, turnId });
 }
 
 type Settle = {
   byApp: boolean;
   wroteFailed?: boolean;
+  // The write left an open row at the turn, so detect's answer is "open".
+  opened?: true;
   reason?: string;
   continueWith?: { generate: string; anchor: Row };
 };
@@ -400,12 +407,19 @@ type Settle = {
 /** The epilogue of every mutation that writes a live turn's member. */
 export async function settle(
   ctx: MutationCtx,
-  turnId: Id<"turns">,
+  // A turn read earlier in this mutation, before any of its handOffs, or its id.
+  turnOrId: Id<"turns"> | Turn,
   w: Settle,
 ): Promise<string | undefined> {
-  const turn = await ctx.db.get("turns", turnId);
+  const turn =
+    typeof turnOrId === "string"
+      ? await ctx.db.get("turns", turnOrId)
+      : turnOrId;
   if (!live(turn)) return;
-  const result = await detect(ctx, turn, !!w.wroteFailed);
+  const result: Detected =
+    w.opened && !w.wroteFailed
+      ? { kind: "open" }
+      : await detect(ctx, turn, !!w.wroteFailed);
   if (result.kind === "open" || result.kind === "none") {
     if (turn.status === "waiting") {
       await ctx.db.patch("turns", turn._id, {
@@ -491,8 +505,12 @@ async function supersede(
   }
 }
 
-async function takeOver(ctx: MutationCtx, prompt: Row, role: Role) {
-  const turn = await turnOf(ctx, prompt);
+async function takeOver(
+  ctx: MutationCtx,
+  prompt: Row,
+  role: Role,
+  turn: Turn | null,
+) {
   if (!live(turn) || !anchors(turn, prompt)) return;
   if (role.kind === "holder" && role.turn._id === turn._id) return;
   await handOff(ctx, turn, { end: "takenOver", byOwnJob: false });
@@ -512,6 +530,8 @@ export type SaveTurn = {
   after?: (
     saved: Row[],
     streamId?: Id<"streamingMessages">,
+    // The stream the save itself finished or aborted.
+    finished?: Id<"streamingMessages">,
   ) => Promise<{ jobId?: string; turn?: TurnInfo }>;
 };
 
@@ -569,13 +589,10 @@ export async function planSave(
   }
   if (!caller && !args.promptMessage?.turnId) return { pending };
   const prompt = args.promptMessage ?? null;
-  const role = await roleOf(
-    ctx,
-    caller,
-    prompt ? await turnOf(ctx, prompt) : null,
-  );
+  const promptTurn = prompt ? await turnOf(ctx, prompt) : null;
+  const role = await roleOf(ctx, caller, promptTurn);
   if (role.kind === "revoked") throw new Error(REFUSED);
-  if (prompt && beginning) await takeOver(ctx, prompt, role);
+  if (prompt && beginning) await takeOver(ctx, prompt, role, promptTurn);
   if (role.kind !== "holder") return { pending };
   const turn = role.turn;
   const own = caller!;
@@ -583,7 +600,10 @@ export async function planSave(
     turn.threadId === args.threadId &&
     (prompt ? prompt.order === turn.order : args.order === turn.order);
   if (!atTurn) return { pending, ...lease(turn, own) };
-  const userId = await promptUser(ctx, turn);
+  const userId =
+    prompt?._id === turn.promptMessageId
+      ? prompt.userId
+      : await promptUser(ctx, turn);
   if (prompt && beginning && anchors(turn, prompt)) {
     const [open] = (await members(ctx, turn, "pending")).filter(at(turn));
     if (open) {
@@ -596,7 +616,10 @@ export async function planSave(
     stamp: memberStamp(turn, own, args.threadId),
     streamStamp: { turnId: turn._id, jobId: own },
     after: async () => {
-      await settle(ctx, turn._id, { byApp: false });
+      await settle(ctx, beginning ? turn : turn._id, {
+        byApp: false,
+        ...(beginning ? { opened: true as const } : {}),
+      });
       return beginning ? { turn: turnInfo(turn, own) } : {};
     },
   };
@@ -639,19 +662,28 @@ function planFill(ctx: MutationCtx, pending: Row, write: Write): SaveTurn {
       write.as === "turn"
         ? { turnId: write.turn._id, jobId: write.caller }
         : undefined,
-    after: async (saved) => {
+    after: async (saved, _streamId, finished) => {
       const row = saved.find((doc) => doc._id === pending._id);
       const carried = saved.some(
         (doc) => doc._id !== pending._id && doc.streamId === pending.streamId,
       );
-      if (pending.streamId && row && row.status !== "pending" && !carried) {
-        const stream = await ctx.db.get("streamingMessages", pending.streamId);
-        if (stream) {
-          await closeStream(ctx, stream, row.status === "success", "Filled");
-        }
+      if (
+        pending.streamId &&
+        pending.streamId !== finished &&
+        row &&
+        row.status !== "pending" &&
+        !carried
+      ) {
+        await closeStream(
+          ctx,
+          pending.streamId,
+          row.status === "success",
+          "Filled",
+        );
       }
-      if (turnId) {
-        await settle(ctx, turnId, {
+      const turn = write.as === "turn" ? write.turn : write.liveTurn;
+      if (turn) {
+        await settle(ctx, turn, {
           byApp: write.as === "app",
           wroteFailed: saved.some((doc) => doc.status === "failed"),
         });
@@ -693,7 +725,9 @@ async function planSend(
         [...saved].reverse().find((row) => row.status !== "pending") ??
         saved[0];
       if (!prompt) throw new Error("A send needs a prompt to answer");
+      const jobId = await schedule(ctx, args, prompt._id);
       const turnId = await ctx.db.insert("turns", {
+        jobId,
         threadId: args.threadId,
         order: prompt.order,
         promptMessageId: prompt._id,
@@ -705,12 +739,7 @@ async function planSend(
         retries: 0,
         status: "running",
       });
-      const jobId = await schedule(
-        ctx,
-        { _id: turnId, threadId: args.threadId, generate: args.generate },
-        prompt._id,
-      );
-      await ctx.db.patch("turns", turnId, { jobId });
+      await recordJob(ctx, jobId, turnId);
       // Stamped in the save's own transaction: the turn needs the rows' ids.
       const stamped = args.promptMessage
         ? [args.promptMessage, ...saved]
@@ -756,9 +785,10 @@ export async function planStream(
   const position = { order: prompt.order, stepOrder: prompt.stepOrder };
   const caller = await callerJob(ctx);
   if (!caller && !prompt.turnId) return position;
-  const role = await roleOf(ctx, caller, await turnOf(ctx, prompt));
+  const promptTurn = await turnOf(ctx, prompt);
+  const role = await roleOf(ctx, caller, promptTurn);
   if (role.kind === "revoked") throw new Error(REFUSED);
-  await takeOver(ctx, prompt, role);
+  await takeOver(ctx, prompt, role, promptTurn);
   if (role.kind !== "holder") return position;
   return { ...position, turnId: role.turn._id, jobId: caller! };
 }
