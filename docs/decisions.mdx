@@ -137,8 +137,8 @@ it. A choice or score correction with probabilities must give one for every
 option or level, summing to 1. Corrections aren't yet checked for the AI SDK's
 other rules for answers: that a choice is a highest-probability option, a score
 equals the probability-weighted mean, and a box has positive area, as the AI SDK
-doesn't export those checks. A correction that would take the answer's document
-past 1 MiB throws.
+doesn't export those checks: https://github.com/vercel/ai/issues/25554. A
+correction that would take the answer's document past 1 MiB throws.
 
 ## The cache
 
