@@ -572,3 +572,74 @@ describe("streams", () => {
     expect([...cursors.values()]).toEqual([15, 15]);
   });
 });
+
+describe("plain streams with their pending message", () => {
+  test("addMessages createStream starts the pending message's stream, which a plain fill leaves streaming", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const saved = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "Hi." } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+      createStream: { format: "UIMessageChunk" },
+    });
+    const pending = saved.messages[1];
+    const [stream] = await t.query(api.streams.list, { threadId });
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: pending._id as Id<"messages">,
+      messages: [{ message: { role: "assistant", content: "Hello." } }],
+    });
+    expect({
+      stream: [
+        stream.streamId === saved.streamId,
+        stream.order,
+        stream.stepOrder,
+      ],
+      after: (await t.query(api.streams.list, { threadId })).map(
+        (s) => s.status,
+      ),
+    }).toEqual({
+      stream: [true, pending.order, pending.stepOrder],
+      after: ["streaming"],
+    });
+  });
+
+  test("streams.fail ends the stream as aborted with its reason, after its final delta", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    const failed = await t.mutation(api.streams.fail, {
+      streamId,
+      reason: "Broke.",
+      finalDelta: {
+        streamId,
+        start: 0,
+        end: 1,
+        parts: [{ type: "text-delta", id: "a", delta: "Half." }],
+      },
+    });
+    const [stream] = await t.query(api.streams.list, {
+      threadId,
+      statuses: ["aborted"],
+    });
+    const deltas = await t.query(api.streams.listDeltas, {
+      threadId,
+      cursors: [{ streamId, cursor: 0 }],
+    });
+    expect({ failed, status: stream.status, deltas: deltas.length }).toEqual({
+      failed: true,
+      status: "aborted",
+      deltas: 1,
+    });
+  });
+});
