@@ -396,6 +396,12 @@ async function addMessagesHandler(
     requestedOrder === undefined || !pendingMessageId,
     "order and pendingMessageId cannot both be provided",
   );
+  assert(
+    !streamToCreate ||
+      (messages.at(-1)?.status === "pending" &&
+        !(pendingMessageId && messages.length === 1)),
+    "createStream needs a new pending message last",
+  );
   const saved: SavedMessage[] = [];
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
@@ -475,6 +481,7 @@ async function addMessagesHandler(
     stepOrder = maxMessage?.stepOrder ?? -1;
   }
   const toReturn: Doc<"messages">[] = [];
+  let streamId: Id<"streamingMessages"> | undefined;
   if (embeddings) {
     assert(
       embeddings.vectors.length === messages.length,
@@ -575,10 +582,24 @@ async function addMessagesHandler(
       }
       stepOrder = incrementMessagePosition(stepOrder, "stepOrder");
     }
+    if (
+      streamToCreate &&
+      i === messages.length - 1 &&
+      messageDoc.status === "pending"
+    ) {
+      streamId = await createStream(ctx, {
+        ...streamToCreate,
+        threadId,
+        userId,
+        order,
+        stepOrder,
+      });
+    }
     const messageId = await ctx.db.insert("messages", {
       ...messageDoc,
       order,
       stepOrder,
+      streamId,
     });
     if (message.fileIds) {
       await changeRefcount(ctx, [], message.fileIds);
@@ -602,37 +623,11 @@ async function addMessagesHandler(
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
-  const streamId = streamToCreate
-    ? await createStreamWith(ctx, toReturn.at(-1), streamToCreate)
-    : undefined;
   await reportSavedMessages(ctx, onSaveMessages, saved);
   return {
     messages: toReturn.map(publicMessage),
     ...(streamId ? { streamId } : {}),
   };
-}
-
-async function createStreamWith(
-  ctx: MutationCtx,
-  last: Doc<"messages"> | undefined,
-  fields: Pick<
-    Doc<"streamingMessages">,
-    "agentName" | "format" | "model" | "provider" | "providerOptions"
-  >,
-) {
-  assert(
-    last?.status === "pending",
-    "createStream needs the last message to be pending",
-  );
-  const streamId = await createStream(ctx, {
-    ...fields,
-    threadId: last.threadId,
-    order: last.order,
-    stepOrder: last.stepOrder,
-    userId: last.userId,
-  });
-  await ctx.db.patch("messages", last._id, { streamId });
-  return streamId;
 }
 
 // exported for tests
