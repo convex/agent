@@ -1,4 +1,5 @@
 import { stream } from "convex-helpers/server/stream";
+import { deleteTurnsPage, endTurnsForDeleted } from "./turns.js";
 import { nullable } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
 import type { ObjectType } from "convex/values";
@@ -106,6 +107,7 @@ const deleteAllArgs = {
   streamsInProgress: v.optional(v.boolean()),
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),
+  jobsCursor: v.optional(v.string()),
 };
 type DeleteAllArgs = ObjectType<typeof deleteAllArgs>;
 const deleteAllReturns = {
@@ -115,6 +117,7 @@ const deleteAllReturns = {
   streamsInProgress: v.optional(v.boolean()),
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),
+  jobsCursor: v.optional(v.string()),
   isDone: v.boolean(),
 };
 type DeleteAllReturns = ObjectType<typeof deleteAllReturns>;
@@ -156,6 +159,7 @@ async function deleteAllForUserIdBatch(
       streamsInProgress: result.streamsInProgress ?? false,
       streamOrder: result.streamOrder,
       deltaCursor: result.deltaCursor,
+      jobsCursor: result.jobsCursor,
     });
   }
   return result.isDone;
@@ -176,6 +180,7 @@ async function deletePageForUserId(
   let streamsInProgress: boolean = args.streamsInProgress ?? false;
   let streamOrder: number | undefined = args.streamOrder;
   let deltaCursor: string | undefined = args.deltaCursor;
+  let jobsCursor: string | undefined = args.jobsCursor;
 
   // Phase 1: Get a thread to work on if we don't have one
   if (!threadsCursor || !threadInProgress) {
@@ -194,6 +199,7 @@ async function deletePageForUserId(
       streamsInProgress = false;
       streamOrder = undefined;
       deltaCursor = undefined;
+      jobsCursor = undefined;
     } else {
       return {
         isDone: true,
@@ -203,6 +209,7 @@ async function deletePageForUserId(
         streamsInProgress,
         streamOrder,
         deltaCursor,
+        jobsCursor,
       };
     }
   }
@@ -220,15 +227,23 @@ async function deletePageForUserId(
         cursor: deletionCursor(messagesCursor),
       });
     await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
+    if (messages.page.some((m) => m.turnId)) {
+      await endTurnsForDeleted(ctx, messages.page);
+    }
 
-    if (messages.isDone) {
+    const turns = messages.isDone
+      ? await deleteTurnsPage(ctx, threadInProgress!, jobsCursor)
+      : undefined;
+    if (turns?.done) {
       // Messages are done, move to streams deletion phase
       streamsInProgress = true;
       messagesCursor = null;
       streamOrder = undefined;
       deltaCursor = undefined;
+      jobsCursor = undefined;
     } else {
       messagesCursor = messages.continueCursor;
+      jobsCursor = turns?.jobsCursor ?? jobsCursor;
     }
 
     return {
@@ -238,6 +253,7 @@ async function deletePageForUserId(
       streamsInProgress,
       streamOrder,
       deltaCursor,
+      jobsCursor,
       isDone: false,
     };
   }
@@ -270,6 +286,7 @@ async function deletePageForUserId(
     streamsInProgress,
     streamOrder,
     deltaCursor,
+    jobsCursor,
     isDone: false,
   };
 }

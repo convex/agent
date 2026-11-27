@@ -5,7 +5,7 @@ import {
   type FunctionHandle,
   type WithoutSystemFields,
 } from "convex/server";
-import { ConvexError, type ObjectType } from "convex/values";
+import { ConvexError, type ObjectType, v as baseV } from "convex/values";
 import {
   DEFAULT_MESSAGE_RANGE,
   DEFAULT_RECENT_MESSAGES,
@@ -51,13 +51,36 @@ import {
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
   abortById,
+  getStream,
   createStream,
+  endStoppedStream,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
   APPROVAL_LOOKUP_MESSAGES,
   planToolCallResponses,
 } from "../approvals.js";
+import {
+  adoptOpenRow,
+  authorizeEnding,
+  authorizeRow,
+  endStopped,
+  endStoppedInThread,
+  leavePending,
+  stoppedEnding,
+  jobFillTarget,
+  stoppedOpen,
+  endTurnsForDeleted,
+  planResponse,
+  planSave,
+  resolve,
+  retryTurn,
+  type SaveTurn,
+  settle,
+  stopTurns,
+  hold,
+  type TurnInfo,
+} from "./turns.js";
 
 export const vOnSaveMessages = v.optional(v.string());
 
@@ -104,16 +127,28 @@ function publicMessage(message: Doc<"messages">): MessageDoc {
     parentMessageId: _parentMessageId,
     stepId: _stepId,
     files: _files,
+    turnId: _turnId,
+    jobId: _jobId,
     streamId: _streamId,
+    abort: _abort,
     ...doc
   } = withText(message);
   return withDerivedReasoning(doc);
+}
+
+function publicTurn(turn: TurnInfo) {
+  return {
+    promptMessageId: turn.promptMessageId,
+    jobId: turn.jobId as Id<"_scheduled_functions">,
+    saved: turn.saved.map(publicMessage),
+  };
 }
 
 export async function deleteMessage(
   ctx: MutationCtx,
   messageDoc: Doc<"messages">,
 ) {
+  await leavePending(ctx, messageDoc);
   await ctx.db.delete("messages", messageDoc._id);
   if (messageDoc.embeddingId) {
     const { tableName } = getVectorIdInfo(ctx, messageDoc.embeddingId);
@@ -143,8 +178,59 @@ async function abortStreamsForDeleted(
       threadId: message.threadId,
       order: message.order,
       reason: "Message deleted",
+      plainOnly: true,
     });
   }
+}
+
+/** Deleting a plain prompt fails the plain replies pending at its order. */
+async function failPlainReplies(ctx: MutationCtx, deleted: Doc<"messages">[]) {
+  const seen = new Set<string>();
+  for (const row of deleted) {
+    const key = `${row.threadId}:${row.order}`;
+    if (row.message?.role !== "user" || seen.has(key)) continue;
+    seen.add(key);
+    // A pending reply has no tool parts yet, so one index range finds them.
+    const replies = await ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+        q
+          .eq("threadId", row.threadId)
+          .eq("status", "pending")
+          .eq("tool", false)
+          .eq("order", row.order),
+      )
+      .collect();
+    for (const reply of replies) {
+      if (reply.jobId !== undefined) continue;
+      await failReply(ctx, reply, "Message deleted", undefined);
+    }
+  }
+}
+
+/** Deleting a turn's prompt, request or open row ends the turn; a plain stream at the order aborts. */
+export async function endDeleted(
+  ctx: MutationCtx,
+  deleted: (Doc<"messages"> | null)[],
+) {
+  if (deleted.some((m) => m?.turnId)) await endTurnsForDeleted(ctx, deleted);
+  await failPlainReplies(
+    ctx,
+    deleted.filter((m) => m !== null),
+  );
+  await abortStreamsForDeleted(ctx, deleted);
+}
+
+async function closeLinkedStream(
+  ctx: MutationCtx,
+  row: Doc<"messages">,
+  finished: boolean,
+) {
+  if (!row.streamId) return;
+  const stream = await ctx.db.get("streamingMessages", row.streamId);
+  if (stream?.state.kind !== "streaming") return;
+  if (finished) await finishHandler(ctx, stream);
+  else await abortById(ctx, stream, { reason: "Ended" });
 }
 
 export const deleteByIds = mutation({
@@ -164,7 +250,7 @@ export const deleteByIds = mutation({
         return null;
       }),
     );
-    await abortStreamsForDeleted(ctx, deleted);
+    await endDeleted(ctx, deleted);
     const found = deleted.filter((m) => m !== null);
     await reportSavedMessages(
       ctx,
@@ -183,8 +269,9 @@ const STREAM_RECOVERY_FAILURE =
   "Failed to recover persisted assistant stream output";
 
 /**
- * Writes an existing row. A row leaving pending keeps no stream link, and one
- * that fails ends its stream, so nothing streams for a settled row.
+ * Writes an existing row. A row leaving pending keeps no stream link and no
+ * job copy, as only an open row is leased, and one that fails ends its stream,
+ * so nothing streams for a settled row.
  */
 async function writeMessage(
   ctx: MutationCtx,
@@ -196,17 +283,16 @@ async function writeMessage(
     stored.status === "pending" &&
     next.status !== undefined &&
     next.status !== "pending";
+  if (leaves) await leavePending(ctx, stored);
+  const unlinked = leaves ? { streamId: undefined, jobId: undefined } : {};
   if (write === "replace") {
     await ctx.db.replace("messages", stored._id, {
       ...(next as WithoutSystemFields<Doc<"messages">>),
-      streamId: leaves ? undefined : stored.streamId,
+      streamId: stored.streamId,
+      ...unlinked,
     });
   } else {
-    await ctx.db.patch(
-      "messages",
-      stored._id,
-      leaves ? { ...next, streamId: undefined } : next,
-    );
+    await ctx.db.patch("messages", stored._id, { ...next, ...unlinked });
   }
   if (leaves && next.status === "failed") {
     await abortLinkedStream(
@@ -274,7 +360,7 @@ export const deleteByOrder = mutation({
       })
       .take(64);
     await Promise.all(messages.map((m) => deleteMessage(ctx, m)));
-    await abortStreamsForDeleted(ctx, messages);
+    await endDeleted(ctx, messages);
     await reportSavedMessages(
       ctx,
       args.onSaveMessages,
@@ -326,14 +412,60 @@ const addMessagesArgs = {
       ]),
     ),
   ),
+  // A handle to an action taking { threadId, promptMessageId }, scheduled to
+  // answer the last message: the save starts a durable turn.
+  generate: v.optional(v.string()),
 };
+export const vJobId = baseV.id("_scheduled_functions");
 export const addMessages = mutation({
   args: addMessagesArgs,
   handler: (ctx, args) => addMessagesHandler(ctx, args),
   returns: v.object({
     messages: v.array(vMessageDoc),
     streamId: v.optional(v.id("streamingMessages")),
+    // The job a save with `generate` scheduled.
+    jobId: v.optional(vJobId),
+    // Only for the turn's own job, when this save belongs to its turn.
+    turn: v.optional(
+      v.object({
+        promptMessageId: v.id("messages"),
+        jobId: vJobId,
+        saved: v.array(vMessageDoc),
+      }),
+    ),
   }),
+});
+
+export const retryGeneration = mutation({
+  args: {
+    threadId: v.id("threads"),
+    promptMessageId: v.optional(v.id("messages")),
+    maxRetries: v.optional(v.number()),
+  },
+  returns: v.union(v.null(), vJobId),
+  handler: async (ctx, args) =>
+    (await retryTurn(ctx, args)) as Id<"_scheduled_functions"> | null,
+});
+
+export const abortGeneration = mutation({
+  args: {
+    threadId: v.id("threads"),
+    promptMessageId: v.optional(v.id("messages")),
+    reason: v.optional(v.string()),
+  },
+  returns: v.boolean(),
+  handler: (ctx, { reason, ...args }) => stopTurns(ctx, args, reason),
+});
+
+export const _recover = internalMutation({
+  args: { ...addMessagesArgs, turnId: v.id("turns") },
+  returns: v.object({ messages: v.array(vMessageDoc) }),
+  handler: async (ctx, { turnId, ...args }) => {
+    const { messages } = await addMessagesHandler(ctx, args, undefined, {
+      stamp: () => ({ turnId }),
+    });
+    return { messages };
+  },
 });
 
 function incrementMessagePosition(value: number, field: "order" | "stepOrder") {
@@ -349,6 +481,7 @@ async function addMessagesHandler(
   args: ObjectType<typeof addMessagesArgs>,
   // For a caller that already read the prompt and its order's last step.
   prompt?: { message: Doc<"messages">; lastStepOrder: number },
+  turnPlan?: SaveTurn,
 ) {
   let userId = args.userId;
   const threadId = args.threadId;
@@ -370,11 +503,18 @@ async function addMessagesHandler(
     hideFromUserIdSearch,
     onSaveMessages,
     createStream: streamToCreate,
+    generate,
     ...rest
   } = args;
-  const promptMessage =
-    prompt?.message ??
-    (promptMessageId && (await ctx.db.get("messages", promptMessageId)));
+  // A job's fill of its own open row is placed by that row; its prompt isn't read.
+  const target = failPendingSteps
+    ? undefined
+    : await jobFillTarget(ctx, threadId, pendingMessageId);
+  const own = target?.own ? target.row : null;
+  const promptMessage = own
+    ? null
+    : (prompt?.message ??
+      (promptMessageId && (await resolve(ctx, threadId, promptMessageId))));
   assert(
     requestedOrder === undefined ||
       requestedOrder === "next" ||
@@ -397,6 +537,43 @@ async function addMessagesHandler(
         !(pendingMessageId && messages.length === 1)),
     "createStream needs a new pending message last",
   );
+  const plan =
+    turnPlan ??
+    (await planSave(ctx, {
+      threadId,
+      generate,
+      promptMessage: promptMessage || null,
+      pendingMessageId,
+      pendingMessage: target?.row,
+      order: requestedOrder,
+      messages,
+    }));
+  if (plan.stopped) return { messages: [publicMessage(plan.pending!)] };
+  if (plan.userId !== undefined && !args.userId) userId = plan.userId;
+  if (messages.some((m) => m.message.role === "user")) {
+    await endStoppedInThread(ctx, threadId);
+  }
+  if (plan.adopt) {
+    const adopted = await adoptOpenRow(
+      ctx,
+      plan.adopt,
+      streamToCreate &&
+        ((stamp, row) =>
+          createStream(ctx, {
+            ...streamToCreate,
+            threadId,
+            userId: row.userId,
+            order: row.order,
+            stepOrder: row.stepOrder,
+            ...stamp,
+          })),
+    );
+    return {
+      messages: [publicMessage(adopted.row)],
+      ...(adopted.streamId ? { streamId: adopted.streamId } : {}),
+      turn: publicTurn(adopted.turn),
+    };
+  }
   const saved: SavedMessage[] = [];
   if (failPendingSteps) {
     assert(args.threadId, "threadId is required to fail pending steps");
@@ -407,9 +584,12 @@ async function addMessagesHandler(
       )
       .order("desc")
       .take(100);
-    const restarted = pendingMessages
+    const atPrompt = pendingMessages
       .filter((m) => !promptMessage || m.order === promptMessage.order)
       .filter((m) => !pendingMessageId || m._id !== pendingMessageId);
+    for (const m of atPrompt) if (stoppedOpen(m)) await endStopped(ctx, m);
+    // A row with a job copy is a live turn's, which only its turn ends.
+    const restarted = atPrompt.filter((m) => m.jobId === undefined);
     for (const m of restarted.filter((m) => m.streamId)) {
       await failReply(ctx, m, "Restarting", onSaveMessages);
     }
@@ -436,7 +616,7 @@ async function addMessagesHandler(
     );
   }
   let order, stepOrder;
-  let pendingMessage: Doc<"messages"> | null = null;
+  let pendingMessage: Doc<"messages"> | null = plan.pending ?? null;
   let fail = false;
   let error: string | undefined;
   const startsAtNextOrder = requestedOrder === "next";
@@ -450,7 +630,7 @@ async function addMessagesHandler(
     order = explicitOrder;
     const maxMessage = await getMaxMessage(ctx, threadId, order);
     stepOrder = maxMessage?.stepOrder ?? -1;
-  } else if (promptMessageId) {
+  } else if (promptMessageId && !own) {
     if (!promptMessage && abandonIfPromptMissing) {
       await reportSavedMessages(ctx, onSaveMessages, saved);
       return { messages: [] };
@@ -461,12 +641,9 @@ async function addMessagesHandler(
       error = promptMessage.error ?? error ?? "The prompt message failed";
     }
     order = promptMessage.order;
-    if (pendingMessageId) {
-      pendingMessage = await ctx.db.get("messages", pendingMessageId);
-    }
     // A pending row filled at its prompt is read already: only what follows it is read.
     const after =
-      pendingMessage?.order === order ? pendingMessage.stepOrder : undefined;
+      plan.pending?.order === order ? plan.pending.stepOrder : undefined;
     // Defend against there being existing messages with this parent.
     stepOrder =
       prompt?.lastStepOrder ??
@@ -475,7 +652,10 @@ async function addMessagesHandler(
       promptMessage.stepOrder;
   } else if (pendingMessageId) {
     // What fills a pending message stays in its turn.
-    pendingMessage = await ctx.db.get("messages", pendingMessageId);
+    pendingMessage =
+      plan.pending !== undefined
+        ? plan.pending
+        : await ctx.db.get("messages", pendingMessageId);
     assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
     order = pendingMessage.order;
     stepOrder =
@@ -494,7 +674,11 @@ async function addMessagesHandler(
       "embeddings.vectors.length must match messages.length",
     );
   }
-  for (let i = 0; i < messages.length; i++) {
+  // A stopped job's ending keeps its steps, as the AI SDK keeps an aborted
+  // one, and opens no next step.
+  let saving = messages.length;
+  while (plan.ending && messages[saving - 1]?.status === "pending") saving--;
+  for (let i = 0; i < saving; i++) {
     const message = messages[i];
     let embeddingId: VectorTableId | undefined;
     if (
@@ -532,18 +716,22 @@ async function addMessagesHandler(
     // If there is a pending message, we replace that one with the first message
     // and subsequent ones will follow the regular order/subOrder advancement.
     if (i === 0 && pendingMessageId) {
-      pendingMessage ??= await ctx.db.get("messages", pendingMessageId);
+      pendingMessage ??=
+        plan.pending === undefined
+          ? await ctx.db.get("messages", pendingMessageId)
+          : null;
       assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
       if (pendingMessage.status === "success") {
         throw new ConvexError(
           `Message ${pendingMessageId} can't be filled: its status is "success", not "pending"`,
         );
       }
-      if (pendingMessage.status === "failed") {
+      if (pendingMessage.status === "failed" || plan.ending) {
         fail = true;
-        error =
-          pendingMessage.error ??
-          `Trying to update a message that failed: ${pendingMessageId}`;
+        error = plan.ending
+          ? stoppedEnding(pendingMessage).error
+          : (pendingMessage.error ??
+            `Trying to update a message that failed: ${pendingMessageId}`);
         messageDoc.status = "failed";
         messageDoc.error = error;
       }
@@ -554,6 +742,9 @@ async function addMessagesHandler(
           message.fileIds,
         );
       }
+      const { at: _at, ...stamp } =
+        plan.stamp?.(pendingMessage.order, messageDoc.status, pendingMessage) ??
+        {};
       await writeMessage(
         ctx,
         pendingMessage,
@@ -561,9 +752,16 @@ async function addMessagesHandler(
           ...messageDoc,
           order: pendingMessage.order,
           stepOrder: pendingMessage.stepOrder,
+          abort: pendingMessage.abort,
+          ...stamp,
         },
         "replace",
       );
+      if (stamp.turnId !== pendingMessage.turnId) {
+        await hold(ctx, { ...stamp, at: _at }, pendingMessage, {
+          messageId: pendingMessage._id,
+        });
+      }
       const replaced = (await ctx.db.get("messages", pendingMessage._id))!;
       toReturn.push(replaced);
       saved.push({ kind: "update", doc: replaced });
@@ -574,7 +772,7 @@ async function addMessagesHandler(
     } else if (message.message.role === "user") {
       if (
         (explicitOrder !== undefined && order === explicitOrder) ||
-        (promptMessage && promptMessage.order === order) ||
+        ((promptMessage || own) && (promptMessage || own)!.order === order) ||
         (!promptMessageId && pendingMessage?.order === order)
       ) {
         // Avoid colliding with a later order when saving from an older one.
@@ -595,6 +793,7 @@ async function addMessagesHandler(
     }
     if (
       streamToCreate &&
+      !plan.ending &&
       i === messages.length - 1 &&
       messageDoc.status === "pending"
     ) {
@@ -604,19 +803,27 @@ async function addMessagesHandler(
         userId,
         order,
         stepOrder,
+        ...plan.streamStamp,
       });
     }
+    const { at: _at, ...stored } = plan.stamp?.(order, messageDoc.status) ?? {};
+    const stamp = { ...stored, at: _at };
     const messageId = await ctx.db.insert("messages", {
       ...messageDoc,
       order,
       stepOrder,
-      // A step's save moves its stream's link to the pending message it adds.
-      streamId:
-        streamId ??
-        (i === messages.length - 1 && messageDoc.status === "pending"
-          ? pendingMessage?.streamId
-          : undefined),
+      ...(plan.unlinked
+        ? {}
+        : {
+            streamId:
+              streamId ??
+              (i === messages.length - 1 && messageDoc.status === "pending"
+                ? plan.carry
+                : undefined),
+          }),
+      ...stored,
     });
+    await hold(ctx, stamp, { threadId, order }, { messageId });
     if (message.fileIds) {
       await changeRefcount(ctx, [], message.fileIds);
     }
@@ -628,21 +835,26 @@ async function addMessagesHandler(
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
   const failed = toReturn.find((m) => m.status === "failed");
-  if (finishStreamId && failed) {
-    await abortById(ctx, {
-      streamId: finishStreamId,
+  if (finishStreamId && !plan.ending && failed) {
+    await abortById(ctx, await getStream(ctx, finishStreamId), {
       reason: failed.error ?? "The generation failed",
+      lease: true,
     });
-  } else if (finishStreamId) {
-    await finishHandler(ctx, {
-      streamId: finishStreamId,
+  } else if (finishStreamId && !plan.ending) {
+    await finishHandler(ctx, await getStream(ctx, finishStreamId), {
+      lease: true,
     });
     await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
   }
+  const { jobId, turn } = plan.after
+    ? await plan.after(toReturn, streamId, finishStreamId)
+    : {};
   await reportSavedMessages(ctx, onSaveMessages, saved);
   return {
     messages: toReturn.map(publicMessage),
     ...(streamId ? { streamId } : {}),
+    ...(jobId ? { jobId: jobId as Id<"_scheduled_functions"> } : {}),
+    ...(turn ? { turn: publicTurn(turn) } : {}),
   };
 }
 
@@ -733,10 +945,42 @@ export const finalizeMessage = mutation({
       if (!holder) return null;
       stored = holder;
     }
-    if (result.status === "failed") {
-      await failReply(ctx, stored, result.error, onSaveMessages);
-    } else {
-      await finalizePending(ctx, stored, result, onSaveMessages);
+    const write = await authorizeEnding(ctx, stored);
+    if (!stored.turnId) {
+      if (result.status === "failed") {
+        await failReply(ctx, stored, result.error, onSaveMessages);
+        return null;
+      }
+      return finalizePending(ctx, stored, result, onSaveMessages);
+    }
+    if (write.as === "stopped") return null;
+    if (write.as === "ending") {
+      // A stopped reply ends as stopped, with what it streamed.
+      await finalizePending(
+        ctx,
+        stored,
+        stoppedEnding(stored),
+        onSaveMessages,
+        [...(stored.streamId ? [stored.streamId] : [])],
+      );
+      if (stored.streamId) await endStoppedStream(ctx, stored.streamId);
+      return null;
+    }
+    await finalizePending(
+      ctx,
+      stored,
+      result,
+      onSaveMessages,
+      stored.streamId ? [stored.streamId] : [],
+    );
+    await closeLinkedStream(ctx, stored, result.status === "success");
+    const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
+    if (turnId) {
+      await settle(ctx, turnId, {
+        byApp: write.as === "app",
+        wroteFailed: result.status === "failed",
+        reason: result.status === "failed" ? result.error : undefined,
+      });
     }
     return null;
   },
@@ -764,13 +1008,15 @@ async function abortLinkedStream(
   reason: string,
 ) {
   const stream = streamId && (await ctx.db.get("streamingMessages", streamId));
-  if (stream && stream.state.kind === "streaming") {
-    await abortById(ctx, { streamId: stream._id, reason });
-  }
+  if (stream) await abortById(ctx, stream, { reason });
 }
 
-/** Settles a pending message: recovers what its streams carried, or marks it. */
-async function finalizePending(
+/**
+ * Settles a pending message: recovers what its streams carried, or marks it.
+ * A durable row passes its own stream, so another attempt's stream at its
+ * position is never read into it.
+ */
+export async function finalizePending(
   ctx: MutationCtx,
   stored: Doc<"messages">,
   result: { status: "success" } | { status: "failed"; error: string },
@@ -784,7 +1030,7 @@ async function finalizePending(
       "Trying to finalize a message that's already",
       message.status,
     );
-    return;
+    return null;
   }
   // See if we can add any in-progress data
   if (!message.message?.content.length) {
@@ -801,25 +1047,28 @@ async function finalizePending(
         result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
         onSaveMessages,
       );
-      return;
+      return null;
     }
     if (messages.length > 0) {
       // Nested so an oversized recovered message rolls back on its own and
       // the pending message is marked failed instead of stuck.
       let recovered;
       try {
-        ({ messages: recovered } = await ctx.runMutation(
-          api.messages.addMessages,
-          {
-            messages,
-            threadId: message.threadId,
-            agentName: message.agentName,
-            failPendingSteps: false,
-            pendingMessageId: messageId,
-            userId: message.userId,
-            embeddings: undefined,
-          },
-        ));
+        const recovery = {
+          messages,
+          threadId: message.threadId,
+          agentName: message.agentName,
+          failPendingSteps: false,
+          pendingMessageId: messageId,
+          userId: message.userId,
+          embeddings: undefined,
+        };
+        ({ messages: recovered } = message.turnId
+          ? await ctx.runMutation(internal.messages._recover, {
+              ...recovery,
+              turnId: message.turnId,
+            })
+          : await ctx.runMutation(api.messages.addMessages, recovery));
       } catch (error) {
         console.error("Failed to persist recovered assistant streams", error);
         await markPendingMessageFailed(
@@ -828,7 +1077,7 @@ async function finalizePending(
           result.status === "failed" ? result.error : STREAM_RECOVERY_FAILURE,
           onSaveMessages,
         );
-        return;
+        return null;
       }
       await releaseStreamFileOwnershipByIds(ctx, streamsToRelease);
       // Reported here, not by the nested save, so a report that can't be
@@ -841,7 +1090,7 @@ async function finalizePending(
           doc,
         })),
       );
-      return;
+      return null;
     }
   }
   if (result.status === "failed") {
@@ -852,6 +1101,7 @@ async function finalizePending(
       { kind: "update", doc: { ...message, status: "success" } },
     ]);
   }
+  return null;
 }
 
 export const updateMessage = mutation({
@@ -899,7 +1149,20 @@ export const updateMessage = mutation({
       }
       patch.embeddingId = undefined;
     }
+
+    const write = await authorizeRow(ctx, message);
     await writeMessage(ctx, message, patch);
+    const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
+    if (turnId && patch.status && patch.status !== "pending") {
+      await closeLinkedStream(ctx, message, patch.status === "success");
+    }
+    if (turnId) {
+      await settle(ctx, turnId, {
+        byApp: write.as === "app",
+        wroteFailed: patch.status === "failed",
+        reason: patch.error,
+      });
+    }
     const updated = (await ctx.db.get("messages", args.messageId))!;
     await reportSavedMessages(ctx, args.onSaveMessages, [
       { kind: "update", doc: updated },
@@ -937,8 +1200,13 @@ export const respondToToolCallApprovals = mutation({
       ),
     ),
     onSaveMessages: vOnSaveMessages,
+    // Continues the turn the request belongs to once its step is answered.
+    generate: v.optional(v.string()),
   },
-  returns: v.object({ messageId: v.id("messages") }),
+  returns: v.object({
+    messageId: v.id("messages"),
+    jobId: v.optional(vJobId),
+  }),
   handler: async (ctx, args) => {
     const read: Doc<"messages">[] = [];
     const plan = await planToolCallResponses(
@@ -950,6 +1218,10 @@ export const respondToToolCallApprovals = mutation({
     // Read newest first through the request, so the first message read at
     // the request's order is that order's last step.
     const last = read.find((doc) => doc.order === request.order)!;
+    const turnPlan =
+      request.turnId || args.generate !== undefined
+        ? await planResponse(ctx, request, args.generate)
+        : undefined;
     const saved = await addMessagesHandler(
       ctx,
       {
@@ -961,8 +1233,12 @@ export const respondToToolCallApprovals = mutation({
         onSaveMessages: args.onSaveMessages,
       },
       { message: request, lastStepOrder: last.stepOrder },
+      turnPlan,
     );
-    return { messageId: saved.messages[0]._id as Id<"messages"> };
+    return {
+      messageId: saved.messages[0]._id as Id<"messages">,
+      ...(saved.jobId ? { jobId: saved.jobId } : {}),
+    };
   },
 });
 
@@ -1080,6 +1356,8 @@ export const cloneMessageBatch = internalMutation({
               "order",
               "embeddingId",
               "parentMessageId",
+              "turnId",
+              "jobId",
               "streamId",
             ]),
             embeddingId,
@@ -1160,13 +1438,11 @@ async function listMessagesByThreadIdHandler(
   { keepContinuedOrderTools = false } = {},
 ) {
   const statuses = args.statuses ?? vMessageStatus.members.map((m) => m.value);
-  const last =
+  const found =
     args.upToAndIncludingMessageId &&
     (await ctx.db.get("messages", args.upToAndIncludingMessageId));
-  assert(
-    !last || last.threadId === args.threadId,
-    "upToAndIncludingMessageId must be a message in the thread",
-  );
+  // Another thread's message reads as missing.
+  const last = found && found.threadId === args.threadId ? found : null;
   const toolOptions = args.excludeToolMessages ? [false] : [true, false];
   const order = args.order ?? "desc";
   const streams = toolOptions.flatMap((tool) =>

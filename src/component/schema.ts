@@ -69,8 +69,13 @@ export const schema = defineSchema({
     // their text: the length of each text part's text, or of a string content.
     textLengths: v.optional(v.array(v.number())),
 
+    // The durable turn this row belongs to, stamped when it is inserted.
+    turnId: v.optional(v.id("turns")),
+    // While pending: the job that may write it, always the turn's job.
+    jobId: v.optional(v.string()),
     // The stream this row's text comes from while it is pending.
     streamId: v.optional(v.id("streamingMessages")),
+    abort: v.optional(v.object({ reason: v.string() })),
   })
     // Allows finding successful visible messages in order
     // Also surface pending messages separately to e.g. stream
@@ -137,8 +142,14 @@ export const schema = defineSchema({
         kind: v.literal("aborted"),
         reason: v.string(),
         cleanupFnId: v.optional(v.id("_scheduled_functions")),
+        // Kept by a stop that leaves the reply to its job, until it ends.
+        timeoutFnId: v.optional(v.id("_scheduled_functions")),
       }),
     ),
+    turnId: v.optional(v.id("turns")),
+    // Set at insert and never changed: every change of the turn's job closes
+    // the turn's open streams first.
+    jobId: v.optional(v.string()),
   })
     // There should only be one per "order" index
     // If another exists, it's deleted and replaced
@@ -148,6 +159,61 @@ export const schema = defineSchema({
       "order",
       "stepOrder",
     ]),
+
+  // A durable generation: the prompt it answers and the job that may write it.
+  turns: defineTable({
+    threadId: v.id("threads"),
+    order: v.number(),
+    // The lowest order its send saved: a pending row may sit before the prompt.
+    fromOrder: v.number(),
+    promptMessageId: v.id("messages"),
+    // Where the current job starts: the prompt, or the response a
+    // continuation resumes from.
+    anchorMessageId: v.id("messages"),
+    anchorStepOrder: v.number(),
+    requestMessageId: v.optional(v.id("messages")),
+    generate: v.string(),
+    retries: v.number(),
+    jobId: v.optional(v.string()),
+    status: v.union(
+      v.literal("running"),
+      v.literal("waiting"),
+      v.literal("done"),
+    ),
+    outcome: v.optional(v.string()),
+  }).index("threadId_status_order", ["threadId", "status", "order"]),
+
+  // An open row a stop left to its running job, by the thread the row lives
+  // in, so that thread's next prompt ends it. Deleted by whatever takes the
+  // row out of pending.
+  leftOpen: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+  })
+    .index("threadId", ["threadId"])
+    .index("messageId", ["messageId"]),
+
+  // A turn's rows and streams its job opened outside its thread from its
+  // fromOrder. Written at insert; the rest of a turn is found through its
+  // thread's own indexes.
+  holdings: defineTable({
+    turnId: v.id("turns"),
+    // The turn's thread, so deleting it deletes these.
+    threadId: v.id("threads"),
+    messageId: v.optional(v.id("messages")),
+    streamId: v.optional(v.id("streamingMessages")),
+  })
+    .index("turnId", ["turnId"])
+    .index("threadId", ["threadId"]),
+
+  // Every job a turn ever scheduled, so a replaced job reads as replaced.
+  jobs: defineTable({
+    jobId: v.string(),
+    turnId: v.id("turns"),
+    threadId: v.id("threads"),
+  })
+    .index("jobId", ["jobId"])
+    .index("threadId", ["threadId"]),
 
   streamDeltas: defineTable({
     streamId: v.id("streamingMessages"),
