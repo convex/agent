@@ -1,0 +1,79 @@
+# Asks agathareview.com to review each pull request's head. Copy this file to
+# .github/workflows/agatha.yml in a repo Agatha's operator has added
+# (repos:add with `github`); see convex/pullRequests.ts.
+#
+# The job proves which repo it runs in with GitHub's OIDC token, so the repo
+# holds no Agatha secret. It never checks out or runs the PR's code: it
+# fetches the PR's commits, pushes them to Agatha's copy of the repo and asks
+# for a review. Every PR value reaches the shell through env, never through
+# `${{ }}` in the script.
+#
+# It runs on pull_request, so PRs from forks get no OIDC token and aren't
+# reviewed. A PR from a branch in this repo is reviewed, since its author
+# could push here; a bot's (Renovate, Dependabot) only once a maintainer adds
+# the `agatha` label. The job doesn't check author_association: the event
+# reports a private org member as CONTRIBUTOR.
+name: Agatha
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: agatha-${{ github.event.pull_request.number }}
+
+jobs:
+  review:
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.pull_request.user.type != 'Bot' ||
+      contains(github.event.pull_request.labels.*.name, 'agatha'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ask Agatha to review this pull request
+        env:
+          AGATHA: https://agathareview.com
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          token=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AGATHA" | jq -r .value)
+          agatha() {
+            curl -sS --fail-with-body -X POST "$AGATHA/agatha/github/$1" \
+              -H "Authorization: Bearer $token" -H "Content-Type: application/json" -d "$2"
+          }
+
+          # The PR head with its full history, and the base it's merged into.
+          git init -q pr && cd pr
+          git fetch -q --no-tags "https://github.com/$REPO" "+refs/pull/$PR/head:refs/agatha/head" "$BASE_SHA"
+          [ "$(git rev-parse refs/agatha/head)" = "$HEAD_SHA" ] || { echo "the PR moved on; the next run reviews it"; exit 0; }
+          base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+
+          # The push URL holds a write token: git gets it as a header for that
+          # host only, through env, never on a command line.
+          target=$(agatha push-url "$(jq -n --argjson pr "$PR" '{pr: $pr}')")
+          url=$(jq -r .url <<<"$target")
+          branch=$(jq -r .branch <<<"$target")
+          host=$(node -e 'const u = new URL(process.argv[1]); console.log(u.host)' "$url")
+          basic=$(node -e 'const u = new URL(process.argv[1]); console.log(Buffer.from(decodeURIComponent(u.username) + ":" + decodeURIComponent(u.password)).toString("base64"))' "$url")
+          echo "::add-mask::$basic"
+          remote=$(node -e 'const u = new URL(process.argv[1]); u.username = ""; u.password = ""; console.log(u.toString())' "$url")
+          GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://$host/.extraheader" \
+            GIT_CONFIG_VALUE_0="Authorization: Basic $basic" GIT_TERMINAL_PROMPT=0 \
+            git push -q "$remote" "+$HEAD_SHA:refs/heads/$branch"
+
+          agatha review "$(jq -n --argjson pr "$PR" --arg base "$base" --arg head "$HEAD_SHA" \
+            --arg title "$TITLE" --arg body "${BODY:-}" '{pr: $pr, base: $base, head: $head, title: $title, body: $body}')"
+          echo
+          echo "Agatha is reviewing $base..$HEAD_SHA; its findings are emailed to the repo's watchers."
