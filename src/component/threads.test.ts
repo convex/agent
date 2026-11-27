@@ -660,13 +660,14 @@ test("deleting a thread, or its user's data, deletes its turns and their jobs", 
   );
   const send = async (userId?: string) => {
     const thread = await t.mutation(api.threads.createThread, { userId });
+    const threadId = thread._id as Id<"threads">;
     await t.mutation(api.messages.addMessages, {
-      threadId: thread._id,
+      threadId,
       userId,
       messages: [{ message: { role: "user", content: "Go." } }],
       generate,
     });
-    return thread._id;
+    return threadId;
   };
   const left = () =>
     t.run(async (ctx) => ({
