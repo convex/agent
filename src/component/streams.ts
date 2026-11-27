@@ -345,7 +345,7 @@ export async function abortStreamsAtOrder(
     )
     .take(100);
   for (const stream of streams) {
-    await abortById(ctx, { streamId: stream._id, reason: args.reason });
+    await settleStream(ctx, stream, { kind: "aborted", reason: args.reason });
   }
   return streams.length > 0;
 }
@@ -374,20 +374,53 @@ export async function abortById(
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
   },
 ) {
-  const stream = await ctx.db.get("streamingMessages", args.streamId);
+  return settleStream(
+    ctx,
+    await getStream(ctx, args.streamId),
+    { kind: "aborted", reason: args.reason },
+    args.finalDelta,
+  );
+}
+
+export async function getStream(
+  ctx: MutationCtx,
+  streamId: Id<"streamingMessages">,
+) {
+  const stream = await ctx.db.get("streamingMessages", streamId);
   if (!stream) {
-    throw new Error(`Stream not found: ${args.streamId}`);
+    throw new Error(`Stream not found: ${streamId}`);
   }
-  if (args.finalDelta) {
-    await ctx.db.insert("streamDeltas", args.finalDelta);
+  return stream;
+}
+
+/**
+ * Ends a stream that is still streaming, writing its final delta. One that
+ * already ended is left as it is and gets no delta, since a finish can race
+ * the stream's timeout.
+ */
+export async function settleStream(
+  ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
+  end:
+    | { kind: "finished"; endedAt: number }
+    | { kind: "aborted"; reason: string },
+  finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>,
+) {
+  if (finalDelta && finalDelta.streamId !== stream._id) {
+    throw new Error(
+      `Final delta is for stream ${finalDelta.streamId}, not ${stream._id}`,
+    );
   }
   if (stream.state.kind !== "streaming") {
     return false;
   }
+  if (finalDelta) {
+    await ctx.db.insert("streamDeltas", finalDelta);
+  }
   await cleanupTimeoutFn(ctx, stream);
-  const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
-  await ctx.db.patch("streamingMessages", args.streamId, {
-    state: { kind: "aborted", reason: args.reason, cleanupFnId },
+  const cleanupFnId = await scheduleStreamDeletion(ctx, stream._id);
+  await ctx.db.patch("streamingMessages", stream._id, {
+    state: { ...end, cleanupFnId },
   });
   return true;
 }
@@ -424,24 +457,13 @@ export async function finishHandler(
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
   },
 ) {
-  if (args.finalDelta) {
-    await ctx.db.insert("streamDeltas", args.finalDelta);
-  }
-  const stream = await ctx.db.get("streamingMessages", args.streamId);
-  if (!stream) {
-    throw new Error(`Stream not found: ${args.streamId}`);
-  }
-  if (stream.state.kind !== "streaming") {
+  const stream = await getStream(ctx, args.streamId);
+  const end = { kind: "finished" as const, endedAt: Date.now() };
+  if (!(await settleStream(ctx, stream, end, args.finalDelta))) {
     console.warn(
       `Stream trying to finish ${args.streamId} but is ${stream.state.kind}`,
     );
-    return;
   }
-  await cleanupTimeoutFn(ctx, stream);
-  const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
-  await ctx.db.patch("streamingMessages", args.streamId, {
-    state: { kind: "finished", endedAt: Date.now(), cleanupFnId },
-  });
 }
 
 export const heartbeat = mutation({

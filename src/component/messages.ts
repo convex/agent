@@ -47,10 +47,10 @@ import { changeRefcount } from "./files.js";
 import { leaveOutText, withText } from "../messageText.js";
 import {
   getStreamingMessagesWithMetadata,
-  finishHandler,
+  getStream,
   releaseStreamFileOwnershipByIds,
   abortStreamsAtOrder,
-  abortById,
+  settleStream,
 } from "./streams.js";
 import { partial } from "convex-helpers/validators";
 import {
@@ -532,17 +532,29 @@ async function addMessagesHandler(
   }
   // Atomically finish the stream if requested, preventing UI flickering
   // from separate mutations for message save and stream finish (issue #181).
-  const failed = toReturn.find((m) => m.status === "failed");
-  if (finishStreamId && failed) {
-    await abortById(ctx, {
-      streamId: finishStreamId,
-      reason: failed.error ?? "The generation failed",
-    });
-  } else if (finishStreamId) {
-    await finishHandler(ctx, {
-      streamId: finishStreamId,
-    });
-    await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
+  if (finishStreamId) {
+    const stream = await getStream(ctx, finishStreamId);
+    const first = toReturn[0];
+    assert(first, `No message saved to finish stream ${finishStreamId} with`);
+    // A stream carries every step of its generation, so its stepOrder can't
+    // tie it to one message.
+    assert(
+      stream.threadId === first.threadId && stream.order === first.order,
+      `Stream ${finishStreamId} does not belong to message ${first._id}`,
+    );
+    const failed = toReturn.find((m) => m.status === "failed");
+    if (failed) {
+      await settleStream(ctx, stream, {
+        kind: "aborted",
+        reason: failed.error ?? "The generation failed",
+      });
+    } else {
+      await settleStream(ctx, stream, {
+        kind: "finished",
+        endedAt: Date.now(),
+      });
+      await releaseStreamFileOwnershipByIds(ctx, [finishStreamId]);
+    }
   }
   await reportSavedMessages(ctx, onSaveMessages, saved);
   return { messages: toReturn.map(publicMessage) };
