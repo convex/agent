@@ -197,7 +197,7 @@ test("a send's job owns its turn: its writes land, the app's writes into its str
     retry: await s.retry(),
     stop: await s.stop(),
   }).toEqual({
-    turn: { promptMessageId: s.ids.promptMessageId, jobId: s.jobId },
+    turn: { promptMessageId: s.ids.promptMessageId, jobId: s.jobId, saved: [] },
     own: true,
     app: false,
     rows: [
