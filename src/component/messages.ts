@@ -585,10 +585,14 @@ async function addMessagesHandler(
       error = promptMessage.error ?? error ?? "The prompt message failed";
     }
     order = promptMessage.order;
+    // A pending row filled at its prompt is read already: only what follows it is read.
+    const after =
+      plan.pending?.order === order ? plan.pending.stepOrder : undefined;
     // Defend against there being existing messages with this parent.
     stepOrder =
       prompt?.lastStepOrder ??
-      (await getMaxMessage(ctx, threadId, order))?.stepOrder ??
+      (await getMaxMessage(ctx, threadId, order, after))?.stepOrder ??
+      after ??
       promptMessage.stepOrder;
   } else if (pendingMessageId) {
     // What fills a pending message stays in its turn.
@@ -599,8 +603,8 @@ async function addMessagesHandler(
     assert(pendingMessage, `Pending msg ${pendingMessageId} not found`);
     order = pendingMessage.order;
     stepOrder =
-      (await getMaxMessage(ctx, threadId, order))?.stepOrder ??
-      pendingMessage.stepOrder;
+      (await getMaxMessage(ctx, threadId, order, pendingMessage.stepOrder))
+        ?.stepOrder ?? pendingMessage.stepOrder;
   } else {
     const maxMessage = await getMaxMessage(ctx, threadId);
     order = maxMessage?.order ?? -1;
@@ -798,12 +802,14 @@ export async function getMaxMessage(
   ctx: QueryCtx,
   threadId: Id<"threads">,
   order?: number,
+  afterStepOrder?: number,
 ) {
   return orderedMessagesStream(ctx, {
     threadId,
     sortOrder: "desc",
     startOrder: order,
     startOrderBound: "eq",
+    afterStepOrder,
   }).first();
 }
 
@@ -814,6 +820,8 @@ function orderedMessagesStream(
     sortOrder: "asc" | "desc";
     startOrder?: number;
     startOrderBound?: "gte" | "eq";
+    /** With an `eq` bound, only the messages after this step. */
+    afterStepOrder?: number;
   },
 ) {
   return mergedStream(
@@ -829,9 +837,11 @@ function orderedMessagesStream(
             if (args.startOrder !== undefined) {
               if (args.startOrderBound === "gte") {
                 return qq.gte("order", args.startOrder);
-              } else {
-                return qq.eq("order", args.startOrder);
               }
+              const at = qq.eq("order", args.startOrder);
+              return args.afterStepOrder === undefined
+                ? at
+                : at.gt("stepOrder", args.afterStepOrder);
             }
             return qq;
           })
