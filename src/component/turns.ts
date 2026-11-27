@@ -376,10 +376,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     if (!atOrder(row) && byOwnJob) {
       await ctx.db.patch("messages", row._id, { jobId: undefined });
     } else if (end === "answered") {
-      await ctx.db.patch("messages", row._id, {
-        status: "success",
-        jobId: undefined,
-      });
+      await closeRow(ctx, row, { status: "success" });
     } else if (end === "stopped") {
       await closeRow(ctx, row, { status: "success" }, { reason });
     } else {
