@@ -26,8 +26,8 @@ import {
   decodeQuestions,
   encodeAnswer,
   MAX_DOCUMENT_BYTES,
-  sizeOf,
-  tooLarge,
+  decisionSize,
+  decisionTooLarge,
 } from "../../decisions.js";
 import type {
   ActionCtx,
@@ -99,8 +99,8 @@ export type DecisionDoc<
   };
 };
 
-// Kept free in a decision's document for what the model returns with its
-// answers: the model ID, usage and provider metadata.
+// Kept free of a decision's 1 MiB for what the model returns: its answers, the
+// model ID, usage and provider metadata.
 const MODEL_OUTPUT_RESERVE_BYTES = 64 << 10;
 
 function stableStringify(value: unknown): string {
@@ -372,10 +372,15 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
         }
       : undefined;
   const limit = MAX_DOCUMENT_BYTES - MODEL_OUTPUT_RESERVE_BYTES;
-  const before = row && sizeOf(row);
+  const before =
+    row &&
+    decisionSize(
+      row,
+      asked.map((a) => ({ ...a, threadId: row.threadId })),
+    );
   if (before && before.size > limit) {
     throw new Error(
-      `The decision's state, questions, context message IDs and settings are ${before.size} bytes, over the ${limit} bytes Convex's 1 MiB document limit leaves for them; the largest is ${before.largest}. Pass a smaller state, fewer context messages, or shorter questions.`,
+      `The decision's state, questions, context message IDs and settings, with a row per question, are ${before.size} bytes, over the ${limit} bytes the 1 MiB limit on a decision and its answers leaves for them; the largest is ${before.largest}. Pass a smaller state, fewer context messages, or fewer or shorter questions.`,
     );
   }
   const store = async (
@@ -395,18 +400,14 @@ export async function decide<const QUESTIONS extends DecisionQuestions>(
       ...a,
       answer: encodeAnswer(answers[a.questionId]),
     }));
-    const error = [
-      tooLarge("The decision with what the model returned", {
-        ...row,
-        ...decision,
-      }),
-      ...answerRows.map((answerRow) =>
-        tooLarge(`The answer to ${answerRow.questionId}`, {
-          ...answerRow,
-          threadId: row.threadId,
-        }),
-      ),
-    ].find((e) => e !== undefined);
+    const error = decisionTooLarge(
+      "The decision with what the model returned",
+      { ...row, ...decision },
+      answerRows.map((answerRow) => ({
+        ...answerRow,
+        threadId: row.threadId,
+      })),
+    );
     if (error) {
       throw new Error(`${error} The model's result is this error's cause.`, {
         cause: result,

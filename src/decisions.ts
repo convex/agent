@@ -14,23 +14,55 @@ import type { vStoredDecisionAnswer } from "./component/schema.js";
 
 export const MAX_DOCUMENT_BYTES = 1 << 20;
 
+// What getDocumentSize assumes for an _id it isn't given.
+const ESTIMATED_ID = "0".repeat(32);
+
 // Undefined fields aren't stored and add nothing to the size.
-export function sizeOf(row: object) {
+function sizeOf(row: object, label: (field: string) => string) {
   const fields = Object.entries(row).map(
-    ([field, value]) => [field, getConvexSize(value as Value)] as const,
+    ([field, value]) => [label(field), getConvexSize(value as Value)] as const,
   );
-  const [largest, largestSize] = fields.reduce((a, b) => (b[1] > a[1] ? b : a));
   return {
     size: getDocumentSize(row as Record<string, Value>),
-    largest: `${largest} (${largestSize} bytes)`,
+    largest: fields.reduce((a, b) => (b[1] > a[1] ? b : a)),
   };
 }
 
-/** Why a row can't be stored, if it's over Convex's document limit. */
-export function tooLarge(what: string, row: object): string | undefined {
-  const { size, largest } = sizeOf(row);
+/**
+ * A decision's row and its answer rows, corrections included, as Convex sizes
+ * them. An answer row not yet stored is sized with an estimated decisionId.
+ */
+export function decisionSize(
+  decision: object,
+  answers: readonly ({ questionId: string } & object)[],
+) {
+  const rows = [
+    sizeOf(decision, (field) => field),
+    ...answers.map((answer) =>
+      sizeOf(
+        { decisionId: ESTIMATED_ID, ...answer },
+        (field) => `${answer.questionId}'s ${field}`,
+      ),
+    ),
+  ];
+  const [name, bytes] = rows
+    .map((row) => row.largest)
+    .reduce((a, b) => (b[1] > a[1] ? b : a));
+  return {
+    size: rows.reduce((total, row) => total + row.size, 0),
+    largest: `${name} (${bytes} bytes)`,
+  };
+}
+
+/** Why a decision can't be stored, if it and its answers are over 1 MiB. */
+export function decisionTooLarge(
+  what: string,
+  decision: object,
+  answers: readonly ({ questionId: string } & object)[],
+): string | undefined {
+  const { size, largest } = decisionSize(decision, answers);
   if (size <= MAX_DOCUMENT_BYTES) return undefined;
-  return `${what} is ${size} bytes, over Convex's 1 MiB document limit; the largest field is ${largest}.`;
+  return `${what} and its answers are ${size} bytes, over the 1 MiB a decision and its answers can take; the largest field is ${largest}.`;
 }
 
 type DecisionAnswer = Infer<typeof vDecisionAnswer>;

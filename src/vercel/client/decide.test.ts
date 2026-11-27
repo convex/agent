@@ -422,7 +422,7 @@ describe("a stored decision", () => {
         );
     });
     expect(error).toMatch(
-      /over the \d+ bytes Convex's 1 MiB document limit leaves for them; the largest is state/,
+      /over the \d+ bytes the 1 MiB limit on a decision and its answers leaves for them; the largest is state/,
     );
     expect(calls).toHaveLength(0);
   });
@@ -457,51 +457,72 @@ describe("a stored decision", () => {
       };
     });
     expect(out.message).toMatch(
-      /over Convex's 1 MiB document limit; the largest field is state/,
+      /and its answers are \d+ bytes, over the 1 MiB a decision and its answers can take; the largest field is state/,
     );
     expect(out.answers).toMatchObject({ intent: { choice: "status" } });
     expect(out.stored).toBe(0);
     expect(seen).toEqual([120]);
   });
 
-  test("an answer, or a correction, too large to store is refused, naming the largest field", async () => {
-    const agent = makeAgent({});
-    const choice = (n: number) =>
-      ({
-        type: "choice",
-        criteria: Object.fromEntries(
-          Array.from({ length: n }, (_, i) => [
-            `option-${String(i).padStart(113, "0")}`,
-            "",
-          ]),
-        ),
-      }) as const;
-    const fits = { team: choice(5_000) };
+  const wide = (n: number) =>
+    ({
+      type: "choice",
+      criteria: Object.fromEntries(
+        Array.from({ length: n }, (_, i) => [
+          `option-${String(i).padStart(113, "0")}`,
+          "",
+        ]),
+      ),
+    }) as const;
+
+  test("a decision whose answers take it past 1 MiB with them isn't stored, and its result is on the error", async () => {
+    const seen: unknown[] = [];
+    const agent = makeAgent({
+      usageHandler: async (_ctx, { usage }) => {
+        seen.push(usage.inputTokens);
+      },
+    });
+    const asked = { a: wide(1_500), b: wide(1_500), c: wide(1_500) };
     const out = await initConvexTest().action(async (ctx) => {
       const { threadId } = await seedThread(ctx);
-      const tooLarge = await agent
-        .experimental_decide(
-          ctx,
-          { threadId },
-          { questions: { team: choice(7_300) } },
-        )
+      const error = await agent
+        .experimental_decide(ctx, { threadId }, { questions: asked })
         .then(
           () => undefined,
           (e: Error) => e,
         );
+      return {
+        message: error?.message,
+        hasResult: !!(error?.cause as { answers?: unknown })?.answers,
+        stored: (await list(ctx, threadId, asked)).page.length,
+      };
+    });
+    expect(out.message).toMatch(
+      /^The decision with what the model returned and its answers are \d+ bytes, over the 1 MiB a decision and its answers can take; the largest field is questions/,
+    );
+    expect(out.hasResult).toBe(true);
+    expect(out.stored).toBe(0);
+    expect(seen).toEqual([120]);
+  });
+
+  test("a correction that takes a decision past 1 MiB with its answers is refused", async () => {
+    const agent = makeAgent({});
+    const asked = { team: wide(2_900) };
+    const out = await initConvexTest().action(async (ctx) => {
+      const { threadId } = await seedThread(ctx);
       const { decisionId } = await agent.experimental_decide(
         ctx,
         { threadId },
-        { questions: fits },
+        { questions: asked },
       );
-      const keys = Object.keys(fits.team.criteria);
+      const keys = Object.keys(asked.team.criteria);
       const correction = await experimental_correctDecision(
         ctx,
         components.agent,
         {
           threadId,
           decisionId: decisionId!,
-          questions: fits,
+          questions: asked,
           questionId: "team",
           answer: {
             type: "choice",
@@ -515,25 +536,16 @@ describe("a stored decision", () => {
         () => "corrected",
         (e: Error) => e.message,
       );
-      const { page } = await experimental_listDecisions(ctx, components.agent, {
-        threadId,
-        paginationOpts: firstPage,
-      });
+      const { page } = await list(ctx, threadId, asked);
       return {
-        answer: tooLarge?.message,
-        hasResult: !!(tooLarge?.cause as { answers?: unknown })?.answers,
         correction,
-        stored: page.map((d) => Object.keys(d.corrections).length),
+        corrections: page.map((d) => Object.keys(d.corrections).length),
       };
     });
-    expect(out.answer).toMatch(
-      /over Convex's 1 MiB document limit; the largest field is answer/,
-    );
-    expect(out.hasResult).toBe(true);
     expect(out.correction).toMatch(
-      /over Convex's 1 MiB document limit; the largest field is answer/,
+      /The decision with that correction to team and its answers are \d+ bytes, over the 1 MiB a decision and its answers can take; the largest field is team's answer/,
     );
-    expect(out.stored).toEqual([0]);
+    expect(out.corrections).toEqual([0]);
   });
 
   test("a listed page stops short of the read limit, however large its decisions, and the next continues it", async () => {

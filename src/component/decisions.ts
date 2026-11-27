@@ -12,9 +12,9 @@ import {
   answersQuestion,
   decodeAnswer,
   decodeQuestions,
+  decisionTooLarge,
   MAX_DOCUMENT_BYTES,
   sumsToOne,
-  tooLarge,
 } from "../decisions.js";
 import { vPaginationResult } from "../validators.js";
 
@@ -48,13 +48,15 @@ export const create = mutation({
   handler: async (ctx, { answers, ...decision }) => {
     const thread = await ctx.db.get("threads", decision.threadId);
     assert(thread, `Thread ${decision.threadId} not found`);
+    const rows = answers.map((answer) => ({
+      ...answer,
+      threadId: decision.threadId,
+    }));
+    const error = decisionTooLarge("The decision", decision, rows);
+    if (error) throw new Error(error);
     const decisionId = await ctx.db.insert("decisions", decision);
-    for (const answer of answers) {
-      await ctx.db.insert("decisionAnswers", {
-        ...answer,
-        decisionId,
-        threadId: decision.threadId,
-      });
+    for (const row of rows) {
+      await ctx.db.insert("decisionAnswers", { ...row, decisionId });
     }
     return decisionId;
   },
@@ -246,12 +248,8 @@ export const correct = mutation({
     if (decision?.threadId !== threadId) {
       throw new Error(`Thread ${threadId} has no decision ${decisionId}`);
     }
-    const row = await ctx.db
-      .query("decisionAnswers")
-      .withIndex("decisionId_questionId", (q) =>
-        q.eq("decisionId", decisionId).eq("questionId", questionId),
-      )
-      .unique();
+    const rows = await answersOf(ctx, decisionId);
+    const row = rows.find((r) => r.questionId === questionId);
     if (!row) {
       throw new Error(`Decision ${decisionId} has no question ${questionId}`);
     }
@@ -268,10 +266,11 @@ export const correct = mutation({
       );
     }
     const correction = { answer, by };
-    const error = tooLarge(`The answer to ${questionId} with that correction`, {
-      ...row,
-      correction,
-    });
+    const error = decisionTooLarge(
+      `The decision with that correction to ${questionId}`,
+      decision,
+      rows.map((r) => (r === row ? { ...r, correction } : r)),
+    );
     if (error) throw new Error(error);
     await ctx.db.patch("decisionAnswers", row._id, { correction });
     return null;
