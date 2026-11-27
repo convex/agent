@@ -677,3 +677,37 @@ test("a revoked job can't fill a plain pending row", async () => {
     error: "The generation was stopped or replaced",
   });
 });
+
+// A stop that read the delta log would conflict with every delta the
+// streamer writes meanwhile, so the reply is built after the stop commits.
+test("a stop leaves building the reply from its stream to after it commits", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let streamId!: string;
+  const streaming = gate();
+  const stopped = gate();
+  let late: unknown;
+  attempts.push(async (ctx, ids) => {
+    streamId = (await begin(ctx, ids)).streamId!;
+    await delta(ctx, streamId, "Half.");
+    streaming.open();
+    await stopped.opened;
+    late = await delta(ctx, streamId, " More.", 1);
+  });
+  const s = await submitted();
+  const job = s.t.finishAllScheduledFunctions(vi.runAllTimers);
+  await streaming.opened;
+  expect(await s.stop()).toBe(true);
+  const [, atStop] = await s.docs();
+  stopped.open();
+  await job;
+  const [, reply] = await s.docs();
+  expect({
+    atStop: [atStop.status, atStop.text ?? "", atStop.abort?.reason],
+    late,
+    reply: [reply.status, reply.text, reply.abort?.reason],
+  }).toEqual({
+    atStop: ["pending", "", "Stopped"],
+    late: false,
+    reply: ["success", "Half.", "Stopped"],
+  });
+});
