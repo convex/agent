@@ -325,9 +325,10 @@ for (const decision of page) {
 }
 ```
 
-File bytes aren't stored, so a state with files can't be replayed exactly. Nor
-can a call whose `contextHandler` changed the context, or that passed `prompt`
-or `messages`, since only the stored messages' IDs are kept.
+Skip decisions whose state has files: only each file's SHA-256 is stored, so
+replaying one throws. A call whose `contextHandler` changed the context, or that
+passed `prompt` or `messages`, can't be replayed exactly, since only the stored
+messages' IDs are kept.
 
 ### React
 
