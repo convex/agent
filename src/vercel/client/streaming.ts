@@ -274,10 +274,23 @@ export function holdStreamerDeltas<T, R>(
   return holdDeltas(streamer, during);
 }
 
+let closedItsReply: <T>(streamer: DeltaStreamer<T>) => boolean;
+
+/**
+ * Whether the streamer's own close of its stream ended its reply: a stopped
+ * job's close, which the stop leaves to it. Internal, like
+ * {@link holdStreamerDeltas}.
+ */
+export function streamerClosedItsReply<T>(streamer: DeltaStreamer<T>) {
+  return closedItsReply(streamer);
+}
+
 export class DeltaStreamer<T> {
   static {
     holdDeltas = (streamer, during) => streamer.#hold(during);
+    closedItsReply = (streamer) => streamer.#closedItsReply;
   }
+  #closedItsReply = false;
 
   streamId: string | undefined;
   public readonly config: {
@@ -826,20 +839,23 @@ export class DeltaStreamer<T> {
     const opening = waitForOngoingWrite ? this.#nextParts : [];
     let abortFailure: { error: unknown } | undefined;
     try {
-      await this.ctx.runMutation(this.component.streams.fail, {
-        streamId: this.streamId,
-        reason,
-        ...(opening.length > 0 && !this.#hasVisibleParts()
-          ? {
-              finalDelta: {
-                streamId: this.streamId,
-                start: this.#cursor,
-                end: this.#cursor + opening.length,
-                parts: opening,
-              },
-            }
-          : {}),
-      });
+      this.#closedItsReply = await this.ctx.runMutation(
+        this.component.streams.fail,
+        {
+          streamId: this.streamId,
+          reason,
+          ...(opening.length > 0 && !this.#hasVisibleParts()
+            ? {
+                finalDelta: {
+                  streamId: this.streamId,
+                  start: this.#cursor,
+                  end: this.#cursor + opening.length,
+                  parts: opening,
+                },
+              }
+            : {}),
+        },
+      );
     } catch (error) {
       abortFailure = { error };
     }

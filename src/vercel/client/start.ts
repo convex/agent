@@ -244,6 +244,8 @@ export async function startGeneration<
     finishStreamId?: string,
   ) => Promise<void>;
   fail: (reason: unknown) => Promise<void>;
+  /** Ends a generation its stream's close already ended, with no save. */
+  stopped: () => Promise<void>;
   endStep: <TOOLS extends ToolSet>(
     step: StepResult<TOOLS, RUNTIME_CONTEXT>,
     error?: string,
@@ -692,6 +694,7 @@ export async function startGeneration<
       }
     },
     fail: (reason) => settle({ error: reason }),
+    stopped: () => (ending ??= Promise.resolve()),
     endStep: async (step, error) => {
       // A step that ends after the generation did is only reported.
       if (!ending) {
