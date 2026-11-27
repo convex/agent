@@ -63,6 +63,9 @@ import {
   adoptOpenRow,
   authorizeEnding,
   authorizeRow,
+  endStopped,
+  endStoppedInThread,
+  stoppedOpen,
   endTurnsForDeleted,
   failPlainReplies,
   planResponse,
@@ -491,6 +494,9 @@ async function addMessagesHandler(
       messages,
     }));
   if (plan.userId !== undefined && !args.userId) userId = plan.userId;
+  if (messages.some((m) => m.message.role === "user")) {
+    await endStoppedInThread(ctx, threadId);
+  }
   if (plan.adopt) {
     const adopted = await adoptOpenRow(
       ctx,
@@ -525,11 +531,12 @@ async function addMessagesHandler(
       )
       .order("desc")
       .take(100);
-    // A row with a job copy is a live turn's, which only its turn ends.
-    const restarted = pendingMessages
+    const atPrompt = pendingMessages
       .filter((m) => !promptMessage || m.order === promptMessage.order)
-      .filter((m) => !pendingMessageId || m._id !== pendingMessageId)
-      .filter((m) => m.jobId === undefined);
+      .filter((m) => !pendingMessageId || m._id !== pendingMessageId);
+    for (const m of atPrompt) if (stoppedOpen(m)) await endStopped(ctx, m);
+    // A row with a job copy is a live turn's, which only its turn ends.
+    const restarted = atPrompt.filter((m) => m.jobId === undefined);
     const patch = {
       status: "failed" as const,
       error: "Restarting",

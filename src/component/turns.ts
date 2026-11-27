@@ -534,28 +534,45 @@ async function turnFor(ctx: MutationCtx, row: Row) {
   return prompted ?? own;
 }
 
+/** An open row a stop left to its running job, which keeps its job copy. */
+export const stoppedOpen = (row: Row) =>
+  row.status === "pending" && !!row.abort && row.jobId !== undefined;
+
 /**
- * Ends a stopped turn's rows its job left open: those of a stream that went
- * idle, or, for a retry, those whose job is gone.
+ * endStopped: the only ending of a stopped open row but its job's own save.
+ * Its stream was aborted by the stop, so its delta log is frozen and reading
+ * it here races no writer.
  */
-async function endStopped(ctx: MutationCtx, turn: Turn, idle?: Stream) {
+export async function endStopped(ctx: MutationCtx, row: Row) {
+  await closeRow(ctx, row, { status: "success" });
+  if (row.streamId) await endStoppedStream(ctx, row.streamId);
+}
+
+async function endStoppedMembers(
+  ctx: MutationCtx,
+  turn: Turn,
+  stream?: Stream,
+) {
   for (const row of await members(ctx, turn, "pending")) {
-    if (!row.abort) continue;
-    if (idle ? row.streamId !== idle._id : await rowJobRunning(ctx, row)) {
-      continue;
+    if (stoppedOpen(row) && (!stream || row.streamId === stream._id)) {
+      await endStopped(ctx, row);
     }
-    await closeRow(ctx, row, { status: "success" });
-    if (row.streamId) await endStoppedStream(ctx, row.streamId);
   }
 }
 
-async function rowJobRunning(ctx: MutationCtx, row: Row) {
-  if (!row.jobId) return false;
-  const job = await ctx.db.system.get(
-    "_scheduled_functions",
-    row.jobId as Id<"_scheduled_functions">,
-  );
-  return job?.state.kind === "pending" || job?.state.kind === "inProgress";
+/** A new prompt in a thread ends its stopped open rows first, as F1 ends superseded turns. */
+export async function endStoppedInThread(
+  ctx: MutationCtx,
+  threadId: Id<"threads">,
+) {
+  // Only open rows with a job copy: an empty range for plain threads.
+  const leased = await ctx.db
+    .query("messages")
+    .withIndex("threadId_status_jobId", (q) =>
+      q.eq("threadId", threadId).eq("status", "pending").gt("jobId", ""),
+    )
+    .collect();
+  for (const row of leased) if (stoppedOpen(row)) await endStopped(ctx, row);
 }
 
 async function newestTurn(ctx: MutationCtx, threadId: Id<"threads">) {
@@ -950,7 +967,7 @@ export async function endStream(
     finalDelta?: Omit<Doc<"streamDeltas">, "_id" | "_creationTime">;
   },
 ) {
-  if (await closeStoppedStream(ctx, stream)) return false;
+  if (await closeStoppedStream(ctx, stream)) return true;
   const caller = await callerJob(ctx);
   const holds = caller !== null && caller === stream.jobId;
   if (!holds && (await roleOf(ctx, caller)).kind !== "app") return false;
@@ -996,7 +1013,7 @@ export async function closeStoppedStream(ctx: MutationCtx, stream: Stream) {
 /** A stopped stream's timeout: its runner is gone, so its rows end here. */
 export async function timeoutStoppedStream(ctx: MutationCtx, stream: Stream) {
   const turn = await turnOf(ctx, stream);
-  if (turn) await endStopped(ctx, turn, stream);
+  if (turn) await endStoppedMembers(ctx, turn, stream);
   await endStoppedStream(ctx, stream._id);
 }
 
@@ -1044,12 +1061,13 @@ export async function stopTurns(
   } else {
     turns = await turnsOf(ctx, args.threadId, args.order);
   }
+  const order = args.promptMessageId ? turns[0]?.order : args.order;
+  if (args.promptMessageId && order === undefined) return false;
+  // First, so this stop's own marked rows are left to their jobs.
+  const plain = await stopPlain(ctx, args.threadId, order, reason);
   for (const turn of turns) {
     await handOff(ctx, turn, { end: "stopped", byOwnJob: false, reason });
   }
-  const order = args.promptMessageId ? turns[0]?.order : args.order;
-  if (args.promptMessageId && order === undefined) return false;
-  const plain = await stopPlain(ctx, args.threadId, order, reason);
   return turns.length > 0 || plain;
 }
 
@@ -1073,6 +1091,7 @@ async function stopPlain(
       })
       .collect();
     for (const row of rows) {
+      if (stoppedOpen(row)) await endStopped(ctx, row);
       if (row.jobId !== undefined) continue;
       await ctx.db.patch("messages", row._id, { abort: { reason } });
       stopped = true;
@@ -1164,7 +1183,7 @@ export async function retryTurn(
   } else {
     turn = await newestTurn(ctx, args.threadId);
   }
-  if (turn?.outcome === "stopped") await endStopped(ctx, turn);
+  if (turn?.outcome === "stopped") await endStoppedMembers(ctx, turn);
   if (!turn || turn.status !== "running") return null;
   if (turn.jobId) {
     const state = await jobState(ctx, turn);
