@@ -142,39 +142,34 @@ function answerShape(question: Experimental_DecisionQuestion) {
 
 type StateFilePart = Extract<Experimental_DecisionStatePart, { type: "file" }>;
 
-// Files in the context follow the JSON part as file parts, so multimodal
-// decision models see them; the JSON keeps their index.
+// Each context message is a JSON part followed by its own files as file parts,
+// so multimodal decision models see each file after the message it's in.
 function contextToState(
   messages: ModelMessage[],
 ): Experimental_DecisionStatePart[] {
-  if (!messages.length) return [];
-  const files: StateFilePart[] = [];
-  const json = messages.map((message) => {
-    if (!Array.isArray(message.content)) return message;
-    return {
-      ...message,
-      content: message.content.map((part) => {
-        if (part.type !== "file" && part.type !== "image") return part;
-        const file: StateFilePart =
-          part.type === "image"
-            ? {
-                type: "file",
-                data: part.image,
-                mediaType: part.mediaType ?? "image",
-              }
-            : { type: "file", data: part.data, mediaType: part.mediaType };
-        files.push(file);
-        return {
-          type: "file",
-          mediaType: file.mediaType,
-          stateFile: files.length - 1,
-        };
-      }),
-    };
+  return messages.flatMap((message) => {
+    const files: StateFilePart[] = [];
+    const content = Array.isArray(message.content)
+      ? message.content.map((part) => {
+          if (part.type !== "file" && part.type !== "image") return part;
+          const file: StateFilePart =
+            part.type === "image"
+              ? {
+                  type: "file",
+                  data: part.image,
+                  mediaType: part.mediaType ?? "image",
+                }
+              : { type: "file", data: part.data, mediaType: part.mediaType };
+          files.push(file);
+          return { type: "file", mediaType: file.mediaType };
+        })
+      : message.content;
+    // JSON.parse of JSON.stringify output is JSON by construction.
+    const value: JSONValue = JSON.parse(
+      JSON.stringify({ ...message, content }),
+    );
+    return [{ type: "json" as const, value }, ...files];
   });
-  // JSON.parse of JSON.stringify output is JSON by construction.
-  const value: JSONValue = JSON.parse(JSON.stringify({ messages: json }));
-  return [{ type: "json", value }, ...files];
 }
 
 // Array.isArray doesn't narrow a readonly array.

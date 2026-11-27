@@ -66,8 +66,8 @@ optional, plus:
   JSON and file parts.
 - `cache`: see [the cache](#the-cache).
 
-The model sees a JSON part with the context messages, then any files from them
-as file parts, then your `state`.
+The model sees each context message as a JSON part, followed by that message's
+files as file parts, then your `state`.
 
 Question IDs, choice option keys and `providerOptions` keys can be any strings:
 they're stored as JSON text.

@@ -160,50 +160,74 @@ describe("experimental_decide reads the context generateText builds", () => {
       );
       await agent.generateText(ctx, { threadId }, { promptMessageId });
     });
-    const [context, callerState] = calls[0].state as unknown as [
-      { type: "json"; value: { messages: [] } },
-      unknown,
-    ];
-    expect(calls[0].state).toHaveLength(2);
-    expect(callerState).toEqual({ type: "json", value: { page: "release" } });
-    expect(texts(context.value.messages)).toEqual(
+    const state = calls[0].state as unknown as {
+      type: "json";
+      value: { role: string; content: unknown };
+    }[];
+    expect(state.at(-1)).toEqual({ type: "json", value: { page: "release" } });
+    expect(texts(state.slice(0, -1).map((part) => part.value))).toEqual(
       texts(languageModel.doGenerateCalls[0].prompt),
     );
   });
 
-  test("files in the context become state file parts after the messages", async () => {
+  test("each context message is a JSON part followed by its own files", async () => {
     const calls: Calls = [];
     const agent = makeAgent({
       experimental_decisionModel: decisionModel(calls),
     });
+    const png = new Uint8Array([137, 80, 78, 71]);
+    const jpeg = new Uint8Array([255, 216, 255]);
     await initConvexTest().action(async (ctx) => {
       const threadId = await createThread(ctx, components.agent, {});
-      await saveMessage(ctx, components.agent, {
-        threadId,
-        message: {
+      for (const [text, data, mediaType] of [
+        ["is this a release chart?", png, "image/png"],
+        ["or this one?", jpeg, "image/jpeg"],
+      ] as const) {
+        await saveMessage(ctx, components.agent, {
+          threadId,
+          message: {
+            role: "user",
+            content: [
+              { type: "text", text },
+              { type: "file", data, mediaType },
+            ],
+          },
+        });
+      }
+      await agent.experimental_decide(ctx, { threadId }, { questions });
+    });
+    expect(calls[0].state).toEqual([
+      {
+        type: "json",
+        value: {
           role: "user",
           content: [
             { type: "text", text: "is this a release chart?" },
-            {
-              type: "file",
-              data: new Uint8Array([137, 80, 78, 71]),
-              mediaType: "image/png",
-            },
+            { type: "file", mediaType: "image/png" },
           ],
         },
-      });
-      await agent.experimental_decide(ctx, { threadId }, { questions });
-    });
-    const [json, file] = calls[0].state as unknown as [
-      { value: { messages: { content: unknown[] }[] } },
-      unknown,
-    ];
-    expect(json.value.messages[0].content[1]).toEqual({
-      type: "file",
-      mediaType: "image/png",
-      stateFile: 0,
-    });
-    expect(file).toMatchObject({ type: "file", mediaType: "image/png" });
+      },
+      {
+        type: "file",
+        data: { type: "data", data: png },
+        mediaType: "image/png",
+      },
+      {
+        type: "json",
+        value: {
+          role: "user",
+          content: [
+            { type: "text", text: "or this one?" },
+            { type: "file", mediaType: "image/jpeg" },
+          ],
+        },
+      },
+      {
+        type: "file",
+        data: { type: "data", data: jpeg },
+        mediaType: "image/jpeg",
+      },
+    ]);
   });
 });
 
