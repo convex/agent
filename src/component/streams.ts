@@ -39,6 +39,8 @@ import {
   stopStreamReply,
   stopTurns,
   streamLease,
+  type At,
+  hold,
   timeoutStoppedStream,
   closeStoppedStream,
   timeoutTurnStream,
@@ -292,10 +294,13 @@ export const create = mutation({
 
 export async function createStream(
   ctx: MutationCtx,
-  fields: Omit<
+  {
+    at,
+    ...fields
+  }: Omit<
     WithoutSystemFields<Doc<"streamingMessages">>,
     "state" | "fileRefs"
-  >,
+  > & { at?: At },
 ) {
   const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
   // TODO: enforce order/stepOrder uniqueness?
@@ -303,6 +308,7 @@ export async function createStream(
     ...fields,
     state,
   });
+  await hold(ctx, { turnId: fields.turnId, at }, fields, { streamId });
   const timeoutFnId = await ctx.scheduler.runAfter(
     TIMEOUT_INTERVAL,
     internal.streams.timeoutStream,

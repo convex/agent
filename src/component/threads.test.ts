@@ -652,7 +652,7 @@ describe("threads", () => {
   });
 });
 
-test("deleting a thread, or its user's data, deletes its turns and their jobs", async () => {
+test("deleting a thread, or its user's data, deletes its turns, their jobs and their holdings", async () => {
   vi.useFakeTimers();
   const t = convexTest(schema, modules);
   const generate = await t.run(() =>
@@ -667,12 +667,30 @@ test("deleting a thread, or its user's data, deletes its turns and their jobs", 
       messages: [{ message: { role: "user", content: "Go." } }],
       generate,
     });
+    await t.run(async (ctx) => {
+      const turn = (await ctx.db.query("turns").first())!;
+      const away = await ctx.db.insert("threads", { status: "active" });
+      const messageId = await ctx.db.insert("messages", {
+        threadId: away,
+        order: 0,
+        stepOrder: 0,
+        tool: false,
+        status: "pending",
+        turnId: turn._id,
+      });
+      await ctx.db.insert("holdings", {
+        turnId: turn._id,
+        threadId,
+        messageId,
+      });
+    });
     return threadId;
   };
   const left = () =>
     t.run(async (ctx) => ({
       turns: (await ctx.db.query("turns").collect()).length,
       jobs: (await ctx.db.query("jobs").collect()).length,
+      holdings: (await ctx.db.query("holdings").collect()).length,
     }));
   const threadId = await send();
   const before = await left();
@@ -683,9 +701,9 @@ test("deleting a thread, or its user's data, deletes its turns and their jobs", 
   await t.mutation(api.users.deleteAllForUserIdAsync, { userId: "u" });
   await t.finishAllScheduledFunctions(vi.runAllTimers);
   expect([before, byThread, await left()]).toEqual([
-    { turns: 1, jobs: 1 },
-    { turns: 0, jobs: 0 },
-    { turns: 0, jobs: 0 },
+    { turns: 1, jobs: 1, holdings: 1 },
+    { turns: 0, jobs: 0, holdings: 0 },
+    { turns: 0, jobs: 0, holdings: 0 },
   ]);
   vi.useRealTimers();
 });

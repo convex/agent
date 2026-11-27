@@ -93,13 +93,7 @@ export const schema = defineSchema({
       filterFields: ["userId", "threadId"],
     })
     // Allows finding messages by vector embedding id
-    .index("embeddingId_threadId", ["embeddingId", "threadId"])
-    .index("turnId_status_order_stepOrder", [
-      "turnId",
-      "status",
-      "order",
-      "stepOrder",
-    ]),
+    .index("embeddingId_threadId", ["embeddingId", "threadId"]),
 
   // Status: if it's done, it's deleted, then deltas are vacuumed
   streamingMessages: defineTable({
@@ -164,13 +158,14 @@ export const schema = defineSchema({
       "state.kind",
       "order",
       "stepOrder",
-    ])
-    .index("turnId_state_order", ["turnId", "state.kind", "order"]),
+    ]),
 
   // A durable generation: the prompt it answers and the job that may write it.
   turns: defineTable({
     threadId: v.id("threads"),
     order: v.number(),
+    // The lowest order its send saved: a pending row may sit before the prompt.
+    fromOrder: v.number(),
     promptMessageId: v.id("messages"),
     // Where the current job starts: the prompt, or the response a
     // continuation resumes from.
@@ -187,6 +182,19 @@ export const schema = defineSchema({
     ),
     outcome: v.optional(v.string()),
   }).index("threadId_status_order", ["threadId", "status", "order"]),
+
+  // A turn's rows and streams its job opened outside its thread from its
+  // fromOrder. Written at insert; the rest of a turn is found through its
+  // thread's own indexes.
+  holdings: defineTable({
+    turnId: v.id("turns"),
+    // The turn's thread, so deleting it deletes these.
+    threadId: v.id("threads"),
+    messageId: v.optional(v.id("messages")),
+    streamId: v.optional(v.id("streamingMessages")),
+  })
+    .index("turnId", ["turnId"])
+    .index("threadId", ["threadId"]),
 
   // Every job a turn ever scheduled, so a replaced job reads as replaced.
   jobs: defineTable({

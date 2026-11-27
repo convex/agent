@@ -19,7 +19,13 @@ type Role =
   // The job of a turn a stop ended.
   | { kind: "stopped"; turn: Turn }
   | { kind: "revoked" };
-export type Stamp = { turnId?: Id<"turns">; jobId?: string };
+// `at` is the stamping turn's position, which decides a holding; it is never stored.
+export type Stamp = { turnId?: Id<"turns">; jobId?: string; at?: At };
+export type At = { threadId: Id<"threads">; order: number };
+const atOf = (turn: Pick<Turn, "threadId" | "fromOrder">): At => ({
+  threadId: turn.threadId,
+  order: turn.fromOrder,
+});
 export type TurnInfo = { promptMessageId: Id<"messages">; jobId: string };
 
 export const REFUSED = "The generation was stopped or replaced";
@@ -130,54 +136,137 @@ export async function authorizeStream(ctx: MutationCtx, stream: Stream) {
   }
 }
 
-// members: the only enumerator of a turn's rows and streams.
-function members(
+/** Records a stamped row or stream that sits outside its turn's thread from its fromOrder. */
+export async function hold(
+  ctx: MutationCtx,
+  stamp: Stamp,
+  doc: At,
+  ref: { messageId: Id<"messages"> } | { streamId: Id<"streamingMessages"> },
+) {
+  const { turnId, at } = stamp;
+  if (!turnId || !at || within(at, doc)) return;
+  await ctx.db.insert("holdings", { turnId, threadId: at.threadId, ...ref });
+}
+
+const within = (at: At, doc: At) =>
+  doc.threadId === at.threadId && doc.order >= at.order;
+
+/** A turn's held docs of one table the thread range does not already reach. */
+async function held<T extends Row | Stream>(
+  ctx: MutationCtx,
+  turn: Turn,
+  get: (h: Doc<"holdings">) => Promise<T | null>,
+  keep: (doc: T) => boolean,
+) {
+  const holdings = await ctx.db
+    .query("holdings")
+    .withIndex("turnId", (q) => q.eq("turnId", turn._id))
+    .collect();
+  const docs: T[] = [];
+  for (const h of holdings) {
+    const doc = await get(h);
+    if (
+      doc &&
+      doc.turnId === turn._id &&
+      !within(atOf(turn), doc) &&
+      keep(doc)
+    ) {
+      docs.push(doc);
+    }
+  }
+  return docs;
+}
+
+// members: the only enumerator of a turn's rows and streams: its thread's own
+// indexes from its fromOrder, plus its holdings. Plain rows pay for neither.
+async function members(
   ctx: MutationCtx,
   turn: Turn,
   status: Status,
   since?: "anchor",
 ) {
-  return ctx.db
-    .query("messages")
-    .withIndex("turnId_status_order_stepOrder", (q) => {
-      const base = q.eq("turnId", turn._id).eq("status", status);
-      return since
-        ? base.eq("order", turn.order).gt("stepOrder", turn.anchorStepOrder)
-        : base;
-    })
-    .collect();
+  const lists = await Promise.all(
+    [false, true].map((tool) =>
+      ctx.db
+        .query("messages")
+        .withIndex("threadId_status_tool_order_stepOrder", (q) => {
+          const base = q
+            .eq("threadId", turn.threadId)
+            .eq("status", status)
+            .eq("tool", tool);
+          return since
+            ? base.eq("order", turn.order).gt("stepOrder", turn.anchorStepOrder)
+            : base.gte("order", turn.fromOrder);
+        })
+        .collect(),
+    ),
+  );
+  const near = lists.flat().filter((row) => row.turnId === turn._id);
+  if (since) return near;
+  const away = await held(
+    ctx,
+    turn,
+    async (h) => (h.messageId ? ctx.db.get("messages", h.messageId) : null),
+    (row) => row.status === status,
+  );
+  return [...near, ...away];
 }
 
-function memberStreams(
+async function memberStreams(
   ctx: MutationCtx,
   turn: Turn,
   kind: Stream["state"]["kind"],
 ) {
-  return ctx.db
-    .query("streamingMessages")
-    .withIndex("turnId_state_order", (q) =>
-      q.eq("turnId", turn._id).eq("state.kind", kind),
-    )
-    .collect();
+  const near = (
+    await ctx.db
+      .query("streamingMessages")
+      .withIndex("threadId_state_order_stepOrder", (q) =>
+        q
+          .eq("threadId", turn.threadId)
+          .eq("state.kind", kind)
+          .gte("order", turn.fromOrder),
+      )
+      .collect()
+  ).filter((s) => s.turnId === turn._id);
+  const away = await held(
+    ctx,
+    turn,
+    async (h) =>
+      h.streamId ? ctx.db.get("streamingMessages", h.streamId) : null,
+    (stream) => stream.state.kind === kind,
+  );
+  return [...near, ...away];
 }
 
 // A turn's newest settled members at its position, newest first. A step's
 // calls resolve in the step after it, so two rows decide an answer.
 async function newestSettled(ctx: MutationCtx, turn: Turn, since?: "anchor") {
-  const newest = (status: Status) =>
-    ctx.db
+  const newest = async (status: Status, tool: boolean) => {
+    const found: Row[] = [];
+    for await (const row of ctx.db
       .query("messages")
-      .withIndex("turnId_status_order_stepOrder", (q) => {
+      .withIndex("threadId_status_tool_order_stepOrder", (q) => {
         const base = q
-          .eq("turnId", turn._id)
+          .eq("threadId", turn.threadId)
           .eq("status", status)
+          .eq("tool", tool)
           .eq("order", turn.order);
         return since ? base.gt("stepOrder", turn.anchorStepOrder) : base;
       })
-      .order("desc")
-      .take(2);
-  return [...(await newest("success")), ...(await newest("failed"))]
-    .filter(at(turn))
+      .order("desc")) {
+      if (row.turnId !== turn._id) continue;
+      found.push(row);
+      if (found.length === 2) break;
+    }
+    return found;
+  };
+  const rows = await Promise.all(
+    (["success", "failed"] as const).flatMap((status) =>
+      [false, true].map((tool) => newest(status, tool)),
+    ),
+  );
+  return rows
+    .flat()
     .sort((a, b) => b.stepOrder - a.stepOrder)
     .slice(0, 2);
 }
@@ -471,7 +560,7 @@ function recordJob(
 
 const DELETE_PAGE = 100;
 
-/** A deleted thread's turns and jobs go a page at a time; true once none are left. */
+/** A deleted thread's turns, jobs and holdings go a page at a time; true once none are left. */
 export async function deleteTurnsPage(
   ctx: MutationCtx,
   threadId: Id<"threads">,
@@ -484,9 +573,18 @@ export async function deleteTurnsPage(
     .query("jobs")
     .withIndex("threadId", (q) => q.eq("threadId", threadId))
     .take(DELETE_PAGE);
+  const holdings = await ctx.db
+    .query("holdings")
+    .withIndex("threadId", (q) => q.eq("threadId", threadId))
+    .take(DELETE_PAGE);
   for (const turn of turns) await ctx.db.delete("turns", turn._id);
   for (const job of jobs) await ctx.db.delete("jobs", job._id);
-  return turns.length < DELETE_PAGE && jobs.length < DELETE_PAGE;
+  for (const held of holdings) await ctx.db.delete("holdings", held._id);
+  return (
+    turns.length < DELETE_PAGE &&
+    jobs.length < DELETE_PAGE &&
+    holdings.length < DELETE_PAGE
+  );
 }
 
 type Settle = {
@@ -678,17 +776,18 @@ const turnInfo = (turn: Turn, jobId: string): TurnInfo => ({
   jobId,
 });
 
-type Position = Pick<Turn, "_id" | "threadId" | "order">;
+type Position = Pick<Turn, "_id" | "threadId" | "order" | "fromOrder">;
 
 /** A holder's rows at its turn are members; elsewhere only its open rows are leased. */
 function memberStamp(turn: Position, caller: string, threadId: Id<"threads">) {
   return (order: number, status: Status, replaced?: Row): Stamp => {
     const job = status === "pending" ? { jobId: caller } : {};
     if (replaced) return { turnId: replaced.turnId, ...job };
+    const stamp = { turnId: turn._id, ...job, at: atOf(turn) };
     if (threadId !== turn.threadId || order !== turn.order) {
-      return status === "pending" ? { turnId: turn._id, ...job } : {};
+      return status === "pending" ? stamp : {};
     }
-    return { turnId: turn._id, ...job };
+    return stamp;
   };
 }
 
@@ -775,7 +874,7 @@ export async function planSave(
     pending,
     userId,
     stamp: memberStamp(turn, own, args.threadId),
-    streamStamp: { turnId: turn._id, jobId: own },
+    streamStamp: { turnId: turn._id, jobId: own, at: atOf(turn) },
     after: async () => {
       await settle(ctx, beginning ? turn : turn._id, {
         byApp: false,
@@ -788,7 +887,7 @@ export async function planSave(
 
 /** Whatever a job opens away from its turn is still its own, so ending its turn closes it. */
 function lease(turn: Turn, caller: string): SaveTurn {
-  const stamp = { turnId: turn._id, jobId: caller };
+  const stamp = { turnId: turn._id, jobId: caller, at: atOf(turn) };
   return {
     stamp: (_order, status) => (status === "pending" ? stamp : {}),
     streamStamp: stamp,
@@ -807,7 +906,9 @@ export async function streamLease(ctx: MutationCtx): Promise<Stamp> {
   if (role.kind === "revoked" || role.kind === "stopped") {
     throw new Error(REFUSED);
   }
-  return role.kind === "holder" ? { turnId: role.turn._id, jobId: caller } : {};
+  return role.kind === "holder"
+    ? { turnId: role.turn._id, jobId: caller, at: atOf(role.turn) }
+    : {};
 }
 
 // A holder's turn's position, from its prompt when the save names it.
@@ -817,7 +918,13 @@ async function positionOf(
   prompt?: Row | null,
 ): Promise<Position> {
   if (prompt?.turnId === turnId && prompt.status !== "pending") {
-    return { _id: turnId, threadId: prompt.threadId, order: prompt.order };
+    // The prompt's order bounds fromOrder from above, so a holding is never missed.
+    return {
+      _id: turnId,
+      threadId: prompt.threadId,
+      order: prompt.order,
+      fromOrder: prompt.order,
+    };
   }
   return (await ctx.db.get("turns", turnId))!;
 }
@@ -842,7 +949,7 @@ async function planFill(
             replaced ? { turnId: replaced.turnId } : {},
     streamStamp:
       write.as === "turn"
-        ? { turnId: write.turnId, jobId: write.caller }
+        ? { turnId: write.turnId, jobId: write.caller, at: atOf(position!) }
         : undefined,
     after: async (saved, _streamId, finished) => {
       const row = saved.find((doc) => doc._id === pending._id);
@@ -948,6 +1055,7 @@ async function planSend(
         jobId,
         threadId: args.threadId,
         order: prompt.order,
+        fromOrder: Math.min(prompt.order, ...saved.map((row) => row.order)),
         promptMessageId: prompt._id,
         anchorMessageId: prompt._id,
         // A pending anchor is the reply itself, so it counts as a member.
@@ -987,7 +1095,10 @@ export async function adoptOpenRow(
   const { row, turn, caller } = adopt;
   let streamId: Id<"streamingMessages"> | undefined;
   if (openStream) {
-    streamId = await openStream({ turnId: turn._id, jobId: caller }, row);
+    streamId = await openStream(
+      { turnId: turn._id, jobId: caller, at: atOf(turn) },
+      row,
+    );
     await ctx.db.patch("messages", row._id, { streamId });
   }
   return { row, streamId, turn: turnInfo(turn, caller) };
@@ -1012,7 +1123,12 @@ export async function planStream(
   }
   await takeOver(ctx, prompt, role, promptTurn);
   if (role.kind !== "holder") return position;
-  return { ...position, turnId: role.turn._id, jobId: caller! };
+  return {
+    ...position,
+    turnId: role.turn._id,
+    jobId: caller!,
+    at: atOf(role.turn),
+  };
 }
 
 /** A durable stream's end: its own job's failure, or the app's stop. */

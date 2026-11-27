@@ -76,6 +76,7 @@ import {
   type SaveTurn,
   settle,
   stopTurns,
+  hold,
 } from "./turns.js";
 
 export const vOnSaveMessages = v.optional(v.string());
@@ -693,18 +694,22 @@ async function addMessagesHandler(
           message.fileIds,
         );
       }
+      const { at: _at, ...stamp } =
+        plan.stamp?.(pendingMessage.order, messageDoc.status, pendingMessage) ??
+        {};
       await ctx.db.replace("messages", pendingMessage._id, {
         ...messageDoc,
         order: pendingMessage.order,
         stepOrder: pendingMessage.stepOrder,
         streamId: pendingMessage.streamId,
         abort: pendingMessage.abort,
-        ...plan.stamp?.(
-          pendingMessage.order,
-          messageDoc.status,
-          pendingMessage,
-        ),
+        ...stamp,
       });
+      if (stamp.turnId !== pendingMessage.turnId) {
+        await hold(ctx, { ...stamp, at: _at }, pendingMessage, {
+          messageId: pendingMessage._id,
+        });
+      }
       const replaced = (await ctx.db.get("messages", pendingMessage._id))!;
       toReturn.push(replaced);
       saved.push({ kind: "update", doc: replaced });
@@ -749,6 +754,8 @@ async function addMessagesHandler(
         ...plan.streamStamp,
       });
     }
+    const { at: _at, ...stored } = plan.stamp?.(order, messageDoc.status) ?? {};
+    const stamp = { ...stored, at: _at };
     const messageId = await ctx.db.insert("messages", {
       ...messageDoc,
       order,
@@ -762,8 +769,9 @@ async function addMessagesHandler(
                 ? plan.carry
                 : undefined),
           }),
-      ...plan.stamp?.(order, messageDoc.status),
+      ...stored,
     });
+    await hold(ctx, stamp, { threadId, order }, { messageId });
     if (message.fileIds) {
       await changeRefcount(ctx, [], message.fileIds);
     }
