@@ -718,7 +718,7 @@ export async function planSave(
   }
   if (!caller && !args.promptMessage?.turnId) return { pending };
   const prompt = args.promptMessage ?? null;
-  const promptTurn = prompt ? await turnOf(ctx, prompt) : null;
+  const promptTurn = prompt ? await turnFor(ctx, prompt) : null;
   const role = await roleOf(ctx, caller, promptTurn);
   if (role.kind === "revoked" || role.kind === "stopped") {
     throw new Error(REFUSED);
@@ -969,7 +969,7 @@ export async function planStream(
   const position = { order: prompt.order, stepOrder: prompt.stepOrder };
   const caller = await callerJob(ctx);
   if (!caller && !prompt.turnId) return position;
-  const promptTurn = await turnOf(ctx, prompt);
+  const promptTurn = await turnFor(ctx, prompt);
   const role = await roleOf(ctx, caller, promptTurn);
   if (role.kind === "revoked" || role.kind === "stopped") {
     throw new Error(REFUSED);
