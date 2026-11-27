@@ -1045,3 +1045,21 @@ test("a send at a new order ends an older turn whose job returned without answer
     reply: ["failed", "The generation returned without answering"],
   });
 });
+
+test("endGeneration leaves a turn its job left open running, and returns false", async () => {
+  let ended: unknown;
+  attempts.push(async (ctx, ids) => {
+    await begin(ctx, ids);
+    ended = await ctx.runMutation(api.messages.endGeneration, {
+      threadId: ids.threadId,
+    });
+  });
+  const s = await submitted();
+  await s.drain();
+  expect({
+    ended,
+    stopped: await s.control((ctx) =>
+      ctx.runMutation(api.messages.abortGeneration, s.ids),
+    ),
+  }).toEqual({ ended: false, stopped: true });
+});
