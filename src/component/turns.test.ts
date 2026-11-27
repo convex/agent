@@ -791,3 +791,53 @@ test("a retry of a stopped turn whose job died ends its reply as stopped and run
     reply: ["success", "Half.", "Stopped"],
   });
 });
+
+test("the next prompt saved in the thread ends a stopped reply from its stream, before the stopped job settles", async () => {
+  const { streaming, stopped } = stoppedMidStream(async () => {});
+  const s = await submitted();
+  const job = s.drain();
+  await streaming.opened;
+  await s.stop();
+  await s.control((ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      threadId: s.ids.threadId,
+      messages: [{ message: { role: "user", content: "Next." } }],
+    }),
+  );
+  const [, reply] = await s.docs();
+  stopped.open();
+  await job;
+  expect([reply.status, reply.text, reply.abort?.reason]).toEqual([
+    "success",
+    "Half.",
+    "Stopped",
+  ]);
+});
+
+test("a regenerate's failPendingSteps ends a stopped reply as stopped, and the stopped job's ending save is then refused", async () => {
+  let late: unknown;
+  const { streaming, stopped } = stoppedMidStream(async (ctx, ids, row) => {
+    late = await tried(fill(ctx, ids.threadId, row, [assistant("Late.")]));
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await streaming.opened;
+  await s.stop();
+  await s.control((ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      ...s.ids,
+      failPendingSteps: true,
+      messages: [pending],
+    }),
+  );
+  stopped.open();
+  await job;
+  const [, reply] = await s.docs();
+  expect({
+    reply: [reply.status, reply.text, reply.abort?.reason],
+    late,
+  }).toEqual({
+    reply: ["success", "Half.", "Stopped"],
+    late: { ok: false, error: expect.stringContaining("stopped or replaced") },
+  });
+});
