@@ -8,7 +8,13 @@ import {
 } from "convex/server";
 import { defineTestApp } from "convex-test";
 import type { LanguageModelV4StreamPart } from "@ai-sdk/provider";
-import { stepCountIs, streamText, tool } from "ai";
+import {
+  stepCountIs,
+  streamText,
+  tool,
+  type StepResult,
+  type ToolSet,
+} from "ai";
 import { z } from "zod/v4";
 import { Agent, createThread, createTool } from "../index.js";
 import type { MessageDoc } from "../../validators.js";
@@ -873,4 +879,46 @@ test("a job whose context handler reads the user before its first save runs its 
   );
   await t.finishAllScheduledFunctions(() => {});
   expect(actingFor).toBe("guest");
+});
+
+const broken = createTool({
+  inputSchema: z.object({}),
+  execute: async (): Promise<string> => {
+    throw new Error("broke");
+  },
+});
+
+// A job that saves a step whose tool failed, then dies streaming the next.
+const crashesAfterBrokenStep = dying(
+  scripted(toolStep([{ id: "b1", tool: "broken" }]), "Half."),
+  (args) => JSON.stringify(args).includes("Half."),
+  { tools: { broken } },
+);
+
+test("a resumed job's stop conditions see its saved steps' usage and tool errors, first on the saved steps alone", async () => {
+  attempts.push(crashesAfterBrokenStep);
+  const seen: unknown[] = [];
+  attempts.push((ctx, ids) =>
+    run(ctx, scripted(toolStep([{ id: "c2", tool: "broken" }]), "Done."), ids, {
+      tools: { broken },
+      stopWhen: ({ steps }: { steps: StepResult<ToolSet>[] }) => {
+        seen.push(
+          steps.map((step) => [
+            step.usage.totalTokens,
+            step.content.map((part) => part.type),
+          ]),
+        );
+        return steps.length >= 3;
+      },
+    }),
+  );
+  const { retried } = await submitted();
+  await retried();
+  expect(seen).toEqual([
+    [[2, ["tool-call", "tool-error"]]],
+    [
+      [2, ["tool-call", "tool-error"]],
+      [2, ["tool-call", "tool-error"]],
+    ],
+  ]);
 });
