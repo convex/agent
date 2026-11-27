@@ -1009,3 +1009,39 @@ test("a stop by stream id is control: another thread's job stops a turn's stream
     own: false,
   });
 });
+
+test("a send at a new order ends an older turn whose job returned without answering (D6)", async () => {
+  let ended: unknown;
+  attempts.push(async (ctx, ids) => {
+    await ctx.runMutation(api.messages.addMessages, {
+      ...ids,
+      messages: [{ message: { role: "system", content: "Noted." } }],
+    });
+    ended = await ctx.runMutation(api.messages.endGeneration, {
+      threadId: ids.threadId,
+    });
+  });
+  attempts.push(async () => {});
+  const s = await submitted();
+  await s.drain();
+  await s.control(async (ctx) =>
+    ctx.runMutation(api.messages.addMessages, {
+      threadId: s.ids.threadId,
+      messages: [{ message: { role: "user", content: "Later." } }],
+      generate: await createFunctionHandle(generate),
+    }),
+  );
+  await s.drain();
+  const failed = (await s.docs()).find((m) => m.status === "failed")!;
+  expect({
+    ended,
+    stopped: await s.control((ctx) =>
+      ctx.runMutation(api.messages.abortGeneration, s.ids),
+    ),
+    reply: [failed.status, failed.error],
+  }).toEqual({
+    ended: true,
+    stopped: false,
+    reply: ["failed", "The generation returned without answering"],
+  });
+});
