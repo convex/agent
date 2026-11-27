@@ -298,13 +298,14 @@ async function addMessagesHandler(
   // For a caller that already read the prompt and its order's last step.
   prompt?: { message: Doc<"messages">; lastStepOrder: number },
 ) {
-  let userId = args.userId;
   const threadId = args.threadId;
-  if (!userId && args.threadId) {
-    const thread = await ctx.db.get("threads", args.threadId);
-    assert(thread, `Thread ${args.threadId} not found`);
-    userId = thread.userId;
+  const thread = await ctx.db.get("threads", threadId);
+  // A deleted thread took the prompt with it.
+  if (!thread && args.abandonIfPromptMissing && args.promptMessageId) {
+    return { messages: [] };
   }
+  assert(thread, `Thread ${threadId} not found`);
+  const userId = args.userId || thread.userId;
   const {
     embeddings,
     failPendingSteps,
@@ -849,6 +850,8 @@ export const cloneMessageBatch = internalMutation({
     continueCursor: string;
     isDone: boolean;
   }> => {
+    const target = await ctx.db.get("threads", args.targetThreadId);
+    assert(target, `Thread ${args.targetThreadId} not found`);
     const orderOffset = args.insertAtOrder ?? 0;
     const result = await listMessagesByThreadIdHandler(ctx, {
       threadId: args.sourceThreadId,
