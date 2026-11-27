@@ -74,7 +74,7 @@ async function scheduledRuns(t: ReturnType<typeof initConvexTest>) {
 }
 
 describe("streams", () => {
-  test("listDeltas rejects streams belonging to another thread", async () => {
+  test("listDeltas returns nothing from another thread's stream", async () => {
     const t = initConvexTest();
     const { streamId } = await seedStream(t);
     const otherThread = await t.mutation(api.threads.createThread, {});
@@ -90,7 +90,43 @@ describe("streams", () => {
         threadId: otherThread._id as Id<"threads">,
         cursors: [{ streamId, cursor: 0 }],
       }),
-    ).rejects.toThrow("Stream does not belong to the given thread");
+    ).resolves.toEqual([]);
+  });
+
+  test("listDeltas never reads deltas of another thread's or a deleted stream", async () => {
+    const t = convexTest({
+      schema,
+      modules,
+      transactionLimits: { bytesRead: 256 * 1024 },
+    });
+    const foreign = await seedStream(t);
+    const deleted = await seedStream(t);
+    const otherThread = await t.mutation(api.threads.createThread, {});
+    const threadId = otherThread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    // Either stream's deltas alone are past the read limit.
+    await insertDeltas(t, foreign.streamId, 0, 10, 40_000);
+    await insertDeltas(t, deleted.streamId, 0, 10, 40_000);
+    await t.run((ctx) => ctx.db.delete("streamingMessages", deleted.streamId));
+    await insertDeltas(t, streamId, 0, 2, 10);
+
+    const deltas = await t.query(api.streams.listDeltas, {
+      threadId,
+      cursors: [
+        { streamId: foreign.streamId, cursor: 0 },
+        { streamId: deleted.streamId, cursor: 0 },
+        { streamId, cursor: 0 },
+      ],
+    });
+    expect(deltas.map((d) => [d.streamId, d.start])).toEqual([
+      [streamId, 0],
+      [streamId, 1],
+    ]);
   });
 
   test("listDeltas skips deleted streams even if deltas remain", async () => {

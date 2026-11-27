@@ -33,41 +33,38 @@ const testMetadata = {
 };
 
 describe("syncStreams", () => {
-  test.each(["first", "last"])(
-    "rejects a mixed-thread request with the foreign stream %s",
-    async (position) => {
-      const t = initConvexTest();
-      await t.action(async (ctx) => {
-        const threadId = await createThread(ctx, components.agent, {});
-        const otherThreadId = await createThread(ctx, components.agent, {});
-        const cursors = [];
-        for (const id of [threadId, otherThreadId]) {
-          const streamId = await ctx.runMutation(
-            components.agent.streams.create,
-            {
-              ...testMetadata,
-              threadId: id,
-            },
-          );
-          await ctx.runMutation(components.agent.streams.addDelta, {
-            streamId,
-            start: 0,
-            end: 1,
-            parts: [id === threadId ? "allowed" : "private"],
-          });
-          cursors.push({ streamId, cursor: 0 });
-        }
-        if (position === "first") cursors.reverse();
+  test("returns only this thread's deltas with another thread's stream first", async () => {
+    const t = initConvexTest();
+    await t.action(async (ctx) => {
+      const threadId = await createThread(ctx, components.agent, {});
+      const otherThreadId = await createThread(ctx, components.agent, {});
+      const cursors = [];
+      for (const id of [otherThreadId, threadId]) {
+        const streamId = await ctx.runMutation(
+          components.agent.streams.create,
+          {
+            ...testMetadata,
+            threadId: id,
+          },
+        );
+        await ctx.runMutation(components.agent.streams.addDelta, {
+          streamId,
+          start: 0,
+          end: 1,
+          parts: [id === threadId ? "allowed" : "private"],
+        });
+        cursors.push({ streamId, cursor: 0 });
+      }
 
-        await expect(
-          syncStreams(ctx, components.agent, {
-            threadId,
-            streamArgs: { kind: "deltas", cursors },
-          }),
-        ).rejects.toThrow("Stream does not belong to the given thread");
+      const result = await syncStreams(ctx, components.agent, {
+        threadId,
+        streamArgs: { kind: "deltas", cursors },
       });
-    },
-  );
+      expect(
+        result?.kind === "deltas" && result.deltas.map((d) => d.parts),
+      ).toEqual([["allowed"]]);
+    });
+  });
 
   test("returns same-thread deltas from each stream's cursor", async () => {
     const t = initConvexTest();
