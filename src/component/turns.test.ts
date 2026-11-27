@@ -814,10 +814,10 @@ test("the next prompt saved in the thread ends a stopped reply from its stream, 
   ]);
 });
 
-test("a regenerate's failPendingSteps ends a stopped reply as stopped, and the stopped job's ending save is then refused", async () => {
+test("a regenerate's failPendingSteps ends a stopped reply as stopped, and the stopped job's ending save is then a no-op", async () => {
   let late: unknown;
   const { streaming, stopped } = stoppedMidStream(async (ctx, ids, row) => {
-    late = await tried(fill(ctx, ids.threadId, row, [assistant("Late.")]));
+    late = (await tried(fill(ctx, ids.threadId, row, [assistant("Late.")]))).ok;
   });
   const s = await submitted();
   const job = s.drain();
@@ -838,7 +838,7 @@ test("a regenerate's failPendingSteps ends a stopped reply as stopped, and the s
     late,
   }).toEqual({
     reply: ["success", "Half.", "Stopped"],
-    late: { ok: false, error: expect.stringContaining("stopped or replaced") },
+    late: true,
   });
 });
 
@@ -850,6 +850,9 @@ test("a stopped job whose reply another path already ended gets one verdict: its
         streamId,
         reason: "Aborted.",
       });
+      seen.finish = (
+        await tried(ctx.runMutation(api.streams.finish, { streamId }))
+      ).ok;
       seen.fill = (
         await tried(fill(ctx, ids.threadId, row, [assistant("Late.")]))
       ).ok;
@@ -881,6 +884,7 @@ test("a stopped job whose reply another path already ended gets one verdict: its
     reply: [reply.status, reply.text, reply.abort?.reason],
   }).toEqual({
     fail: true,
+    finish: true,
     fill: true,
     finalize: true,
     reply: ["success", "Half.", "Stopped"],

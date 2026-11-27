@@ -16,6 +16,8 @@ type Status = Row["status"];
 type Role =
   | { kind: "app" }
   | { kind: "holder"; turn: Turn }
+  // The job of a turn a stop ended.
+  | { kind: "stopped"; turn: Turn }
   | { kind: "revoked" };
 export type Stamp = { turnId?: Id<"turns">; jobId?: string };
 export type TurnInfo = { promptMessageId: Id<"messages">; jobId: string };
@@ -57,9 +59,7 @@ async function roleOf(
   hint?: Turn | null,
 ): Promise<Role> {
   if (!caller) return { kind: "app" };
-  if (hint && hint.jobId === caller) {
-    return live(hint) ? { kind: "holder", turn: hint } : { kind: "app" };
-  }
+  if (hint && hint.jobId === caller) return jobRole(hint);
   const job = await ctx.db
     .query("jobs")
     .withIndex("jobId", (q) => q.eq("jobId", caller))
@@ -67,19 +67,29 @@ async function roleOf(
   if (!job) return { kind: "app" };
   const turn = await ctx.db.get("turns", job.turnId);
   if (!turn || turn.jobId !== caller) return { kind: "revoked" };
-  return live(turn) ? { kind: "holder", turn } : { kind: "app" };
+  return jobRole(turn);
+}
+
+// A stop keeps the turn's job, so the stopped job is told apart from a replaced one.
+function jobRole(turn: Turn): Role {
+  if (turn.status !== "done") return { kind: "holder", turn };
+  return turn.outcome === "stopped"
+    ? { kind: "stopped", turn }
+    : { kind: "app" };
 }
 
 type Write =
   | { as: "turn"; turnId: Id<"turns">; caller: string }
   // A stopped job's save into its own stopped open row: that row's ending.
   | { as: "ending"; turnId: Id<"turns">; caller: string }
+  // A stopped job's write after its row ended: a no-op.
+  | { as: "stopped" }
   | { as: "app"; liveTurn?: Turn };
 
 /** Who may write an existing row: its turn's job, the app, or no one. */
 export async function authorizeRow(ctx: MutationCtx, row: Row) {
   const write = await authorizeEnding(ctx, row);
-  if (write.as === "ending") throw new Error(REFUSED);
+  if (write.as === "ending" || write.as === "stopped") throw new Error(REFUSED);
   return write;
 }
 
@@ -97,6 +107,10 @@ export async function authorizeEnding(
   const turn = await turnOf(ctx, row);
   const role = await roleOf(ctx, caller, turn);
   if (role.kind === "revoked") throw new Error(REFUSED);
+  if (role.kind === "stopped") {
+    if (role.turn._id !== row.turnId) throw new Error(REFUSED);
+    return { as: "stopped" };
+  }
   if (!live(turn)) return { as: "app" };
   if (role.kind === "holder" && role.turn._id === turn._id) {
     return { as: "turn", turnId: turn._id, caller: caller! };
@@ -388,7 +402,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
   await ctx.db.patch("turns", turn._id, {
     status: "done",
     outcome: end,
-    jobId: byOwnJob ? turn.jobId : undefined,
+    jobId: byOwnJob || end === "stopped" ? turn.jobId : undefined,
   });
 }
 
@@ -638,6 +652,8 @@ export type SaveTurn = {
   userId?: string;
   // A stopped job's last save: trailing open rows and new streams are dropped.
   ending?: true;
+  // A stopped job's save into a row that already ended: nothing is written.
+  stopped?: true;
   adopt?: { row: Row; turn: Turn; caller: string };
   after?: (
     saved: Row[],
@@ -693,6 +709,7 @@ export async function planSave(
     const write = await authorizeEnding(ctx, pending);
     if (!pending.turnId) return { pending };
     if (write.as === "ending") return planEnding(ctx, pending, write.turnId);
+    if (write.as === "stopped") return { pending, stopped: true };
     if (
       write.as === "turn" || write.liveTurn
         ? args.promptMessage && args.promptMessage.order !== pending.order
@@ -706,7 +723,9 @@ export async function planSave(
   const prompt = args.promptMessage ?? null;
   const promptTurn = prompt ? await turnOf(ctx, prompt) : null;
   const role = await roleOf(ctx, caller, promptTurn);
-  if (role.kind === "revoked") throw new Error(REFUSED);
+  if (role.kind === "revoked" || role.kind === "stopped") {
+    throw new Error(REFUSED);
+  }
   if (prompt && beginning) await takeOver(ctx, prompt, role, promptTurn);
   if (role.kind !== "holder") return { pending };
   const turn = role.turn;
@@ -758,7 +777,9 @@ export async function streamLease(ctx: MutationCtx): Promise<Stamp> {
   const caller = await callerJob(ctx);
   if (!caller) return {};
   const role = await roleOf(ctx, caller);
-  if (role.kind === "revoked") throw new Error(REFUSED);
+  if (role.kind === "revoked" || role.kind === "stopped") {
+    throw new Error(REFUSED);
+  }
   return role.kind === "holder" ? { turnId: role.turn._id, jobId: caller } : {};
 }
 
@@ -777,7 +798,7 @@ async function positionOf(
 async function planFill(
   ctx: MutationCtx,
   pending: Row,
-  write: Exclude<Write, { as: "ending" }>,
+  write: Exclude<Write, { as: "ending" | "stopped" }>,
   prompt?: Row | null,
 ): Promise<SaveTurn> {
   const turnId = write.as === "turn" ? write.turnId : write.liveTurn?._id;
@@ -866,7 +887,9 @@ async function planSend(
   caller: string | null,
 ): Promise<SaveTurn> {
   const role = await roleOf(ctx, caller);
-  if (role.kind === "revoked") throw new Error(REFUSED);
+  if (role.kind === "revoked" || role.kind === "stopped") {
+    throw new Error(REFUSED);
+  }
   const order =
     args.promptMessage?.order ??
     (typeof args.order === "number" ? args.order : undefined);
@@ -951,7 +974,9 @@ export async function planStream(
   if (!caller && !prompt.turnId) return position;
   const promptTurn = await turnOf(ctx, prompt);
   const role = await roleOf(ctx, caller, promptTurn);
-  if (role.kind === "revoked") throw new Error(REFUSED);
+  if (role.kind === "revoked" || role.kind === "stopped") {
+    throw new Error(REFUSED);
+  }
   await takeOver(ctx, prompt, role, promptTurn);
   if (role.kind !== "holder") return position;
   return { ...position, turnId: role.turn._id, jobId: caller! };
@@ -970,7 +995,6 @@ export async function endStream(
   if (await closeStoppedStream(ctx, stream)) return true;
   const caller = await callerJob(ctx);
   const holds = caller !== null && caller === stream.jobId;
-  if (!holds && (await roleOf(ctx, caller)).kind !== "app") return false;
   // fail is the streamer's own failure; abort, or the app's fail, is a stop.
   if (holds && how === "fail") {
     if (stream.state.kind !== "streaming") return false;
@@ -1002,12 +1026,17 @@ export async function settleStream(ctx: MutationCtx, stream: Stream) {
 
 /** A stopped job's own close of its stopped stream ends that stream's rows. */
 export async function closeStoppedStream(ctx: MutationCtx, stream: Stream) {
-  if (stream.state.kind !== "aborted" || !stream.state.timeoutFnId) {
+  if (stream.jobId === undefined || stream.state.kind === "streaming") {
     return false;
   }
-  if ((await callerJob(ctx)) !== stream.jobId) return false;
-  await timeoutStoppedStream(ctx, stream);
-  return true;
+  const caller = await callerJob(ctx);
+  if (caller !== stream.jobId) return false;
+  if (stream.state.kind === "aborted" && stream.state.timeoutFnId) {
+    await timeoutStoppedStream(ctx, stream);
+    return true;
+  }
+  const role = await roleOf(ctx, caller);
+  return role.kind === "stopped" && role.turn._id === stream.turnId;
 }
 
 /** A stopped stream's timeout: its runner is gone, so its rows end here. */
@@ -1211,7 +1240,9 @@ export async function planResponse(
   const turn = await turnOf(ctx, request);
   const caller = await callerJob(ctx);
   const role = await roleOf(ctx, caller, turn);
-  if (role.kind === "revoked") throw new Error(REFUSED);
+  if (role.kind === "revoked" || role.kind === "stopped") {
+    throw new Error(REFUSED);
+  }
   if (!live(turn)) {
     // A request of an ended turn takes its answer, but nothing continues it.
     return generate === undefined || turn

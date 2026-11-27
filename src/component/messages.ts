@@ -493,6 +493,7 @@ async function addMessagesHandler(
       order: requestedOrder,
       messages,
     }));
+  if (plan.stopped) return { messages: [publicMessage(plan.pending!)] };
   if (plan.userId !== undefined && !args.userId) userId = plan.userId;
   if (messages.some((m) => m.message.role === "user")) {
     await endStoppedInThread(ctx, threadId);
@@ -858,6 +859,7 @@ export const finalizeMessage = mutation({
     if (!stored.turnId) {
       return finalizePending(ctx, stored, result, onSaveMessages);
     }
+    if (write.as === "stopped") return null;
     if (write.as === "ending") {
       // A stopped reply ends as stopped, with what it streamed.
       await finalizePending(
