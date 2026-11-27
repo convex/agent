@@ -411,7 +411,9 @@ export const abort = mutation({
   returns: v.boolean(),
   handler: async (ctx, args) => {
     const stream = await ctx.db.get("streamingMessages", args.streamId);
-    if (stream?.jobId !== undefined) return endStream(ctx, stream, args);
+    if (stream?.jobId !== undefined) {
+      return endStream(ctx, "abort", stream, args);
+    }
     const aborted = await abortById(ctx, args);
     if (aborted) await stopStreamReply(ctx, stream!, args.reason);
     return aborted;
@@ -477,7 +479,7 @@ export const fail = mutation({
     const stream = await ctx.db.get("streamingMessages", streamId);
     if (!stream) return false;
     if (stream.jobId !== undefined) {
-      return endStream(ctx, stream, {
+      return endStream(ctx, "fail", stream, {
         reason,
         ...(finalDelta?.streamId === streamId ? { finalDelta } : {}),
       });

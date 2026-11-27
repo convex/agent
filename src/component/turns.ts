@@ -21,6 +21,9 @@ const TIMED_OUT = "timeout";
 
 const live = (turn: Turn | null | undefined): turn is Turn =>
   !!turn && turn.status !== "done";
+// A turn's position: its thread and order. Leased rows and streams elsewhere aren't at it.
+const at = (turn: Turn) => (d: { threadId: Id<"threads">; order: number }) =>
+  d.threadId === turn.threadId && d.order === turn.order;
 const anchors = (turn: Turn, row: Row) =>
   row._id === turn.promptMessageId || row._id === turn.anchorMessageId;
 
@@ -128,7 +131,7 @@ async function settledMembers(ctx: MutationCtx, turn: Turn, since?: "anchor") {
     ...(await members(ctx, turn, "success", since)),
     ...(await members(ctx, turn, "failed", since)),
   ]
-    .filter((row) => row.order === turn.order)
+    .filter(at(turn))
     .sort((a, b) => a.stepOrder - b.stepOrder);
 }
 
@@ -147,7 +150,7 @@ async function detect(
   wroteFailed: boolean,
 ): Promise<Detected> {
   if (wroteFailed) return { kind: "failed" };
-  const atOrder = (d: { order: number }) => d.order === turn.order;
+  const atOrder = at(turn);
   if ((await members(ctx, turn, "pending")).some(atOrder)) {
     return { kind: "open" };
   }
@@ -245,7 +248,7 @@ async function closeStream(
 async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
   const openRows = await members(ctx, turn, "pending");
   const openStreams = await memberStreams(ctx, turn, "streaming");
-  const atOrder = (d: { order: number }) => d.order === turn.order;
+  const atOrder = at(turn);
   if ("waiting" in to) {
     await ctx.db.patch("turns", turn._id, {
       status: "waiting",
@@ -347,6 +350,20 @@ async function failedReply(ctx: MutationCtx, turn: Turn, error: string) {
     error,
     turnId: turn._id,
   });
+}
+
+async function jobState(ctx: MutationCtx, turn: Turn) {
+  if (!turn.jobId) return undefined;
+  const job = await ctx.db.system.get(
+    "_scheduled_functions",
+    turn.jobId as Id<"_scheduled_functions">,
+  );
+  return job?.state.kind;
+}
+
+async function jobRunning(ctx: MutationCtx, turn: Turn) {
+  const state = await jobState(ctx, turn);
+  return state === "pending" || state === "inProgress";
 }
 
 async function cancelQueued(ctx: MutationCtx, turn: Turn) {
@@ -463,9 +480,10 @@ async function supersede(
 ) {
   for (const turn of await liveTurns(ctx, threadId)) {
     if (caller && turn.jobId === caller) continue;
+    // A running turn elsewhere keeps its live job; a dead one is replaced.
     const replaced =
       turn.status === "running"
-        ? turn.order === order
+        ? turn.order === order || !(await jobRunning(ctx, turn))
         : order === undefined || turn.order <= order;
     if (replaced) {
       await handOff(ctx, turn, { end: "superseded", byOwnJob: false });
@@ -502,19 +520,15 @@ const turnInfo = (turn: Turn, jobId: string): TurnInfo => ({
   jobId,
 });
 
-function memberStamp(turn: Turn, caller: string) {
+/** A holder's rows at its turn are members; elsewhere only its open rows are leased. */
+function memberStamp(turn: Turn, caller: string, threadId: Id<"threads">) {
   return (order: number, status: Status, replaced?: Row): Stamp => {
-    if (replaced) {
-      return {
-        turnId: replaced.turnId,
-        ...(status === "pending" ? { jobId: caller } : {}),
-      };
+    const job = status === "pending" ? { jobId: caller } : {};
+    if (replaced) return { turnId: replaced.turnId, ...job };
+    if (threadId !== turn.threadId || order !== turn.order) {
+      return status === "pending" ? { turnId: turn._id, ...job } : {};
     }
-    if (order !== turn.order) return {};
-    return {
-      turnId: turn._id,
-      ...(status === "pending" ? { jobId: caller } : {}),
-    };
+    return { turnId: turn._id, ...job };
   };
 }
 
@@ -571,9 +585,7 @@ export async function planSave(
   if (!atTurn) return { pending, ...lease(turn, own) };
   const userId = await promptUser(ctx, turn);
   if (prompt && beginning && anchors(turn, prompt)) {
-    const [open] = (await members(ctx, turn, "pending")).filter(
-      (row) => row.order === turn.order,
-    );
+    const [open] = (await members(ctx, turn, "pending")).filter(at(turn));
     if (open) {
       return { pending, userId, adopt: { row: open, turn, caller: own } };
     }
@@ -581,7 +593,7 @@ export async function planSave(
   return {
     pending,
     userId,
-    stamp: memberStamp(turn, own),
+    stamp: memberStamp(turn, own, args.threadId),
     streamStamp: { turnId: turn._id, jobId: own },
     after: async () => {
       await settle(ctx, turn._id, { byApp: false });
@@ -620,7 +632,7 @@ function planFill(ctx: MutationCtx, pending: Row, write: Write): SaveTurn {
     carry: turnId ? pending.streamId : undefined,
     stamp:
       write.as === "turn"
-        ? memberStamp(write.turn, write.caller)
+        ? memberStamp(write.turn, write.caller, pending.threadId)
         : (_order, _status, replaced) =>
             replaced ? { turnId: replaced.turnId } : {},
     streamStamp:
@@ -737,27 +749,24 @@ export async function planStream(
   ctx: MutationCtx,
   threadId: Id<"threads">,
   promptMessageId: Id<"messages">,
-): Promise<Stamp> {
+): Promise<Stamp & { order: number; stepOrder: number }> {
   const prompt = await resolve(ctx, threadId, promptMessageId);
   if (!prompt) throw new Error(`Prompt message ${promptMessageId} not found`);
+  // A stream at a prompt sits at the prompt, whatever context its caller read.
+  const position = { order: prompt.order, stepOrder: prompt.stepOrder };
   const caller = await callerJob(ctx);
-  if (!caller && !prompt.turnId) return {};
+  if (!caller && !prompt.turnId) return position;
   const role = await roleOf(ctx, caller, await turnOf(ctx, prompt));
   if (role.kind === "revoked") throw new Error(REFUSED);
   await takeOver(ctx, prompt, role);
-  if (
-    role.kind === "holder" &&
-    role.turn.threadId === threadId &&
-    role.turn.order === prompt.order
-  ) {
-    return { turnId: role.turn._id, jobId: caller! };
-  }
-  return {};
+  if (role.kind !== "holder") return position;
+  return { ...position, turnId: role.turn._id, jobId: caller! };
 }
 
 /** A durable stream's end: its own job's failure, or the app's stop. */
 export async function endStream(
   ctx: MutationCtx,
+  how: "fail" | "abort",
   stream: Stream,
   args: {
     reason: string;
@@ -768,9 +777,10 @@ export async function endStream(
   if (caller === stream.jobId) {
     if (stream.state.kind !== "streaming") return false;
     await abortById(ctx, { streamId: stream._id, ...args });
+    // Its job failing its stream fails the turn; aborting one only ends it.
     await settle(ctx, stream.turnId!, {
       byApp: false,
-      wroteFailed: true,
+      wroteFailed: how === "fail",
       reason: args.reason,
     });
     return true;
@@ -962,11 +972,7 @@ export async function retryTurn(
   }
   if (!turn || turn.status !== "running") return null;
   if (turn.jobId) {
-    const job = await ctx.db.system.get(
-      "_scheduled_functions",
-      turn.jobId as Id<"_scheduled_functions">,
-    );
-    const state = job?.state.kind;
+    const state = await jobState(ctx, turn);
     if (state === "pending" || state === "inProgress") return turn.jobId;
     if (state === "success") {
       await handOff(ctx, turn, { end: "unanswered", byOwnJob: false });
