@@ -257,6 +257,7 @@ type Ending =
 type To =
   | { job: string; generate?: string; anchor?: Row; newRow?: true }
   | { waiting: Id<"messages"> }
+  | { resumed: true }
   | { idle: true }
   | { end: Ending; byOwnJob: boolean; reason?: string };
 
@@ -301,16 +302,19 @@ async function closeStream(
 
 // handOff: the only writer of a turn's job and status, and of a row's job copy.
 async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
+  if ("waiting" in to || "resumed" in to) {
+    await ctx.db.patch(
+      "turns",
+      turn._id,
+      "waiting" in to
+        ? { status: "waiting", requestMessageId: to.waiting }
+        : { status: "running", requestMessageId: undefined },
+    );
+    return;
+  }
   const openRows = await members(ctx, turn, "pending");
   const openStreams = await memberStreams(ctx, turn, "streaming");
   const atOrder = at(turn);
-  if ("waiting" in to) {
-    await ctx.db.patch("turns", turn._id, {
-      status: "waiting",
-      requestMessageId: to.waiting,
-    });
-    return;
-  }
   if ("idle" in to) {
     for (const s of openStreams)
       await closeStream(ctx, s._id, false, TIMED_OUT);
@@ -510,12 +514,7 @@ export async function settle(
   if (!live(turn)) return;
   const result = await detect(ctx, turn, !!w.wroteFailed);
   if (result.kind === "open" || result.kind === "none") {
-    if (turn.status === "waiting") {
-      await ctx.db.patch("turns", turn._id, {
-        status: "running",
-        requestMessageId: undefined,
-      });
-    }
+    if (turn.status === "waiting") await handOff(ctx, turn, { resumed: true });
     return;
   }
   if (result.kind === "waiting") {
@@ -535,21 +534,27 @@ export async function settle(
   });
 }
 
+// turnsOf: the only lookup of turns by position. Live ones, or with `newest`
+// the newest of each status, done included.
 async function turnsOf(
   ctx: MutationCtx,
   threadId: Id<"threads">,
   order?: number,
+  newest?: "newest",
 ) {
+  const statuses = newest
+    ? (["running", "waiting", "done"] as const)
+    : (["running", "waiting"] as const);
   const lists = await Promise.all(
-    (["running", "waiting"] as const).map((status) =>
-      ctx.db
+    statuses.map((status) => {
+      const range = ctx.db
         .query("turns")
         .withIndex("threadId_status_order", (q) => {
           const base = q.eq("threadId", threadId).eq("status", status);
           return order === undefined ? base : base.eq("order", order);
-        })
-        .collect(),
-    ),
+        });
+      return newest ? range.order("desc").take(1) : range.collect();
+    }),
   );
   return lists.flat();
 }
@@ -607,20 +612,8 @@ export async function endStoppedInThread(
 }
 
 async function newestTurn(ctx: MutationCtx, threadId: Id<"threads">) {
-  const newest = await Promise.all(
-    (["running", "waiting", "done"] as const).map((status) =>
-      ctx.db
-        .query("turns")
-        .withIndex("threadId_status_order", (q) =>
-          q.eq("threadId", threadId).eq("status", status),
-        )
-        .order("desc")
-        .first(),
-    ),
-  );
   return (
-    newest
-      .filter((t) => t !== null)
+    (await turnsOf(ctx, threadId, undefined, "newest"))
       .sort((a, b) => a.order - b.order || a._creationTime - b._creationTime)
       .at(-1) ?? null
   );

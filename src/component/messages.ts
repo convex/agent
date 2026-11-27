@@ -549,7 +549,7 @@ async function addMessagesHandler(
           const { tableName } = getVectorIdInfo(ctx, m.embeddingId);
           await ctx.db.delete(tableName, m.embeddingId);
         }
-        await ctx.db.patch("messages", m._id, patch);
+        await writeMessage(ctx, m._id, patch);
       }),
     );
     saved.push(
