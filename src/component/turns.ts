@@ -929,28 +929,27 @@ export async function failPlainReplies(ctx: MutationCtx, deleted: Row[]) {
   const seen = new Set<string>();
   for (const row of deleted) {
     const key = `${row.threadId}:${row.order}`;
-    if (row.status === "pending" || seen.has(key)) continue;
+    if (row.message?.role !== "user" || seen.has(key)) continue;
     seen.add(key);
-    for (const tool of [false, true]) {
-      const rows = await ctx.db
-        .query("messages")
-        .withIndex("threadId_status_tool_order_stepOrder", (q) =>
-          q
-            .eq("threadId", row.threadId)
-            .eq("status", "pending")
-            .eq("tool", tool)
-            .eq("order", row.order),
-        )
-        .collect();
-      for (const reply of rows) {
-        if (reply.jobId !== undefined) continue;
-        await finalizePending(
-          ctx,
-          reply,
-          { status: "failed", error: REASONS.deleted },
-          undefined,
-        );
-      }
+    // A pending reply has no tool parts yet, so one index range finds them.
+    const replies = await ctx.db
+      .query("messages")
+      .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+        q
+          .eq("threadId", row.threadId)
+          .eq("status", "pending")
+          .eq("tool", false)
+          .eq("order", row.order),
+      )
+      .collect();
+    for (const reply of replies) {
+      if (reply.jobId !== undefined) continue;
+      await finalizePending(
+        ctx,
+        reply,
+        { status: "failed", error: REASONS.deleted },
+        undefined,
+      );
     }
   }
 }

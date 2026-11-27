@@ -137,7 +137,8 @@ export async function deleteMessage(
   if (messageDoc.fileIds) {
     await changeRefcount(ctx, messageDoc.fileIds, []);
   }
-  await deleteToolRecords(ctx, messageDoc._id);
+  // Only a durable turn's rows have tool records.
+  if (messageDoc.turnId) await deleteToolRecords(ctx, messageDoc._id);
 }
 
 async function deleteToolRecords(ctx: MutationCtx, messageId: Id<"messages">) {
