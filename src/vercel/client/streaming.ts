@@ -250,34 +250,6 @@ export function mergeTransforms<TOOLS extends ToolSet>(
 
 const OPENING_CHUNKS = new Set<unknown>(["start", "start-step"]);
 
-let holdDeltas: <T, R>(
-  streamer: DeltaStreamer<T>,
-  during: Promise<R>,
-) => Promise<R>;
-
-/**
- * Buffers a streamer's parts instead of starting a write until `during`
- * settles, so a wait inside a step, like a durable step's record, doesn't
- * split the step's deltas. Internal: not part of DeltaStreamer's API.
- */
-export function holdStreamerDeltas<T, R>(
-  streamer: DeltaStreamer<T>,
-  during: Promise<R>,
-): Promise<R> {
-  return holdDeltas(streamer, during);
-}
-
-let closedItsReply: <T>(streamer: DeltaStreamer<T>) => boolean;
-
-/**
- * Whether the streamer's own close of its stream ended its reply: a stopped
- * job's close, which the stop leaves to it. Internal, like
- * {@link holdStreamerDeltas}.
- */
-export function streamerClosedItsReply<T>(streamer: DeltaStreamer<T>) {
-  return closedItsReply(streamer);
-}
-
 /**
  * DeltaStreamer can be used to save a stream of "parts" by writing
  * batches of them in "deltas" to the database so clients can subscribe
@@ -286,12 +258,6 @@ export function streamerClosedItsReply<T>(streamer: DeltaStreamer<T>) {
  * optimize the data in transit.
  */
 export class DeltaStreamer<T> {
-  static {
-    holdDeltas = (streamer, during) => streamer.#hold(during);
-    closedItsReply = (streamer) => streamer.#closedItsReply;
-  }
-  #closedItsReply = false;
-
   streamId: string | undefined;
   public readonly config: {
     throttleMs: number;
@@ -309,6 +275,7 @@ export class DeltaStreamer<T> {
   #ongoingWrite: Promise<void> | undefined;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
   #held = 0;
+  #closedItsReply = false;
   #keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
   #keepAliveStopped: boolean;
   #abortPromise: Promise<void> | undefined;
@@ -438,7 +405,8 @@ export class DeltaStreamer<T> {
     }
   }
 
-  async #hold<R>(during: Promise<R>): Promise<R> {
+  /** Writes no deltas until `during` settles, so a wait inside a step doesn't split its deltas. */
+  public async hold<R>(during: Promise<R>): Promise<R> {
     this.#held++;
     try {
       return await during;
@@ -774,8 +742,10 @@ export class DeltaStreamer<T> {
     });
   }
 
-  public async fail(reason: string) {
+  /** Fails the stream; true when this close ended its reply, as a stopped job's close does. */
+  public async fail(reason: string): Promise<boolean> {
     await this.#abort(reason);
+    return this.#closedItsReply;
   }
 
   async #abortDelta(reason: string) {

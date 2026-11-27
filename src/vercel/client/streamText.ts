@@ -12,8 +12,6 @@ import {
   compressUIMessageChunks,
   DEFAULT_STREAMING_OPTIONS,
   DeltaStreamer,
-  holdStreamerDeltas,
-  streamerClosedItsReply,
   mergeTransforms,
   type StreamingOptions,
 } from "./streaming.js";
@@ -33,7 +31,7 @@ import { materializeUIMessageChunkFiles } from "../fileMaterialization.js";
 
 export async function runStreamCleanup(cleanup: {
   failCall: () => Promise<void>;
-  failStreamer: () => Promise<void>;
+  failStreamer: () => Promise<unknown>;
   onAbort?: () => PromiseLike<void> | void;
 }): Promise<void> {
   const results = await Promise.allSettled([
@@ -124,9 +122,7 @@ export async function streamText<
           ? {
               createStream: { format: "UIMessageChunk" },
               holdDeltas: (during) =>
-                holding.streamer
-                  ? holdStreamerDeltas(holding.streamer, during)
-                  : during,
+                holding.streamer ? holding.streamer.hold(during) : during,
             }
           : {}),
       },
@@ -187,8 +183,7 @@ export async function streamText<
   // stop refuses any other write, so its generation ends without one.
   const stoppedByRefusal = async () => {
     if (!deltasRefused || !call.turn || !streamer) return false;
-    await streamer.fail(deltasFailed ?? "async abort").catch(() => {});
-    return streamerClosedItsReply(streamer);
+    return streamer.fail(deltasFailed ?? "async abort").catch(() => false);
   };
   const failCall = async (reason: string) =>
     (await stoppedByRefusal()) ? call.stopped() : call.fail(reason);
