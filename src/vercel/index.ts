@@ -974,7 +974,10 @@ export class Agent<
 
   /**
    * Run a durable turn's generation again, after its job crashed or timed
-   * out. The new job continues after the steps the turn already saved.
+   * out. The new job continues after the steps the turn already saved, and
+   * its `stopWhen` counts them. If `stopWhen` changed since the crashed job
+   * ran and the saved steps already meet it, the new job still runs a step,
+   * and a step count it is already past doesn't stop it.
    * @param ctx A ctx object from a mutation.
    * @param args.threadId The thread of the turn.
    * @param args.promptMessageId The turn's prompt. Defaults to the thread's
