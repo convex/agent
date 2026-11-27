@@ -12,6 +12,7 @@ import {
   answersQuestion,
   decodeAnswer,
   decodeQuestions,
+  MAX_DOCUMENT_BYTES,
   sumsToOne,
   tooLarge,
 } from "../decisions.js";
@@ -75,19 +76,12 @@ function toDoc(decision: Doc<"decisions">, rows: Doc<"decisionAnswers">[]) {
 
 const vAsked = v.object(pick(answerFields, ["questionId", "shapeHash"]));
 
-// Half a query's read limits, as listDeltas keeps, leaving the rest for the
-// decision that crosses it: how large a decision is shows only once it's read.
-async function hasReadHeadroom(ctx: QueryCtx) {
-  const { bytesRead, documentsRead } = await ctx.meta.getTransactionMetrics();
-  return [bytesRead, documentsRead].every(
-    ({ used, remaining }) => used <= (used + remaining) / 2,
-  );
-}
-
 /**
- * Reads `source` an item at a time, so a page ends early while it has
- * headroom for more. A refresh up to its `endCursor` returns that whole range,
- * as a paginated query's pages must stay adjacent.
+ * Reads `source` in batches that leave room for a full document per decision
+ * read, ending the page once half the query's read limits are used, as
+ * listDeltas keeps. A decision's size shows only once it's read. A refresh up
+ * to its `endCursor` returns that whole range, as a paginated query's pages
+ * must stay adjacent.
  */
 async function pageWithinReadLimits<T, D>(
   ctx: QueryCtx,
@@ -102,12 +96,27 @@ async function pageWithinReadLimits<T, D>(
   const page: D[] = [];
   let cursor = opts.cursor;
   for (;;) {
-    const result = await source.paginate({ numItems: 1, cursor });
-    for (const item of result.page) page.push(await load(item));
+    const { bytesRead, documentsRead } = await ctx.meta.getTransactionMetrics();
+    const [bytesLeft, documentsLeft] = [bytesRead, documentsRead].map(
+      ({ used, remaining }) => (used + remaining) / 2 - used,
+    );
+    if (page.length > 0 && (bytesLeft <= 0 || documentsLeft <= 0)) {
+      return { page, isDone: false, continueCursor: cursor! };
+    }
+    const result = await source.paginate({
+      numItems: Math.max(
+        1,
+        Math.min(
+          opts.numItems - page.length,
+          Math.floor(bytesLeft / MAX_DOCUMENT_BYTES),
+        ),
+      ),
+      cursor,
+    });
+    page.push(...(await Promise.all(result.page.map(load))));
     cursor = result.continueCursor;
-    if (result.isDone) return { page, isDone: true, continueCursor: cursor };
-    if (page.length >= opts.numItems || !(await hasReadHeadroom(ctx))) {
-      return { page, isDone: false, continueCursor: cursor };
+    if (result.isDone || page.length >= opts.numItems) {
+      return { page, isDone: result.isDone, continueCursor: cursor };
     }
   }
 }
