@@ -339,7 +339,15 @@ const streamTextAbortedMidStream = app.action({
         threadId,
         statuses: ["streaming"],
       });
-      if (streaming.length) {
+      const streamed =
+        streaming.length > 0 &&
+        (
+          await ctx.runQuery(components.agent.streams.listDeltas, {
+            threadId,
+            cursors: [{ streamId: streaming[0].streamId, cursor: 0 }],
+          })
+        ).length > 0;
+      if (streamed) {
         await ctx.runMutation(components.agent.streams.abort, {
           streamId: streaming[0].streamId,
           reason: "external abort",
