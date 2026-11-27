@@ -142,6 +142,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           abandonIfPromptMissing?: boolean;
           agentName?: string;
+          createStream?: {
+            agentName?: string;
+            format?: "UIMessageChunk" | "TextStreamPart";
+            model?: string;
+            provider?: string;
+            providerOptions?: Record<string, Record<string, any>>;
+          };
           embeddings?: {
             dimension:
               | 128
@@ -1688,6 +1695,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | { message: string; type: "other" }
             >;
           }>;
+          streamId?: string;
         },
         Name
       >;
@@ -1736,6 +1744,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           messageId: string;
           onSaveMessages?: string;
           result: { status: "success" } | { error: string; status: "failed" };
+          streamId?: string;
         },
         null,
         Name
@@ -6225,6 +6234,22 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { streamId: string },
         null,
+        Name
+      >;
+      fail: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          finalDelta?: {
+            end: number;
+            parts: Array<any>;
+            start: number;
+            streamId: string;
+          };
+          reason: string;
+          streamId: string;
+        },
+        boolean,
         Name
       >;
       finish: FunctionReference<

@@ -68,6 +68,9 @@ export const schema = defineSchema({
     // Set when the message's text parts are stored empty, as `text` holds
     // their text: the length of each text part's text, or of a string content.
     textLengths: v.optional(v.array(v.number())),
+
+    // The stream this row's text comes from while it is pending.
+    streamId: v.optional(v.id("streamingMessages")),
   })
     // Allows finding successful visible messages in order
     // Also surface pending messages separately to e.g. stream
