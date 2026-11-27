@@ -210,7 +210,7 @@ test("a send's job owns its turn: its writes land, the app's writes into its str
   });
 });
 
-test("a stop ends the turn: its reply keeps what streamed, every stream the job holds closes, and the job is refused after", async () => {
+test("a stop ends the turn: every stream the job holds closes, the job's next save into its reply is that reply's ending, and the job is refused after", async () => {
   const stopped = gate();
   const seen: Record<string, unknown> = {};
   attempts.push(async (ctx, ids) => {
@@ -226,9 +226,15 @@ test("a stop ends the turn: its reply keeps what streamed, every stream the job 
     seen.ready = true;
     await stopped.opened;
     seen.late = await delta(ctx, own.streamId!, " More.", 1);
-    seen.lateFill = await tried(
-      fill(ctx, ids.threadId, own.messages[0]._id, [assistant("Late.")]),
-    );
+    seen.lateFill = (
+      await tried(
+        fill(ctx, ids.threadId, own.messages[0]._id, [
+          assistant("Late."),
+          pending,
+        ]),
+      )
+    ).ok;
+    seen.after = await tried(begin(ctx, ids));
   });
   const s = await submitted();
   const job = s.drain();
@@ -243,16 +249,20 @@ test("a stop ends the turn: its reply keeps what streamed, every stream the job 
     streams: (await s.streams()).map((x) => x.status),
     late: seen.late,
     lateFill: seen.lateFill,
+    after: seen.after,
+    rows: (await s.docs()).length,
     retry: await s.retry(),
   }).toEqual({
     stop: true,
-    reply: ["success", "Half.", { reason: "Stopped" }],
+    reply: ["success", "Late.", { reason: "Stopped" }],
     streams: ["aborted"],
     late: false,
-    lateFill: {
+    lateFill: true,
+    after: {
       ok: false,
       error: expect.stringContaining("stopped or replaced"),
     },
+    rows: 2,
     retry: null,
   });
 });
@@ -578,16 +588,22 @@ test("the job's own streams.fail fails the turn; from the app it is a stop", asy
   const out: Record<string, unknown> = {};
   for (const by of ["job", "app"]) {
     let streamId!: string;
+    let row!: string;
     const ready = gate();
     const done = gate();
     attempts.push(async (ctx, ids) => {
-      streamId = (await begin(ctx, ids)).streamId!;
+      const own = await begin(ctx, ids);
+      streamId = own.streamId!;
+      row = own.messages[0]._id;
       await delta(ctx, streamId, "Half.");
       if (by === "job") {
         await ctx.runMutation(api.streams.fail, { streamId, reason: "Broke." });
       }
       ready.open();
       await done.opened;
+      if (by === "app") {
+        await fill(ctx, ids.threadId, row, [assistant("Half.")]);
+      }
     });
     const s = await submitted();
     const job = s.drain();
@@ -642,9 +658,10 @@ test("a send at the job's own prompt leaves the prompt with its turn, so a stop 
 
 test("streams.abort is a stop whoever calls it: the job's own abort keeps the reply and marks it", async () => {
   attempts.push(async (ctx, ids) => {
-    const { streamId } = await begin(ctx, ids);
+    const { streamId, messages } = await begin(ctx, ids);
     await delta(ctx, streamId!, "Half.");
     await ctx.runMutation(api.streams.abort, { streamId, reason: "Stopped" });
+    await fill(ctx, ids.threadId, messages[0]._id, [assistant("Half.")]);
   });
   const s = await submitted();
   await s.drain();
@@ -675,5 +692,103 @@ test("a revoked job can't fill a plain pending row", async () => {
   expect(late).toEqual({
     ok: false,
     error: "The generation was stopped or replaced",
+  });
+});
+
+/** A job that streams "Half." and waits; the stop lands while it waits. */
+function stoppedMidStream(
+  after: (
+    ctx: Ctx,
+    ids: Ids,
+    row: string,
+    streamId: string,
+  ) => Promise<unknown>,
+) {
+  const streaming = gate();
+  const stopped = gate();
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    await delta(ctx, own.streamId!, "Half.");
+    streaming.open();
+    await stopped.opened;
+    await after(ctx, ids, own.messages[0]._id, own.streamId!);
+  });
+  return { streaming, stopped };
+}
+
+// A stop that read the delta log would conflict with every delta the job
+// writes meanwhile, so under load it could not commit.
+test("a stop reads no deltas while its job runs: the job's next save is its reply's ending", async () => {
+  const seen: Record<string, unknown> = {};
+  const { streaming, stopped } = stoppedMidStream(
+    async (ctx, ids, row, streamId) => {
+      seen.late = await delta(ctx, streamId, " More.", 1);
+      await fill(ctx, ids.threadId, row, [assistant("Half."), pending]);
+    },
+  );
+  const s = await submitted();
+  const job = s.drain();
+  await streaming.opened;
+  expect(await s.stop()).toBe(true);
+  const [, atStop] = await s.docs();
+  stopped.open();
+  await job;
+  const [, reply, ...rest] = await s.docs();
+  expect({
+    atStop: [atStop.status, atStop.text ?? "", atStop.abort?.reason],
+    late: seen.late,
+    reply: [reply.status, reply.text, reply.abort?.reason],
+    rest: rest.length,
+    streaming: (await s.streams()).filter((x) => x.status === "streaming"),
+  }).toEqual({
+    atStop: ["pending", "", "Stopped"],
+    late: false,
+    reply: ["success", "Half.", "Stopped"],
+    rest: 0,
+    streaming: [],
+  });
+});
+
+test("a stopped job that dies before its next save has its reply ended by its stream's timeout", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const { streaming, stopped } = stoppedMidStream(async () => {
+    throw new Error("crashed");
+  });
+  const s = await submitted();
+  const job = s.t.finishAllScheduledFunctions(() => vi.advanceTimersByTime(1));
+  await streaming.opened;
+  await s.stop();
+  stopped.open();
+  await job;
+  const [, open] = await s.docs();
+  await s.t.finishAllScheduledFunctions(vi.runAllTimers);
+  const [, reply] = await s.docs();
+  expect({
+    open: open.status,
+    reply: [reply.status, reply.text, reply.abort?.reason],
+  }).toEqual({ open: "pending", reply: ["success", "Half.", "Stopped"] });
+});
+
+test("a retry of a stopped turn whose job died ends its reply as stopped and runs nothing", async () => {
+  const { streaming, stopped } = stoppedMidStream(async () => {
+    throw new Error("crashed");
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await streaming.opened;
+  await s.stop();
+  stopped.open();
+  await job;
+  const retried = await s.retry();
+  await s.drain();
+  const [, reply] = await s.docs();
+  expect({
+    retried,
+    jobs,
+    reply: [reply.status, reply.text, reply.abort?.reason],
+  }).toEqual({
+    retried: null,
+    jobs: 1,
+    reply: ["success", "Half.", "Stopped"],
   });
 });
