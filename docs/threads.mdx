@@ -109,6 +109,9 @@ Synchronously in batches (from an action):
 await agent.deleteThreadSync(ctx, { threadId });
 ```
 
+A message saved while the deletion runs is deleted with the thread, and saving
+to a thread that is already deleted throws.
+
 You can also delete all threads by a user by their `userId`.
 
 ```ts
