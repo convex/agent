@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
+import { createFunctionHandle } from "convex/server";
 import { describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -649,4 +650,41 @@ describe("threads", () => {
     expect(user2Threads.page).toHaveLength(1);
     expect(user2Threads.page[0]._id).toBe(thread2._id);
   });
+});
+
+test("deleting a thread, or its user's data, deletes its turns and their jobs", async () => {
+  vi.useFakeTimers();
+  const t = convexTest(schema, modules);
+  const generate = await t.run(() =>
+    createFunctionHandle(api.threads.updateThread),
+  );
+  const send = async (userId?: string) => {
+    const thread = await t.mutation(api.threads.createThread, { userId });
+    await t.mutation(api.messages.addMessages, {
+      threadId: thread._id,
+      userId,
+      messages: [{ message: { role: "user", content: "Go." } }],
+      generate,
+    });
+    return thread._id;
+  };
+  const left = () =>
+    t.run(async (ctx) => ({
+      turns: (await ctx.db.query("turns").collect()).length,
+      jobs: (await ctx.db.query("jobs").collect()).length,
+    }));
+  const threadId = await send();
+  const before = await left();
+  await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
+  await t.finishAllScheduledFunctions(vi.runAllTimers);
+  const byThread = await left();
+  await send("u");
+  await t.mutation(api.users.deleteAllForUserIdAsync, { userId: "u" });
+  await t.finishAllScheduledFunctions(vi.runAllTimers);
+  expect([before, byThread, await left()]).toEqual([
+    { turns: 1, jobs: 1 },
+    { turns: 0, jobs: 0 },
+    { turns: 0, jobs: 0 },
+  ]);
+  vi.useRealTimers();
 });
