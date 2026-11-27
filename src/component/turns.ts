@@ -1242,15 +1242,17 @@ export async function stopTurns(
   reason = REASONS.stopped,
 ) {
   let turns: Turn[];
+  let order = args.order;
   if (args.promptMessageId) {
     const prompt = await resolve(ctx, args.threadId, args.promptMessageId);
-    const turn = prompt && (await turnFor(ctx, prompt));
+    if (!prompt) return false;
+    const turn = await turnFor(ctx, prompt);
     turns = live(turn) ? [turn] : [];
+    // A plain prompt's inline generation replies at the prompt's order.
+    order = turns[0]?.order ?? prompt.order;
   } else {
     turns = await turnsOf(ctx, args.threadId, args.order);
   }
-  const order = args.promptMessageId ? turns[0]?.order : args.order;
-  if (args.promptMessageId && order === undefined) return false;
   // First, so this stop's own marked rows are left to their jobs.
   const plain = await stopPlain(ctx, args.threadId, order, reason);
   for (const turn of turns) {
