@@ -274,6 +274,7 @@ export class DeltaStreamer<T> {
   #latestWrite: number = 0;
   #ongoingWrite: Promise<void> | undefined;
   #flushTimer: ReturnType<typeof setTimeout> | undefined;
+  #held = 0;
   #closedItsReply = false;
   #keepAliveTimer: ReturnType<typeof setTimeout> | undefined;
   #keepAliveStopped: boolean;
@@ -395,7 +396,7 @@ export class DeltaStreamer<T> {
     if (this.#stoppedAccepting || this.abortController.signal.aborted) {
       return;
     }
-    if (!this.#hasVisibleParts()) return;
+    if (!this.#readyToWrite()) return;
     if (
       !this.#ongoingWrite &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
@@ -404,6 +405,23 @@ export class DeltaStreamer<T> {
     } else {
       this.#scheduleFlush();
     }
+  }
+
+  /** Writes no deltas until `during` settles, so a wait inside a step doesn't split its deltas. */
+  public async hold<R>(during: Promise<R>): Promise<R> {
+    this.#held++;
+    try {
+      return await during;
+    } finally {
+      this.#held--;
+      if (!this.#ongoingWrite && this.#readyToWrite()) {
+        this.#scheduleFlush();
+      }
+    }
+  }
+
+  #readyToWrite() {
+    return !this.#held && this.#hasVisibleParts();
   }
 
   // A delta of only a message's or a step's opening chunks shows nothing, so
@@ -429,7 +447,7 @@ export class DeltaStreamer<T> {
       this.#flushTimer = undefined;
       if (
         this.#ongoingWrite ||
-        !this.#hasVisibleParts() ||
+        !this.#readyToWrite() ||
         this.#stoppedAccepting ||
         this.abortController.signal.aborted
       ) {
@@ -656,7 +674,7 @@ export class DeltaStreamer<T> {
     this.#keepAlive();
     // Now that we've sent the delta, check if we need to send another one.
     if (
-      this.#hasVisibleParts() &&
+      this.#readyToWrite() &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
     ) {
       // We send again immediately with the accumulated deltas.
@@ -665,7 +683,7 @@ export class DeltaStreamer<T> {
       this.#ongoingWrite = undefined;
       // Whatever is still buffered has just lost its owner: this write is
       // over and no arrival is guaranteed to follow. Hand it to the timer.
-      if (this.#hasVisibleParts()) {
+      if (this.#readyToWrite()) {
         this.#scheduleFlush();
       }
     }

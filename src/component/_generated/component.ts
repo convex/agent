@@ -938,7 +938,6 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           userId?: string;
         },
         {
-          jobId?: string;
           messages: Array<{
             _creationTime: number;
             _id: string;
@@ -1704,6 +1703,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | { message: string; type: "other" }
             >;
           }>;
+          jobId?: string;
           streamId?: string;
           turn?: {
             jobId: string;
@@ -7235,6 +7235,42 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           title?: string;
           userId?: string;
         },
+        Name
+      >;
+    };
+    tools: {
+      recordToolStep: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          messageId: string;
+          results: Array<{ result: string; toolCallId: string }>;
+          step?: string;
+        },
+        null | string,
+        Name
+      >;
+      replay: FunctionReference<
+        "query",
+        "internal",
+        { messageId: string },
+        null | {
+          results: Array<{ result: string; toolCallId: string }>;
+          step?: string;
+        },
+        Name
+      >;
+      runToolMutation: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          args: any;
+          handle: string;
+          messageId: string;
+          step?: string;
+          toolCallId: string;
+        },
+        { refused: string } | { result: string },
         Name
       >;
     };

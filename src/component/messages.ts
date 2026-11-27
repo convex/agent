@@ -157,6 +157,23 @@ export async function deleteMessage(
   if (messageDoc.fileIds) {
     await changeRefcount(ctx, messageDoc.fileIds, []);
   }
+  // Only a durable turn's rows have tool records.
+  if (messageDoc.turnId) await deleteToolRecords(ctx, messageDoc._id);
+}
+
+async function deleteToolRecords(ctx: MutationCtx, messageId: Id<"messages">) {
+  for (const step of await ctx.db
+    .query("toolSteps")
+    .withIndex("messageId", (q) => q.eq("messageId", messageId))
+    .collect()) {
+    await ctx.db.delete("toolSteps", step._id);
+  }
+  for (const result of await ctx.db
+    .query("toolResults")
+    .withIndex("messageId_toolCallId", (q) => q.eq("messageId", messageId))
+    .collect()) {
+    await ctx.db.delete("toolResults", result._id);
+  }
 }
 
 /**
