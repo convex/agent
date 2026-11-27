@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.7.12
+
+### Patch Changes
+
+- Add a `prepareStep(ctx, step)` agent option, with the ctx tools get
+  ([#535](https://github.com/convex/agent/issues/535)).
+
+- Stored images reach the model as file parts, and output-error tool parts keep
+  their input in `input` instead of `rawInput`.
+  ([#519](https://github.com/convex/agent/issues/519))
+
+- Add `onSaveMessages`, an internal mutation an Agent schedules with each save
+  to a thread's messages ([#147](https://github.com/convex/agent/issues/147)).
+
+- A save that fills a pending message continues in that message's turn, so a
+  stopped generation's recovered steps no longer land after a newer message.
+  ([#516](https://github.com/convex/agent/issues/516))
+
+- `streams.deleteAllStreamsForThreadIdAsync` deletes only the thread's streams
+  and no longer deletes the thread row; use `threads.deleteAllForThreadIdAsync`
+  to delete a thread ([#539](https://github.com/convex/agent/issues/539)).
+
+- Store a message's text only in `text` when that makes the row smaller
+  (one-way: older component versions reject these rows); responses no longer
+  save empty `sources` or `warnings`.
+  ([#453](https://github.com/convex/agent/issues/453))
+
+- `ToolCtx` types the `promptMessageId` tools get, in place of `messageId`,
+  which the agent hasn't set since 0.2.0
+  ([#534](https://github.com/convex/agent/issues/534)).
+
+- `usageHandler` and `rawRequestResponseHandler` get the generation's
+  `promptMessageId`. ([#510](https://github.com/convex/agent/issues/510))
+
 ## 0.7.11
 
 ### Patch Changes
