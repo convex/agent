@@ -601,14 +601,14 @@ export async function endStoppedInThread(
   ctx: MutationCtx,
   threadId: Id<"threads">,
 ) {
-  // Only open rows with a job copy: an empty range for plain threads.
-  const leased = await ctx.db
+  // The thread's open rows: few, and none for a thread with nothing pending.
+  const open = await ctx.db
     .query("messages")
-    .withIndex("threadId_status_jobId", (q) =>
-      q.eq("threadId", threadId).eq("status", "pending").gt("jobId", ""),
+    .withIndex("threadId_status_tool_order_stepOrder", (q) =>
+      q.eq("threadId", threadId).eq("status", "pending"),
     )
     .collect();
-  for (const row of leased) if (stoppedOpen(row)) await endStopped(ctx, row);
+  for (const row of open) if (stoppedOpen(row)) await endStopped(ctx, row);
 }
 
 async function newestTurn(ctx: MutationCtx, threadId: Id<"threads">) {

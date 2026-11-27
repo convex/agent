@@ -94,8 +94,6 @@ export const schema = defineSchema({
     })
     // Allows finding messages by vector embedding id
     .index("embeddingId_threadId", ["embeddingId", "threadId"])
-    // A thread's open rows that a job leases, among them those a stop left.
-    .index("threadId_status_jobId", ["threadId", "status", "jobId"])
     .index("turnId_status_order_stepOrder", [
       "turnId",
       "status",
