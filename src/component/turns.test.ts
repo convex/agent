@@ -1658,37 +1658,51 @@ test("streams.abort of a live turn's finished stream is a no-op, as for a plain 
   expect({ aborted, next }).toEqual({ aborted: false, next: true });
 });
 
-test("abortByOrder at another thread's order leaves a stream a turn's job holds there to its turn", async () => {
-  const ready = gate();
-  const go = gate();
-  let other!: string;
-  let later!: boolean;
-  attempts.push(async (ctx) => {
-    other = (await ctx.runMutation(api.threads.createThread, {}))._id;
-    const away = await ctx.runMutation(api.messages.addMessages, {
-      threadId: other,
-      messages: [pending],
-      createStream: { format: "UIMessageChunk" },
+test.each(["order", "id"])(
+  "an abort by %s of a stream a turn's job holds in another thread stops that turn",
+  async (by) => {
+    const ready = gate();
+    const go = gate();
+    let other!: string;
+    let streamId!: string;
+    let later!: boolean;
+    attempts.push(async (ctx) => {
+      other = (await ctx.runMutation(api.threads.createThread, {}))._id;
+      const away = await ctx.runMutation(api.messages.addMessages, {
+        threadId: other,
+        messages: [pending],
+        createStream: { format: "UIMessageChunk" },
+      });
+      streamId = away.streamId!;
+      await delta(ctx, streamId, "Side.");
+      ready.open();
+      await go.opened;
+      later = await delta(ctx, streamId, " More.", 1);
     });
-    await delta(ctx, away.streamId!, "Side.");
-    ready.open();
-    await go.opened;
-    later = await delta(ctx, away.streamId!, " More.", 1);
-  });
-  const s = await submitted();
-  const job = s.drain();
-  await ready.opened;
-  const aborted = await s.control((ctx) =>
-    ctx.runMutation(api.streams.abortByOrder, {
-      threadId: other,
-      order: 0,
-      reason: "Stopped",
-    }),
-  );
-  go.open();
-  await job;
-  expect({ aborted, later }).toEqual({ aborted: false, later: true });
-});
+    const s = await submitted();
+    const job = s.drain();
+    await ready.opened;
+    const aborted = await s.control((ctx) =>
+      by === "order"
+        ? ctx.runMutation(api.streams.abortByOrder, {
+            threadId: other,
+            order: 0,
+            reason: "Stopped",
+          })
+        : ctx.runMutation(api.streams.abort, {
+            streamId,
+            reason: "Stopped",
+          }),
+    );
+    go.open();
+    await job;
+    expect({ aborted, later, live: await s.stop() }).toEqual({
+      aborted: true,
+      later: false,
+      live: false,
+    });
+  },
+);
 
 test("an app's fill of a live turn's open row with a call, its result and an answer ends the turn", async () => {
   const ready = gate();

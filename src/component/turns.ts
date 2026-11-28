@@ -1311,14 +1311,30 @@ export async function stopTurns(
     turns = await turnsOf(ctx, args.threadId, args.order);
   }
   // First, so this stop's own marked rows are left to their jobs.
-  const plain = await stopPlain(ctx, args.threadId, order, reason);
-  for (const turn of turns) {
+  const { stopped, owners } = await stopPlain(
+    ctx,
+    args.threadId,
+    order,
+    reason,
+  );
+  const stopping = new Map(turns.map((turn) => [turn._id, turn]));
+  // A turn whose job streams here from another thread stops too, as an abort
+  // of that stream by id stops it.
+  for (const turnId of owners) {
+    if (stopping.has(turnId)) continue;
+    const owner = await ctx.db.get("turns", turnId);
+    if (live(owner)) stopping.set(turnId, owner);
+  }
+  for (const turn of stopping.values()) {
     await handOff(ctx, turn, { end: "stopped", byOwnJob: false, reason });
   }
-  return turns.length > 0 || plain;
+  return stopping.size > 0 || stopped;
 }
 
-/** A stop also aborts inline generations' streams, which stops them as on main. */
+/**
+ * A stop also aborts inline generations' streams, which stops them as on main,
+ * and returns the turns whose jobs hold the others.
+ */
 async function stopPlain(
   ctx: MutationCtx,
   threadId: Id<"threads">,
@@ -1326,6 +1342,7 @@ async function stopPlain(
   reason: string,
 ) {
   let stopped = false;
+  const owners = new Set<Id<"turns">>();
   await endStoppedInThread(ctx, threadId, order);
   const streams = await ctx.db
     .query("streamingMessages")
@@ -1335,11 +1352,14 @@ async function stopPlain(
     })
     .collect();
   for (const stream of streams) {
-    if (stream.jobId !== undefined) continue;
+    if (stream.jobId !== undefined) {
+      if (stream.turnId) owners.add(stream.turnId);
+      continue;
+    }
     await abortById(ctx, stream, { reason });
     stopped = true;
   }
-  return stopped;
+  return { stopped, owners };
 }
 
 export async function retryTurn(
