@@ -15,6 +15,7 @@ import {
   serializeObjectResult,
 } from "../mapping.js";
 import { embedMessages, fetchContextWithPrompt } from "./search.js";
+import { afterSavedSteps, savedSteps } from "./savedSteps.js";
 import type {
   ActionCtx,
   AgentCallSettings,
@@ -200,6 +201,8 @@ export async function startGeneration<
     finishStreamId?: string,
   ) => Promise<void>;
   fail: (reason: unknown) => Promise<void>;
+  /** Ends a generation its stream's close already ended, with no save. */
+  stopped: () => Promise<void>;
   endStep: <TOOLS extends ToolSet>(
     step: StepResult<TOOLS, RUNTIME_CONTEXT>,
     error?: string,
@@ -212,6 +215,8 @@ export async function startGeneration<
   getSavedMessages: () => MessageDoc[];
   /** The stream the first save started. */
   streamId: string | undefined;
+  /** Set when this generation is its durable turn's job. */
+  turn: { promptMessageId: string; jobId: string } | undefined;
 }> {
   const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
   // Unless something reads it before the first save, the userId comes back on
@@ -250,12 +255,14 @@ export async function startGeneration<
   assert(model, "model is required");
   let activeModel: ModelOrMetadata = model;
 
-  const { promptMessageId, pendingMessage, savedMessages, streamId } =
+  const { promptMessageId, pendingMessage, savedMessages, streamId, turn } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
           onSaveMessagesHandle: onSaveMessages,
-          userId,
+          // At a saved prompt the save picks the user it didn't get: a job's
+          // rows are its prompt's user's, a plain reply's the thread's.
+          userId: args.promptMessageId ? (opts.userId ?? undefined) : userId,
           threadId,
           prompt: args.prompt,
           messages: args.messages,
@@ -274,9 +281,10 @@ export async function startGeneration<
           pendingMessage: undefined,
           savedMessages: [] as MessageDoc[],
           streamId: undefined,
+          turn: undefined,
         };
 
-  userId ??= pendingMessage?.userId;
+  userId = opts.userId ?? pendingMessage?.userId ?? userId;
 
   const order = pendingMessage?.order ?? context.order;
   const stepOrder = pendingMessage?.stepOrder ?? context.stepOrder;
@@ -422,6 +430,13 @@ export async function startGeneration<
     Boolean(opts.rawRequestResponseHandler),
     _operation,
   );
+  const stopWhen = [args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat();
+  const saved = savedSteps<Tools, RUNTIME_CONTEXT>(turn?.saved ?? []);
+  // A resumed job checks its stop conditions after its saved steps, as the
+  // job it replaces would have, before its first model call.
+  if (saved.length > 0) {
+    await Promise.all(stopWhen.map((condition) => condition({ steps: saved })));
+  }
   const aiArgs = {
     ...opts.callSettings,
     providerOptions: opts.providerOptions,
@@ -432,7 +447,7 @@ export async function startGeneration<
     allowSystemInMessages,
     // A step that streamed an error is not continued past.
     stopWhen: [
-      ...[args.stopWhen ?? isStepCount(opts.maxSteps ?? 1)].flat(),
+      ...afterSavedSteps(stopWhen, saved),
       () => held?.error !== undefined,
     ],
     tools,
@@ -578,6 +593,7 @@ export async function startGeneration<
     userId,
     promptMessageId,
     streamId,
+    turn: turn && { promptMessageId: turn.promptMessageId, jobId: turn.jobId },
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {
@@ -585,6 +601,7 @@ export async function startGeneration<
       }
     },
     fail: (reason) => settle({ error: reason }),
+    stopped: () => (ending ??= Promise.resolve()),
     endStep: async (step, error) => {
       // A step that ends after the generation did is only reported.
       if (!ending) {

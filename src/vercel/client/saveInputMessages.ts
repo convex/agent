@@ -43,6 +43,9 @@ export async function saveInputMessages(
   pendingMessage: MessageDoc;
   savedMessages: MessageDoc[];
   streamId: string | undefined;
+  turn:
+    | { promptMessageId: string; jobId: string; saved: MessageDoc[] }
+    | undefined;
 }> {
   const shouldSave = args.storageOptions?.saveMessages ?? "promptAndOutput";
   // If only a promptMessageId is provided, this will be empty.
@@ -102,6 +105,7 @@ export async function saveInputMessages(
   });
   return {
     streamId: saved.streamId,
+    turn: saved.turn,
     promptMessageId: toSave.length
       ? saved.messages.at(-2)!._id
       : args.promptMessageId,

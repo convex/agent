@@ -30,7 +30,7 @@ import { materializeUIMessageChunkFiles } from "../fileMaterialization.js";
 
 export async function runStreamCleanup(cleanup: {
   failCall: () => Promise<void>;
-  failStreamer: () => Promise<void>;
+  failStreamer: () => Promise<unknown>;
   onAbort?: () => PromiseLike<void> | void;
 }): Promise<void> {
   const results = await Promise.allSettled([
@@ -133,6 +133,7 @@ export async function streamText<
   // the AI SDK, which ends the generation where it stops. Failing the
   // streamer because the generation failed doesn't.
   let deltasFailed: string | undefined;
+  let deltasRefused = false;
   const deltasStopped = new AbortController();
   const streamer =
     threadId && streamsDeltas
@@ -145,6 +146,7 @@ export async function streamText<
                 ? options.saveStreamDeltas.throttleMs
                 : undefined,
             onAsyncAbort: async (reason) => {
+              deltasRefused = true;
               deltasFailed ??= reason;
               deltasStopped.abort();
             },
@@ -156,6 +158,7 @@ export async function streamText<
           },
           {
             threadId,
+            promptMessageId: savesMessages ? undefined : promptMessageId,
             userId,
             agentName: options?.agentName,
             model: getModelName(args.model),
@@ -168,16 +171,26 @@ export async function streamText<
         )
       : undefined;
 
+  // A stopped job's refused delta: its stream's close ends its reply, and the
+  // stop refuses any other write, so its generation ends without one.
+  const stoppedByRefusal = async () => {
+    if (!deltasRefused || !call.turn || !streamer) return false;
+    return streamer.fail(deltasFailed ?? "async abort").catch(() => false);
+  };
+  const failCall = async (reason: string) =>
+    (await stoppedByRefusal()) ? call.stopped() : call.fail(reason);
   const failGeneration = (reason: string) =>
     runStreamCleanup({
-      failCall: () => call.fail(reason),
+      failCall: () => failCall(reason),
       failStreamer: async () => streamer?.fail(reason),
     });
-  const endGeneration = (options?: Parameters<typeof call.end>[0]) =>
-    call.end(options).catch(async (error) => {
-      await streamer?.fail(errorToString(error)).catch(() => {});
-      throw error;
-    });
+  const endGeneration = async (options?: Parameters<typeof call.end>[0]) =>
+    (await stoppedByRefusal())
+      ? call.stopped()
+      : call.end(options).catch(async (error) => {
+          await streamer?.fail(errorToString(error)).catch(() => {});
+          throw error;
+        });
   let stepError: string | undefined;
   let finished = false;
   let stopped = false;
@@ -261,7 +274,7 @@ export async function streamText<
           ? errorToString(args.abortSignal.reason)
           : "streamText aborted");
       await runStreamCleanup({
-        failCall: () => call.fail(reason),
+        failCall: () => failCall(reason),
         failStreamer: async () => streamer?.fail(reason),
         onAbort: () => streamTextArgs.onAbort?.(event),
       });
