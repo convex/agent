@@ -184,14 +184,17 @@ export const schema = defineSchema({
   }).index("threadId_status_order", ["threadId", "status", "order"]),
 
   // An open row a stop left to its running job, by the thread the row lives
-  // in, so that thread's next prompt ends it. Deleted by whatever takes the
+  // in and by its stream, so that thread's next prompt or the stream's own
+  // close or timeout ends it without its turn. Deleted by whatever takes the
   // row out of pending.
   leftOpen: defineTable({
     threadId: v.id("threads"),
     messageId: v.id("messages"),
+    streamId: v.id("streamingMessages"),
   })
     .index("threadId", ["threadId"])
-    .index("messageId", ["messageId"]),
+    .index("messageId", ["messageId"])
+    .index("streamId", ["streamId"]),
 
   // A turn's rows and streams its job opened outside its thread from its
   // fromOrder. Written at insert; the rest of a turn is found through its

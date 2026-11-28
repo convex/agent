@@ -496,6 +496,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
       await ctx.db.insert("leftOpen", {
         threadId: row.threadId,
         messageId: row._id,
+        streamId: row.streamId!,
       });
       continue;
     }
@@ -741,15 +742,9 @@ export async function endStopped(ctx: MutationCtx, row: Row) {
   if (row.streamId) await endStoppedStream(ctx, row.streamId);
 }
 
-async function endStoppedMembers(
-  ctx: MutationCtx,
-  turn: Turn,
-  stream?: Stream,
-) {
+async function endStoppedMembers(ctx: MutationCtx, turn: Turn) {
   for (const row of await members(ctx, turn, "pending")) {
-    if (stoppedOpen(row) && (!stream || row.streamId === stream._id)) {
-      await endStopped(ctx, row);
-    }
+    if (stoppedOpen(row)) await endStopped(ctx, row);
   }
 }
 
@@ -1248,8 +1243,13 @@ export async function closeStoppedStream(ctx: MutationCtx, stream: Stream) {
 
 /** A stopped stream's timeout: its runner is gone, so its rows end here. */
 export async function timeoutStoppedStream(ctx: MutationCtx, stream: Stream) {
-  const turn = await turnOf(ctx, stream);
-  if (turn) await endStoppedMembers(ctx, turn, stream);
+  const left = await ctx.db
+    .query("leftOpen")
+    .withIndex("streamId", (q) => q.eq("streamId", stream._id))
+    .collect();
+  for (const { messageId } of left) {
+    await endStopped(ctx, (await ctx.db.get("messages", messageId))!);
+  }
   await endStoppedStream(ctx, stream._id);
 }
 
