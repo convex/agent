@@ -373,6 +373,43 @@ test("a retry after a stream timeout writes a new reply row; the timed-out row i
   });
 });
 
+test("a retry after a stream timeout deletes the timed-out row's step record and tool results", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  let crashed = false;
+  let timedOut!: string;
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    timedOut = own.messages[0]._id;
+    await ctx.runMutation(api.tools.recordToolStep, {
+      messageId: timedOut,
+      step: "{}",
+      results: [{ toolCallId: `${timedOut}:c1`, result: "{}" }],
+    });
+    await delta(ctx, own.streamId!, "Half.");
+    crashed = true;
+    throw new Error("crashed");
+  });
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    await fill(ctx, ids.threadId, own.messages[0]._id, [assistant("Done.")]);
+  });
+  const s = await submitted();
+  await s.t.finishInProgressScheduledFunctions();
+  while (!crashed) await vi.advanceTimersByTimeAsync(1);
+  await s.t.finishInProgressScheduledFunctions();
+  vi.advanceTimersByTime(11 * 60 * 1000);
+  await s.t.finishInProgressScheduledFunctions();
+  expect(await s.retry()).not.toBeNull();
+  await s.t.finishAllScheduledFunctions(vi.runAllTimers);
+  const replay = await s.t.query((ctx) =>
+    ctx.runQuery(api.tools.replay, { messageId: timedOut }),
+  );
+  expect({
+    gone: (await s.docs()).every((m) => m._id !== timedOut),
+    replay,
+  }).toEqual({ gone: true, replay: null });
+});
+
 test("an approval waits; approving with generate continues the turn, and a stop before the continuation runs keeps it from running", async () => {
   attempts.push(async (ctx, ids) => {
     const own = await begin(ctx, ids);

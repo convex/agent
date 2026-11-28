@@ -13,6 +13,7 @@ import type * as files from "../files.js";
 import type * as messages from "../messages.js";
 import type * as streams from "../streams.js";
 import type * as threads from "../threads.js";
+import type * as tools from "../tools.js";
 import type * as turns from "../turns.js";
 import type * as users from "../users.js";
 import type * as vector_index from "../vector/index.js";
@@ -31,6 +32,7 @@ const fullApi: ApiFromModules<{
   messages: typeof messages;
   streams: typeof streams;
   threads: typeof threads;
+  tools: typeof tools;
   turns: typeof turns;
   users: typeof users;
   "vector/index": typeof vector_index;

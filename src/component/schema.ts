@@ -218,6 +218,24 @@ export const schema = defineSchema({
     .index("jobId", ["jobId"])
     .index("threadId", ["threadId"]),
 
+  // A durable step's model response, recorded on its pending message before
+  // its tools run, so a retry replays the step. JSON, as the model returned
+  // it; none for a continuation's approved calls.
+  toolSteps: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    step: v.optional(v.string()),
+  }).index("messageId", ["messageId"]),
+
+  // A durable tool call's result, keyed by `${ctx.messageId}:${toolCallId}`.
+  toolResults: defineTable({
+    threadId: v.id("threads"),
+    messageId: v.id("messages"),
+    toolCallId: v.string(),
+    // JSON: { output } in Convex's JSON encoding, or { error }.
+    result: v.string(),
+  }).index("messageId_toolCallId", ["messageId", "toolCallId"]),
+
   streamDeltas: defineTable({
     streamId: v.id("streamingMessages"),
     // the indexes work like: 0 <first> 1 <second> 2 <third> 3 ...

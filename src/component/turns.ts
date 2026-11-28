@@ -1,7 +1,7 @@
 import type { FunctionHandle } from "convex/server";
 import type { Doc, Id } from "./_generated/dataModel.js";
 import type { MutationCtx } from "./_generated/server.js";
-import { finalizePending, getMaxMessage } from "./messages.js";
+import { deleteMessage, finalizePending, getMaxMessage } from "./messages.js";
 import {
   abortById,
   endStoppedStream,
@@ -474,7 +474,7 @@ async function handOff(ctx: MutationCtx, turn: Turn, to: To) {
     }
     if (to.newRow) {
       for (const row of await members(ctx, turn, "failed", "anchor")) {
-        if (row.error === TIMED_OUT) await ctx.db.delete("messages", row._id);
+        if (row.error === TIMED_OUT) await deleteMessage(ctx, row);
       }
     }
     await ctx.db.patch("turns", turn._id, {

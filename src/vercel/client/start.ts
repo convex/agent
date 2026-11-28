@@ -14,7 +14,7 @@ import {
   serializeResponseMessages,
   serializeObjectResult,
 } from "../mapping.js";
-import { embedMessages, fetchContextWithPrompt } from "./search.js";
+import { embedMessages, fetchContextAndResponses } from "./search.js";
 import { afterSavedSteps, savedSteps } from "./savedSteps.js";
 import type {
   ActionCtx,
@@ -33,6 +33,7 @@ import {
   type ModelOrMetadata,
 } from "../../shared.js";
 import { wrapTools, type ToolCtx } from "./createTool.js";
+import { durableToolSteps } from "./durableTools.js";
 import type { Agent } from "../index.js";
 import { assert, omit } from "convex-helpers";
 import { saveInputMessages } from "./saveInputMessages.js";
@@ -86,6 +87,46 @@ function rawRequestResponseInclude(
       ? { responseBody: requested.responseBody ?? true }
       : {}),
   };
+}
+
+/**
+ * Each call's `ctx.messageId`: its step's pending message. An approved call
+ * runs before the first model call of the generation after its approval, but
+ * is its request's step's call, so it keeps the message that asked for it.
+ */
+function callMessages<T extends ToolSet | undefined>(
+  tools: T,
+  approvedCalls: Map<string, string>,
+  pendingMessageId: () => string | undefined,
+): T {
+  if (!tools) return tools;
+  const approved = new Map(approvedCalls);
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, tool]) => {
+      const { execute } = tool;
+      if (!execute) return [name, tool];
+      return [
+        name,
+        {
+          ...tool,
+          execute(
+            this: { ctx?: ToolCtx },
+            input: unknown,
+            options: { toolCallId: string },
+          ) {
+            const messageId =
+              approved.get(options.toolCallId) ?? pendingMessageId();
+            approved.delete(options.toolCallId);
+            return execute.call(
+              { ...this, ctx: { ...this.ctx, messageId } },
+              input as never,
+              options as never,
+            );
+          },
+        },
+      ];
+    }),
+  ) as T;
 }
 
 export async function startGeneration<
@@ -170,6 +211,8 @@ export async function startGeneration<
       endsFromHooks?: boolean;
       /** Starts the generation's stream with its first save. */
       createStream?: { format: "UIMessageChunk" | "TextStreamPart" };
+      /** Holds the stream's deltas while a durable step's record is written. */
+      holdDeltas?: <R>(during: Promise<R>) => Promise<R>;
     },
   _operation?:
     | "generateText"
@@ -233,7 +276,7 @@ export async function startGeneration<
   const onSaveMessages =
     opts.onSaveMessages && (await createFunctionHandle(opts.onSaveMessages));
 
-  const context = await fetchContextWithPrompt(ctx, component, {
+  const context = await fetchContextAndResponses(ctx, component, {
     ...opts,
     userId,
     threadId,
@@ -397,8 +440,34 @@ export async function startGeneration<
     threadId,
     promptMessageId,
     agent: opts.agentForToolCtx,
+    get messageId() {
+      return pendingMessageId;
+    },
   } satisfies ToolCtx;
-  const tools = wrapTools(toolCtx, args.tools) as Tools;
+  const durable = turn !== undefined;
+  // A step its tools may not run for ends the generation, as an abort.
+  const refused = durable ? new AbortController() : undefined;
+  const last = context.messages.at(-1);
+  const toolSteps = durableToolSteps(ctx, component, {
+    durable,
+    toolRecord:
+      durable && pendingMessage
+        ? ((await ctx.runQuery(component.tools.replay, {
+            messageId: pendingMessage._id,
+          })) ?? undefined)
+        : undefined,
+    approves:
+      last?.role === "tool" &&
+      last.content.some((part) => part.type === "tool-approval-response"),
+    pendingMessageId: () => pendingMessageId,
+    refuse: (reason) => refused?.abort(new Error(reason)),
+    hold: opts.holdDeltas,
+  });
+  const tools = callMessages(
+    toolSteps.wrapTools(wrapTools(toolCtx, args.tools) as Tools),
+    context.approvedCalls,
+    () => pendingMessageId,
+  );
   const agentPrepareStep = opts.agentForToolCtx?.options.prepareStep;
   const prepareStep =
     agentPrepareStep &&
@@ -422,6 +491,60 @@ export async function startGeneration<
   } = argsWithoutSystem as typeof argsWithoutSystem & {
     onStepFinish?: unknown;
   };
+  type Hook<E> = ((event: E) => unknown) | undefined;
+  const callArgs = aiCallArgs as {
+    prepareStep?: Hook<never>;
+    onLanguageModelCallEnd?: Hook<never>;
+    experimental_onLanguageModelCallEnd?: Hook<never>;
+    onToolExecutionEnd?: Hook<never>;
+    experimental_onToolCallFinish?: Hook<never>;
+    toolApproval?: unknown;
+  };
+  // Ours last: the record is what the step's tools check before they run.
+  const both =
+    <E>(ours: (event: E) => Promise<void>, theirs: Hook<E>) =>
+    async (event: E) => {
+      try {
+        await theirs?.(event);
+      } finally {
+        await ours(event);
+      }
+    };
+  const callerPrepareStep = (callArgs.prepareStep ?? prepareStep) as Hook<{
+    stepNumber: number;
+    model: unknown;
+  }>;
+  const durableHooks = durable
+    ? {
+        // A replayed step's model is its recorded response.
+        prepareStep: async (options: {
+          stepNumber: number;
+          model: unknown;
+        }) => {
+          const result = (await callerPrepareStep?.(options)) as
+            | { model?: unknown }
+            | undefined;
+          const stepModel = result?.model ?? options.model;
+          const model = toolSteps.stepModel(options.stepNumber, stepModel);
+          return model !== stepModel ? { ...result, model } : result;
+        },
+        onLanguageModelCallEnd: both(
+          toolSteps.onLanguageModelCallEnd,
+          callArgs.onLanguageModelCallEnd ??
+            callArgs.experimental_onLanguageModelCallEnd,
+        ),
+        onToolExecutionEnd: both(
+          toolSteps.onToolExecutionEnd,
+          callArgs.onToolExecutionEnd ?? callArgs.experimental_onToolCallFinish,
+        ),
+        abortSignal: args.abortSignal
+          ? AbortSignal.any([args.abortSignal, refused!.signal])
+          : refused!.signal,
+        ...(callArgs.toolApproval
+          ? { toolApproval: toolSteps.toolApproval(callArgs.toolApproval) }
+          : {}),
+      }
+    : {};
   const include = rawRequestResponseInclude(
     aiCallArgs as {
       experimental_include?: RawRequestResponseInclude;
@@ -451,8 +574,9 @@ export async function startGeneration<
       () => held?.error !== undefined,
     ],
     tools,
-    ...(include ? { include } : {}),
     ...(prepareStep ? { prepareStep } : {}),
+    ...durableHooks,
+    ...(include ? { include } : {}),
   } as unknown as WithoutModel<T> & {
     model: AgentLanguageModel;
     messages: ModelMessage[];
