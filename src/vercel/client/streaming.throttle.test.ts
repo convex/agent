@@ -142,3 +142,58 @@ test("a wake armed during a write respects the deadline that write set", async (
     expect(await savedParts()).toEqual(["first", "tail"]);
   });
 });
+
+test("holds its deltas until what it waits on settles, then flushes them, even when that fails", async () => {
+  const t = initConvexTest();
+  await t.action(async (ctx) => {
+    const threadId = await createThread(ctx, components.agent, {});
+    const streamer = new DeltaStreamer<string>(
+      components.agent,
+      ctx,
+      {
+        throttleMs: 100,
+        compress: null,
+        abortSignal: undefined,
+        onAsyncAbort: async () => {},
+        materialize: async (parts) => ({ parts, fileRefs: [] }),
+      },
+      { threadId, order: 0, stepOrder: 0, format: undefined },
+    );
+    const streamId = await streamer.getStreamId();
+    const savedParts = async () => {
+      const deltas = await ctx.runQuery(components.agent.streams.listDeltas, {
+        threadId,
+        cursors: [{ streamId, cursor: 0 }],
+      });
+      return deltas.flatMap((delta) => delta.parts);
+    };
+    const settled = async (parts: string[]) => {
+      for (let elapsed = 0; elapsed < 300; elapsed++) {
+        await vi.advanceTimersByTimeAsync(1);
+        if ((await savedParts()).length === parts.length) break;
+      }
+      expect(await savedParts()).toEqual(parts);
+    };
+
+    let fail!: (error: Error) => void;
+    const failing = streamer
+      .hold(new Promise((_, reject) => (fail = reject)))
+      .catch(() => {});
+    await streamer.addParts(["first"]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await savedParts()).toEqual([]);
+    fail(new Error("Value is too large"));
+    await failing;
+    await settled(["first"]);
+
+    let pass!: () => void;
+    const passing = streamer.hold(new Promise<void>((r) => (pass = r)));
+    await streamer.addParts(["second"]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await savedParts()).toEqual(["first"]);
+    pass();
+    await passing;
+    await settled(["first", "second"]);
+    await streamer.finish();
+  });
+});

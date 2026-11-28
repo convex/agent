@@ -373,6 +373,9 @@ test("a custom startGeneration in the job is durable, and in the app is plain", 
 });
 
 test("a plain generation after a durable turn in its thread is plain", async () => {
+  attempts.push((ctx, ids) =>
+    run(ctx, "durable", scripted(toolStep("d1")), ids.threadId, ids),
+  );
   const { t, ids } = await submitted();
   await t.finishAllScheduledFunctions(() => {});
   await t.action((ctx) =>
@@ -380,6 +383,7 @@ test("a plain generation after a durable turn in its thread is plain", async () 
       prompt: "Hello.",
     }),
   );
+  expect(classOf("durable")).toBe("durable");
   expect(classOf("plain")).toBe("plain");
 });
 

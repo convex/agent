@@ -1087,3 +1087,92 @@ test("a reply stopped while its job still streams stays out of the next generati
   const stopped = (await docs()).find((m) => m.text === "Kept.");
   expect([stopped?.status, stopped?.error]).toEqual(["failed", "Stopped"]);
 });
+
+test("an execute call that ends before the next call of its step starts keeps its result, so a retry returns it", async () => {
+  holds.add("c2");
+  const first = scripted(
+    toolStep([
+      { id: "c1", tool: "charge" },
+      { id: "c2", tool: "charge" },
+    ]),
+  );
+  attempts.push(async (ctx, ids) => {
+    run(ctx, first, ids, { toolCallConcurrency: 1 }).catch(() => {});
+    await until(async () => keys.length === 2);
+    throw new Error("crashed");
+  });
+  const done = scripted("Done.");
+  attempts.push((ctx, ids) => run(ctx, done, ids));
+  const { callRow, retried } = await submitted();
+  await retried();
+  const row = await callRow("c1");
+  expect(keys).toEqual([
+    `charged ${row}:c1`,
+    `charged ${row}:c2`,
+    `resumed ${row}:c2`,
+  ]);
+});
+
+test("an execute call in a step whose record can't be written doesn't run, so a retry can't run it again", async () => {
+  const first = scripted(toolStep([{ id: "c1", tool: "charge" }]), "Done.");
+  attempts.push(async (ctx, ids) => {
+    const runMutation = (async (ref: never, args: object) => {
+      if ("step" in args && "results" in args) {
+        throw new Error("Value is too large");
+      }
+      return ctx.runMutation(ref, args as never);
+    }) as ActionCtx["runMutation"];
+    await run({ ...ctx, runMutation }, first, ids);
+  });
+  const { t, answered } = await submitted();
+  await t.finishAllScheduledFunctions(() => {});
+  await until(answered);
+  expect(keys).toEqual([]);
+  expect(promptOf(first, 1)).toContain("its step couldn't be recorded");
+});
+
+test("calls approved one at a time each keep the message that asked for them", async () => {
+  attempts.push((ctx, ids) =>
+    run(
+      ctx,
+      scripted(
+        toolStep([
+          { id: "a1", tool: "approvedPlace", input: { item: "book" } },
+          { id: "a2", tool: "approvedPlace", input: { item: "pen" } },
+        ]),
+      ),
+      ids,
+    ),
+  );
+  const next = scripted(
+    toolStep([{ id: "a1", tool: "place", input: { item: "cup" } }]),
+    "Done.",
+  );
+  attempts.push((ctx, ids) => run(ctx, next, ids));
+  const { t, ids, docs, orders, callRow, answered } = await submitted();
+  await t.finishAllScheduledFunctions(() => {});
+  const approvalIds = (await docs())
+    .flatMap((m): { type: string; approvalId?: string }[] =>
+      Array.isArray(m.message?.content) ? m.message.content : [],
+    )
+    .flatMap((p) =>
+      p.type === "tool-approval-request" ? [p.approvalId!] : [],
+    );
+  for (const approvalId of approvalIds) {
+    await t.mutation((ctx) =>
+      agent.approveToolCall(ctx, {
+        threadId: ids.threadId,
+        approvalId,
+        generate,
+      }),
+    );
+  }
+  await t.finishAllScheduledFunctions(() => {});
+  await until(answered);
+  const requested = await callRow("a1");
+  expect((await orders()).map((o) => [o.item, o.key])).toEqual([
+    ["book", `${requested}:a1`],
+    ["pen", `${requested}:a2`],
+    ["cup", expect.not.stringContaining(requested)],
+  ]);
+});

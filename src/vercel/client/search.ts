@@ -833,10 +833,15 @@ function approvalContinuation(
       part.type === "tool-approval-request" ? [part.approvalId] : [],
     ),
   );
+  // Decisions saved one at a time are each a tool message at the order.
   const approved = new Set(
-    promptMessage.message.content.flatMap((part) =>
-      part.type === "tool-approval-response" && part.approved
-        ? [part.approvalId]
+    recentMessages.flatMap((doc) =>
+      doc.order === promptMessage.order && doc.message?.role === "tool"
+        ? doc.message.content.flatMap((part) =>
+            part.type === "tool-approval-response" && part.approved
+              ? [part.approvalId]
+              : [],
+          )
         : [],
     ),
   );

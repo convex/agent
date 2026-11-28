@@ -33,7 +33,7 @@ export type ToolReplay = NonNullable<
 export const INTERRUPTED =
   "The tool call was interrupted before its result was saved, so its outcome is unknown.";
 
-/** Why a mutation tool in a step that couldn't be recorded didn't run. */
+/** Why a mutation or execute call in an unrecorded step didn't run. */
 export const UNRECORDED =
   "The tool call didn't run: its step couldn't be recorded, so it couldn't run exactly once.";
 
@@ -135,11 +135,11 @@ export function durableToolSteps(
     | { messageId: string; step: string; toolCallIds: string[] }
     | undefined;
   const rawInputs = new Map<string, string>();
-  // Calls running now, and whether the first step began: a result is written
-  // only while it's exposed, as its step's save comes once the step's last
-  // call ends, but only after the first step's model call for a
-  // continuation's approved calls.
-  let running = 0;
+  // The step's calls still to end, and whether the first step began: a
+  // result is written only while it's exposed, as its step's save comes once
+  // the step's last call ends, but always for a continuation's approved
+  // calls, which run before the first step.
+  let unended = new Set<string>();
   let stepping = false;
   const queued: { toolCallId: string; result: string }[] = [];
   let flushing: Promise<void> | undefined;
@@ -156,7 +156,8 @@ export function durableToolSteps(
       if (refused) refuse(refused);
     } catch {
       // A record that can't be written (too large, say) leaves the step
-      // unrecorded, so a retry calls the model for it again.
+      // unrecorded: its mutation and execute calls don't run, and a retry
+      // calls the model for it again.
       record = undefined;
     }
   };
@@ -189,14 +190,16 @@ export function durableToolSteps(
   // Tools whose results aren't recorded here: a mutation tool's is recorded
   // with its mutation, and a query tool runs again.
   const rerun = new Set<string>();
-  // Tools whose calls need their step recorded before they run, and tools
-  // whose first mutation records it.
+  // Tools the AI SDK runs, tools whose calls need their step recorded before
+  // they run, and tools whose first mutation records it.
+  const runs = new Set<string>();
   const executes = new Set<string>();
   const mutates = new Set<string>();
 
   /** Records the step a call the AI SDK asks approval for is in. */
   const approving = async (toolCallId: string) => {
     approvals.add(toolCallId);
+    unended.delete(toolCallId);
     if (!ended?.toolCallIds.includes(toolCallId)) return;
     const { messageId, step } = ended;
     ended = undefined;
@@ -215,6 +218,7 @@ export function durableToolSteps(
       Object.entries(tools).map(([name, tool]) => {
         const execute = tool.execute;
         if (!execute) return [name, tool];
+        runs.add(name);
         const durably = durableTool(tool);
         const kind = durably?.kind ?? "execute";
         const resume = durably?.kind === "execute" ? durably.resume : undefined;
@@ -253,15 +257,17 @@ export function durableToolSteps(
             ) {
               const key = `${this.ctx.messageId}:${options.toolCallId}`;
               keys.set(options.toolCallId, key);
-              running++;
               const result =
                 replaying && kind === "execute" && replay!.results.get(key);
               if (result) return outcome(result);
               if (record && "refused" in record) {
                 throw new Error(record.refused);
               }
+              if (kind === "query") {
+                return execute.call(this, input, options as never);
+              }
+              if (!record) throw new Error(UNRECORDED);
               if (kind === "mutation") {
-                if (!record) throw new Error(UNRECORDED);
                 const runMutation = recordedMutation(record, key);
                 return execute.call(
                   { ...this, ctx: { ...this.ctx, runMutation } },
@@ -269,7 +275,7 @@ export function durableToolSteps(
                   options as never,
                 );
               }
-              if (replaying && kind === "execute") {
+              if (replaying) {
                 if (!resume) throw new Error(INTERRUPTED);
                 return resume(this.ctx, input, options as never);
               }
@@ -325,6 +331,7 @@ export function durableToolSteps(
       replaying &&= stepNumber === 0 && !!replay?.model;
       record = undefined;
       ended = undefined;
+      unended = new Set();
       if (replaying) return replay!.model!;
       if (!durable) return model;
       return readingRawInputs(
@@ -339,14 +346,19 @@ export function durableToolSteps(
       if (!durable || !messageId) return;
       // Without our prepareStep, the model called wasn't the replay's.
       if (!stepping) replaying = false;
+      const calls = event.content.flatMap((p) =>
+        p.type === "tool-call" && !p.providerExecuted ? [p] : [],
+      );
+      unended = new Set(
+        calls.flatMap((call) =>
+          runs.has(call.toolName) && !call.invalid ? [call.toolCallId] : [],
+        ),
+      );
       // A replayed step's record is already on its message.
       if (replaying) {
         record = { messageId };
         return;
       }
-      const calls = event.content.flatMap((p) =>
-        p.type === "tool-call" && !p.providerExecuted ? [p] : [],
-      );
       const step = calls.length > 0 && stepRecord(event, rawInputs);
       rawInputs.clear();
       if (!step) return;
@@ -365,13 +377,13 @@ export function durableToolSteps(
       }
     },
     onToolExecutionEnd: async (event: ToolExecutionEndEvent<ToolSet>) => {
-      running--;
       const { toolOutput } = event;
       const key = keys.get(toolOutput.toolCallId);
       keys.delete(toolOutput.toolCallId);
+      const last = unended.delete(toolOutput.toolCallId) && unended.size === 0;
       if (!record || "refused" in record) return;
       const { messageId } = record;
-      if (stepping && !running) return;
+      if (stepping && last) return;
       if (!key || recorded.has(key)) return;
       if (rerun.has(toolOutput.toolName)) return;
       let result: string;
