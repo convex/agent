@@ -269,6 +269,33 @@ test("a resumed job's stop conditions see its saved steps' usage and tool errors
   ]);
 });
 
+test("a resumed job's stop conditions see the sources of a saved step that ran tools", async () => {
+  const sourced = toolStep(
+    [{ id: "b1", tool: "broken" }],
+    [{ type: "source", sourceType: "url", id: "s1", url: "https://a.example" }],
+  );
+  attempts.push(
+    dying(
+      scripted(sourced, "Half."),
+      (args) => JSON.stringify(args).includes("Half."),
+      { tools: { broken } },
+    ),
+  );
+  const seen: unknown[] = [];
+  attempts.push((ctx, ids) =>
+    run(ctx, scripted("Done."), ids, {
+      tools: { broken },
+      stopWhen: ({ steps }: { steps: StepResult<ToolSet>[] }) => {
+        seen.push(steps.map((step) => step.sources.map((s) => s.id)));
+        return true;
+      },
+    }),
+  );
+  const { retried } = await submitted();
+  await retried();
+  expect(seen[0]).toEqual([["s1"]]);
+});
+
 test("a job stopped mid-stream ends its reply once, by its stream's close, as stopped with what it streamed, and its generation ends without error", async () => {
   const more = gate();
   const model = mockModel({

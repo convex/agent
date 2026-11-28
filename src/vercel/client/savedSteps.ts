@@ -59,14 +59,25 @@ function outputParts(
 export function savedSteps<TOOLS extends ToolSet, CONTEXT extends Context>(
   responseDocs: MessageDoc[],
 ): StepResult<TOOLS, CONTEXT>[] {
-  const steps: { doc: MessageDoc; messages: ModelMessage[] }[] = [];
+  const steps: {
+    doc: MessageDoc;
+    messages: ModelMessage[];
+    sources: MessageDoc["sources"];
+  }[] = [];
   for (const doc of responseDocs) {
     if (doc.status !== "success" || !doc.message) continue;
     const message = toModelMessage(doc.message);
-    if (message.role === "assistant") steps.push({ doc, messages: [message] });
-    else if (message.role === "tool") steps.at(-1)?.messages.push(message);
+    if (message.role === "assistant") {
+      steps.push({ doc, messages: [message], sources: doc.sources });
+    } else if (message.role === "tool") {
+      const step = steps.at(-1);
+      if (!step) continue;
+      step.messages.push(message);
+      // A step with tool results saves its sources on its tool message.
+      step.sources ??= doc.sources;
+    }
   }
-  return steps.map(({ doc, messages }, stepNumber) => {
+  return steps.map(({ doc, messages, sources }, stepNumber) => {
     const [assistant, ...results] = messages;
     const content = (
       Array.isArray(assistant.content)
@@ -99,7 +110,7 @@ export function savedSteps<TOOLS extends ToolSet, CONTEXT extends Context>(
         ? reasoning.map((part) => part.text).join("")
         : undefined,
       files: [],
-      sources: doc.sources ?? [],
+      sources: sources ?? [],
       toolCalls: of("tool-call"),
       staticToolCalls: of("tool-call"),
       dynamicToolCalls: [],
