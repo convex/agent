@@ -873,8 +873,9 @@ describe("plain streams with their pending message", () => {
       messages: [{ message: { role: "user", content: "go" } }],
     });
     const promptMessageId = messages[0]._id as Id<"messages">;
+    const replies: string[] = [];
     for (let i = 0; i < 3; i++) {
-      const { streamId } = await t.mutation(api.messages.addMessages, {
+      const reply = await t.mutation(api.messages.addMessages, {
         threadId,
         promptMessageId,
         messages: [
@@ -882,6 +883,8 @@ describe("plain streams with their pending message", () => {
         ],
         createStream: { format: "UIMessageChunk" },
       });
+      const streamId = reply.streamId;
+      replies.push(reply.messages[0]._id);
       for (let step = 0; step < 10; step++) {
         const id = `t${step}`;
         await t.run((ctx) =>
@@ -903,10 +906,11 @@ describe("plain streams with their pending message", () => {
     await t.mutation(api.messages.deleteByIds, {
       messageIds: [promptMessageId],
     });
-    const statuses = await t.run(async (ctx) =>
-      (await ctx.db.query("messages").collect()).map((m) => m.status),
-    );
-    expect(statuses.filter((status) => status !== "failed")).toEqual([]);
+    const rows = await t.run((ctx) => ctx.db.query("messages").collect());
+    expect({
+      replies: replies.map((id) => rows.find((m) => m._id === id)?.status),
+      settled: rows.every((m) => m.status === "failed"),
+    }).toEqual({ replies: ["failed", "failed", "failed"], settled: true });
   });
 
   test("a retry replacing several streamed attempts stays within one transaction's reads", async () => {

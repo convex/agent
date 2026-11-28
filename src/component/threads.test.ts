@@ -1,14 +1,29 @@
 /// <reference types="vite/client" />
 
 import { convexTest } from "convex-test";
-import { createFunctionHandle } from "convex/server";
-import { describe, expect, test, vi } from "vitest";
+import { createFunctionHandle, makeFunctionReference } from "convex/server";
+import { v } from "convex/values";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import schema from "./schema.js";
+import { action } from "./_generated/server.js";
 import { modules } from "./setup.test.js";
 
+const withGeneration = {
+  ...modules,
+  "./generation.ts": async () => ({
+    noop: action({
+      args: { threadId: v.string(), promptMessageId: v.string() },
+      handler: async () => null,
+    }),
+  }),
+};
+const generation = makeFunctionReference<"action">("generation:noop");
+
 describe("threads", () => {
+  afterEach(() => vi.useRealTimers());
+
   test("createThread creates a thread with correct data", async () => {
     const t = convexTest(schema, modules);
 
@@ -650,104 +665,98 @@ describe("threads", () => {
     expect(user2Threads.page).toHaveLength(1);
     expect(user2Threads.page[0]._id).toBe(thread2._id);
   });
-});
 
-test("deleting a thread, or its user's data, deletes its turns, their jobs and their holdings", async () => {
-  vi.useFakeTimers();
-  const t = convexTest(schema, modules);
-  const generate = await t.run(() =>
-    createFunctionHandle(api.threads.updateThread),
-  );
-  const send = async (userId?: string) => {
-    const thread = await t.mutation(api.threads.createThread, { userId });
-    const threadId = thread._id as Id<"threads">;
-    await t.mutation(api.messages.addMessages, {
-      threadId,
-      userId,
-      messages: [{ message: { role: "user", content: "Go." } }],
-      generate,
-    });
-    await t.run(async (ctx) => {
-      const turn = (await ctx.db.query("turns").first())!;
-      const away = await ctx.db.insert("threads", { status: "active" });
-      const messageId = await ctx.db.insert("messages", {
-        threadId: away,
-        order: 0,
-        stepOrder: 0,
-        tool: false,
-        status: "pending",
-        turnId: turn._id,
-      });
-      await ctx.db.insert("holdings", {
-        turnId: turn._id,
+  test("deleting a thread, or its user's data, deletes its turns, their jobs and their holdings", async () => {
+    vi.useFakeTimers();
+    const t = convexTest(schema, withGeneration);
+    const generate = await t.run(() => createFunctionHandle(generation));
+    const send = async (userId?: string) => {
+      const thread = await t.mutation(api.threads.createThread, { userId });
+      const threadId = thread._id as Id<"threads">;
+      await t.mutation(api.messages.addMessages, {
         threadId,
-        messageId,
+        userId,
+        messages: [{ message: { role: "user", content: "Go." } }],
+        generate,
       });
-    });
-    return threadId;
-  };
-  const left = () =>
-    t.run(async (ctx) => ({
-      turns: (await ctx.db.query("turns").collect()).length,
-      jobs: (await ctx.db.query("jobs").collect()).length,
-      holdings: (await ctx.db.query("holdings").collect()).length,
-    }));
-  const threadId = await send();
-  const before = await left();
-  await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
-  await t.finishAllScheduledFunctions(vi.runAllTimers);
-  const byThread = await left();
-  await send("u");
-  await t.mutation(api.users.deleteAllForUserIdAsync, { userId: "u" });
-  await t.finishAllScheduledFunctions(vi.runAllTimers);
-  expect([before, byThread, await left()]).toEqual([
-    { turns: 1, jobs: 1, holdings: 1 },
-    { turns: 0, jobs: 0, holdings: 0 },
-    { turns: 0, jobs: 0, holdings: 0 },
-  ]);
-  vi.useRealTimers();
-});
-
-test("deleting a thread cancels its pending job and deletes the records of jobs that can no longer run", async () => {
-  vi.useFakeTimers();
-  const t = convexTest(schema, modules);
-  const generate = await t.run(() =>
-    createFunctionHandle(api.threads.updateThread),
-  );
-  const send = async () => {
-    const thread = await t.mutation(api.threads.createThread, {});
-    const threadId = thread._id as Id<"threads">;
-    const { jobId } = await t.mutation(api.messages.addMessages, {
-      threadId,
-      messages: [{ message: { role: "user", content: "Go." } }],
-      generate,
-    });
-    return { threadId, jobId: jobId! };
-  };
-  const afterDelete = async ({
-    threadId,
-    jobId,
-  }: {
-    threadId: Id<"threads">;
-    jobId: string;
-  }) => {
+      await t.run(async (ctx) => {
+        const turn = (await ctx.db.query("turns").first())!;
+        const away = await ctx.db.insert("threads", { status: "active" });
+        const messageId = await ctx.db.insert("messages", {
+          threadId: away,
+          order: 0,
+          stepOrder: 0,
+          tool: false,
+          status: "pending",
+          turnId: turn._id,
+        });
+        await ctx.db.insert("holdings", {
+          turnId: turn._id,
+          threadId,
+          messageId,
+        });
+      });
+      return threadId;
+    };
+    const left = () =>
+      t.run(async (ctx) => ({
+        turns: (await ctx.db.query("turns").collect()).length,
+        jobs: (await ctx.db.query("jobs").collect()).length,
+        holdings: (await ctx.db.query("holdings").collect()).length,
+      }));
+    const threadId = await send();
+    const before = await left();
     await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
-    return t.run(async (ctx) => ({
-      job: (
-        await ctx.db.system.get(
-          "_scheduled_functions",
-          jobId as Id<"_scheduled_functions">,
-        )
-      )?.state.kind,
-      records: (await ctx.db.query("jobs").collect()).length,
-    }));
-  };
-  const pending = await afterDelete(await send());
-  const finished = await send();
-  await t.finishAllScheduledFunctions(vi.runAllTimers);
-  expect([pending, await afterDelete(finished)]).toEqual([
-    { job: "canceled", records: 0 },
-    { job: expect.not.stringMatching(/pending|inProgress/), records: 0 },
-  ]);
-  vi.useRealTimers();
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    const byThread = await left();
+    await send("u");
+    await t.mutation(api.users.deleteAllForUserIdAsync, { userId: "u" });
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect([before, byThread, await left()]).toEqual([
+      { turns: 1, jobs: 1, holdings: 1 },
+      { turns: 0, jobs: 0, holdings: 0 },
+      { turns: 0, jobs: 0, holdings: 0 },
+    ]);
+  });
+
+  test("deleting a thread cancels its pending job and deletes the records of jobs that can no longer run", async () => {
+    vi.useFakeTimers();
+    const t = convexTest(schema, withGeneration);
+    const generate = await t.run(() => createFunctionHandle(generation));
+    const send = async () => {
+      const thread = await t.mutation(api.threads.createThread, {});
+      const threadId = thread._id as Id<"threads">;
+      const { jobId } = await t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [{ message: { role: "user", content: "Go." } }],
+        generate,
+      });
+      return { threadId, jobId: jobId! };
+    };
+    const afterDelete = async ({
+      threadId,
+      jobId,
+    }: {
+      threadId: Id<"threads">;
+      jobId: string;
+    }) => {
+      await t.mutation(api.threads.deleteAllForThreadIdAsync, { threadId });
+      return t.run(async (ctx) => ({
+        job: (
+          await ctx.db.system.get(
+            "_scheduled_functions",
+            jobId as Id<"_scheduled_functions">,
+          )
+        )?.state.kind,
+        records: (await ctx.db.query("jobs").collect()).length,
+      }));
+    };
+    const pending = await afterDelete(await send());
+    const finished = await send();
+    await t.finishAllScheduledFunctions(vi.runAllTimers);
+    expect([pending, await afterDelete(finished)]).toEqual([
+      { job: "canceled", records: 0 },
+      { job: "success", records: 0 },
+    ]);
+  });
 });

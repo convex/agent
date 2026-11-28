@@ -178,13 +178,16 @@ async function abortStreamsForDeleted(
       threadId: message.threadId,
       order: message.order,
       reason: "Message deleted",
-      plainOnly: true,
     });
   }
 }
 
 /** Deleting a plain prompt fails the plain replies pending at its order. */
-async function failPlainReplies(ctx: MutationCtx, deleted: Doc<"messages">[]) {
+async function failPlainReplies(
+  ctx: MutationCtx,
+  deleted: Doc<"messages">[],
+  onSaveMessages: string | undefined,
+) {
   const seen = new Set<string>();
   for (const row of deleted) {
     const key = `${row.threadId}:${row.order}`;
@@ -203,7 +206,7 @@ async function failPlainReplies(ctx: MutationCtx, deleted: Doc<"messages">[]) {
       .collect();
     for (const reply of replies) {
       if (reply.jobId !== undefined) continue;
-      await failReply(ctx, reply, "Message deleted", undefined);
+      await failReply(ctx, reply, "Message deleted", onSaveMessages);
     }
   }
 }
@@ -212,11 +215,13 @@ async function failPlainReplies(ctx: MutationCtx, deleted: Doc<"messages">[]) {
 export async function endDeleted(
   ctx: MutationCtx,
   deleted: (Doc<"messages"> | null)[],
+  onSaveMessages: string | undefined,
 ) {
   if (deleted.some((m) => m?.turnId)) await endTurnsForDeleted(ctx, deleted);
   await failPlainReplies(
     ctx,
     deleted.filter((m) => m !== null),
+    onSaveMessages,
   );
   await abortStreamsForDeleted(ctx, deleted);
 }
@@ -250,7 +255,7 @@ export const deleteByIds = mutation({
         return null;
       }),
     );
-    await endDeleted(ctx, deleted);
+    await endDeleted(ctx, deleted, args.onSaveMessages);
     const found = deleted.filter((m) => m !== null);
     await reportSavedMessages(
       ctx,
@@ -360,7 +365,7 @@ export const deleteByOrder = mutation({
       })
       .take(64);
     await Promise.all(messages.map((m) => deleteMessage(ctx, m)));
-    await endDeleted(ctx, messages);
+    await endDeleted(ctx, messages, args.onSaveMessages);
     await reportSavedMessages(
       ctx,
       args.onSaveMessages,

@@ -388,15 +388,10 @@ function publicStreamMessage(m: Doc<"streamingMessages">): StreamMessage {
   };
 }
 
+/** Aborts the plain streams at an order; a turn's streams only their turn ends. */
 export async function abortStreamsAtOrder(
   ctx: MutationCtx,
-  args: {
-    threadId: Id<"threads">;
-    order: number;
-    reason: string;
-    // Leaves live turns' streams, which only their turn ends.
-    plainOnly?: true;
-  },
+  args: { threadId: Id<"threads">; order: number; reason: string },
 ) {
   const streams = await ctx.db
     .query("streamingMessages")
@@ -409,7 +404,7 @@ export async function abortStreamsAtOrder(
     .take(100);
   let aborted = false;
   for (const stream of streams) {
-    if (args.plainOnly && stream.jobId !== undefined) continue;
+    if (stream.jobId !== undefined) continue;
     await abortById(ctx, stream, { reason: args.reason });
     aborted = true;
   }
@@ -419,10 +414,7 @@ export async function abortStreamsAtOrder(
 export const abortByOrder = mutation({
   args: { threadId: v.id("threads"), order: v.number(), reason: v.string() },
   returns: v.boolean(),
-  handler: async (ctx, args) => {
-    const stopped = await stopTurns(ctx, args, args.reason);
-    return (await abortStreamsAtOrder(ctx, args)) || stopped;
-  },
+  handler: (ctx, args) => stopTurns(ctx, args, args.reason),
 });
 
 export const abort = mutation({

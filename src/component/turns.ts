@@ -30,7 +30,10 @@ const atOf = (turn: Pick<Turn, "threadId" | "fromOrder">): At => ({
 export type TurnInfo = {
   promptMessageId: Id<"messages">;
   jobId: string;
-  /** The steps its turn saved since its anchor, which its job resumes after. */
+  /**
+   * The steps its turn saved since its anchor, in order, which its job
+   * resumes after.
+   */
   saved: Row[];
 };
 
@@ -595,11 +598,11 @@ function recordJob(
 const DELETE_PAGE = 100;
 
 /**
- * A deleted thread's turns, jobs and holdings go a page at a time; true once none are left.
+ * A deleted thread's turns, jobs and holdings go a page at a time; done once none are left.
  * A job's record outlives its turn while the job runs, so the job reads as revoked: one
- * record is left per job still running at deletion.
+ * record is left per job still running at deletion. Jobs page by cursor, so those records
+ * never fill every page.
  */
-/** Jobs page by cursor: a running job's record stays, and must not fill every page. */
 export async function deleteTurnsPage(
   ctx: MutationCtx,
   threadId: Id<"threads">,
@@ -830,7 +833,9 @@ const turnInfo = async (
 ): Promise<TurnInfo> => ({
   promptMessageId: turn.promptMessageId,
   jobId,
-  saved: await members(ctx, turn, "success", "anchor"),
+  saved: (await members(ctx, turn, "success", "anchor")).sort(
+    (a, b) => a.order - b.order || a.stepOrder - b.stepOrder,
+  ),
 });
 
 type Position = Pick<Turn, "_id" | "threadId" | "order" | "fromOrder">;
@@ -1001,8 +1006,8 @@ async function planFill(
     stamp:
       write.as === "turn"
         ? memberStamp(position!, write.caller, pending.threadId)
-        : (_order, _status, replaced) =>
-            replaced ? { turnId: replaced.turnId } : {},
+        : (_order, status, replaced) =>
+            replaced || status !== "pending" ? { turnId: pending.turnId } : {},
     streamStamp:
       write.as === "turn"
         ? { turnId: write.turnId, jobId: write.caller, at: atOf(position!) }
@@ -1195,11 +1200,11 @@ export async function endStream(
   },
 ) {
   if (await closeStoppedStream(ctx, stream)) return true;
+  if (stream.state.kind !== "streaming") return false;
   const caller = await callerJob(ctx);
   const holds = caller !== null && caller === stream.jobId;
   // fail is the streamer's own failure; abort, or the app's fail, is a stop.
   if (holds && how === "fail") {
-    if (stream.state.kind !== "streaming") return false;
     await abortById(ctx, stream, args);
     await settle(ctx, stream.turnId!, {
       byApp: false,
@@ -1217,7 +1222,6 @@ export async function endStream(
     });
     return true;
   }
-  if (stream.state.kind !== "streaming") return false;
   return abortById(ctx, stream, args);
 }
 

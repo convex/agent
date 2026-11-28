@@ -91,7 +91,11 @@ const begin = (ctx: Ctx, ids: Ids) =>
   }) as Promise<{
     messages: { _id: string }[];
     streamId?: string;
-    turn?: { promptMessageId: string; jobId: string };
+    turn?: {
+      promptMessageId: string;
+      jobId: string;
+      saved: { message?: { role: string }; tool: boolean; text?: string }[];
+    };
   }>;
 const delta = (ctx: Ctx, streamId: string, text: string, start = 0) =>
   ctx.runMutation(api.streams.addDelta, {
@@ -1388,31 +1392,34 @@ test("a step whose three tool calls have two results saved one at a time leaves 
 });
 
 test("a stop reads no deltas of a stream its job has open in another thread", async () => {
-  const ready = gate();
-  const go = gate();
-  attempts.push(async (ctx, ids) => {
-    await begin(ctx, ids);
-    const other = await ctx.runMutation(api.threads.createThread, {});
-    const away = await ctx.runMutation(api.messages.addMessages, {
-      threadId: other._id,
-      messages: [pending],
-      createStream: { format: "UIMessageChunk" },
+  const stopReads = async (deltas: number) => {
+    const ready = gate();
+    const go = gate();
+    attempts.push(async (ctx, ids) => {
+      await begin(ctx, ids);
+      const other = await ctx.runMutation(api.threads.createThread, {});
+      const away = await ctx.runMutation(api.messages.addMessages, {
+        threadId: other._id,
+        messages: [pending],
+        createStream: { format: "UIMessageChunk" },
+      });
+      for (let i = 0; i < deltas; i++) await delta(ctx, away.streamId, "x", i);
+      ready.open();
+      await go.opened;
     });
-    for (let i = 0; i < 30; i++) await delta(ctx, away.streamId, "x", i);
-    ready.open();
-    await go.opened;
-  });
-  const s = await submitted();
-  const job = s.drain();
-  await ready.opened;
-  const read = await s.control(async (ctx) => {
-    await ctx.runMutation(api.messages.abortGeneration, s.ids);
-    const meta = (ctx as unknown as { meta: Metered }).meta;
-    return (await meta.getTransactionMetrics()).documentsRead.used;
-  });
-  go.open();
-  await job;
-  expect(read).toBeLessThan(30);
+    const s = await submitted();
+    const job = s.drain();
+    await ready.opened;
+    const read = await s.control(async (ctx) => {
+      await ctx.runMutation(api.messages.abortGeneration, s.ids);
+      const meta = (ctx as unknown as { meta: Metered }).meta;
+      return (await meta.getTransactionMetrics()).documentsRead.used;
+    });
+    go.open();
+    await job;
+    return read;
+  };
+  expect(await stopReads(30)).toBe(await stopReads(1));
 });
 
 test("a plain streams.finish reads and writes as on main", async () => {
@@ -1618,4 +1625,128 @@ test("deleting a stopped turn's thread still ends the reply it left open in anot
     }),
   );
   expect([row?.status, row?.text]).toEqual(["failed", "keep"]);
+});
+
+test("streams.abort of a live turn's finished stream is a no-op, as for a plain one", async () => {
+  const ready = gate();
+  const go = gate();
+  let first!: string;
+  let next!: boolean;
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    first = own.streamId!;
+    await delta(ctx, first, "One.");
+    const saved = await fill(
+      ctx,
+      ids.threadId,
+      own.messages[0]._id,
+      [assistant([call("a")]), { message: result("a") }, pending],
+      true,
+    );
+    ready.open();
+    await go.opened;
+    next = await delta(ctx, saved.streamId!, "Two.");
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await ready.opened;
+  const aborted = await s.control((ctx) =>
+    ctx.runMutation(api.streams.abort, { streamId: first, reason: "Stale" }),
+  );
+  go.open();
+  await job;
+  expect({ aborted, next }).toEqual({ aborted: false, next: true });
+});
+
+test("abortByOrder at another thread's order leaves a stream a turn's job holds there to its turn", async () => {
+  const ready = gate();
+  const go = gate();
+  let other!: string;
+  let later!: boolean;
+  attempts.push(async (ctx) => {
+    other = (await ctx.runMutation(api.threads.createThread, {}))._id;
+    const away = await ctx.runMutation(api.messages.addMessages, {
+      threadId: other,
+      messages: [pending],
+      createStream: { format: "UIMessageChunk" },
+    });
+    await delta(ctx, away.streamId!, "Side.");
+    ready.open();
+    await go.opened;
+    later = await delta(ctx, away.streamId!, " More.", 1);
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await ready.opened;
+  const aborted = await s.control((ctx) =>
+    ctx.runMutation(api.streams.abortByOrder, {
+      threadId: other,
+      order: 0,
+      reason: "Stopped",
+    }),
+  );
+  go.open();
+  await job;
+  expect({ aborted, later }).toEqual({ aborted: false, later: true });
+});
+
+test("an app's fill of a live turn's open row with a call, its result and an answer ends the turn", async () => {
+  const ready = gate();
+  const go = gate();
+  let row!: string;
+  attempts.push(async (ctx, ids) => {
+    row = (await begin(ctx, ids)).messages[0]._id;
+    ready.open();
+    await go.opened;
+  });
+  const s = await submitted();
+  const job = s.drain();
+  await ready.opened;
+  await s.control((ctx) =>
+    fill(ctx, s.ids.threadId, row, [
+      assistant([call("a")]),
+      { message: result("a") },
+      assistant("Done."),
+    ]),
+  );
+  const live = await s.stop();
+  go.open();
+  await job;
+  expect(live).toBe(false);
+});
+
+test("a retried turn's saved steps come back in step order, with an answer between its tool steps", async () => {
+  const seen: Record<string, unknown> = {};
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    await fill(ctx, ids.threadId, own.messages[0]._id, [
+      assistant([call("c1")]),
+      { message: result("c1") },
+      assistant("Answer one."),
+      assistant([call("c2")]),
+      { message: result("c2") },
+      pending,
+    ]);
+    throw new Error("crashed");
+  });
+  attempts.push(async (ctx, ids) => {
+    const own = await begin(ctx, ids);
+    seen.saved = own.turn!.saved.map((row) => [
+      row.message?.role,
+      row.tool,
+      row.text,
+    ]);
+    await fill(ctx, ids.threadId, own.messages[0]._id, [assistant("Done.")]);
+  });
+  const s = await submitted();
+  await s.drain();
+  await s.retry();
+  await s.drain();
+  expect(seen.saved).toEqual([
+    ["assistant", true, undefined],
+    ["tool", true, undefined],
+    ["assistant", false, "Answer one."],
+    ["assistant", true, undefined],
+    ["tool", true, undefined],
+  ]);
 });

@@ -44,33 +44,19 @@ export const listUsersWithThreads = query({
 export const deleteAllForUserId = action({
   args: { userId: v.string() },
   handler: async (ctx, args) => {
-    let threadsCursor = null;
-    let threadInProgress = null;
-    let messagesCursor = null;
-    let streamsInProgress = false;
-    let streamOrder = undefined;
-    let deltaCursor = undefined;
-    let isDone = false;
-    while (!isDone) {
-      const result: DeleteAllReturns = await ctx.runMutation(
+    let next: DeleteAllArgs = {
+      userId: args.userId,
+      messagesCursor: null,
+      threadsCursor: null,
+      threadInProgress: null,
+    };
+    for (;;) {
+      const { isDone, ...cursors }: DeleteAllReturns = await ctx.runMutation(
         internal.users._deletePageForUserId,
-        {
-          userId: args.userId,
-          messagesCursor,
-          threadInProgress,
-          threadsCursor,
-          streamsInProgress,
-          streamOrder,
-          deltaCursor,
-        },
+        next,
       );
-      messagesCursor = result.messagesCursor;
-      threadInProgress = result.threadInProgress;
-      threadsCursor = result.threadsCursor;
-      streamsInProgress = result.streamsInProgress ?? false;
-      streamOrder = result.streamOrder;
-      deltaCursor = result.deltaCursor;
-      isDone = result.isDone;
+      if (isDone) return null;
+      next = { userId: args.userId, ...cursors };
     }
   },
   returns: v.null(),
