@@ -225,9 +225,7 @@ export const schema = defineSchema({
     threadId: v.id("threads"),
     messageId: v.id("messages"),
     step: v.optional(v.string()),
-  })
-    .index("messageId", ["messageId"])
-    .index("threadId", ["threadId"]),
+  }).index("messageId", ["messageId"]),
 
   // A durable tool call's result, keyed by `${ctx.messageId}:${toolCallId}`.
   toolResults: defineTable({
@@ -236,9 +234,7 @@ export const schema = defineSchema({
     toolCallId: v.string(),
     // JSON: { output } in Convex's JSON encoding, or { error }.
     result: v.string(),
-  })
-    .index("messageId_toolCallId", ["messageId", "toolCallId"])
-    .index("threadId", ["threadId"]),
+  }).index("messageId_toolCallId", ["messageId", "toolCallId"]),
 
   streamDeltas: defineTable({
     streamId: v.id("streamingMessages"),
