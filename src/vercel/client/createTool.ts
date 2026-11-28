@@ -163,7 +163,7 @@ type ToolRunsOne<
        * @param input - The input of the tool call.
        * @param options.abortSignal - A signal that can be used to abort the tool call.
        */
-      execute?: ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>;
+      execute: ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>;
       /**
        * Run for a call that a crashed durable generation started without
        * recording its result, with the same `toolCallId`, in place of telling
@@ -171,6 +171,12 @@ type ToolRunsOne<
        * such as an API that dedupes on an idempotency key.
        */
       resume?: ToolExecuteFunctionCtx<INPUT, OUTPUT, Ctx, TOOL_CONTEXT>;
+      mutation?: never;
+      query?: never;
+    }
+  | {
+      execute?: never;
+      resume?: never;
       mutation?: never;
       query?: never;
     }

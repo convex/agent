@@ -61,5 +61,10 @@ test("a tool runs one of execute, mutation or query", () => {
       execute: async (_ctx, { item }) => item,
       resume: async (_ctx, { item }) => item,
     });
+    // @ts-expect-error resume reruns an execute tool's call, so it needs execute
+    createTool({
+      inputSchema: item,
+      resume: async () => "again",
+    });
   }).toBeFunction();
 });
