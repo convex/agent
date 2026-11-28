@@ -848,7 +848,12 @@ describe("plain streams with their pending message", () => {
       defineSchema({
         ...schema.tables,
         messages: defineTable(
-          omit(schema.tables.messages.validator.fields, ["streamId"]),
+          omit(schema.tables.messages.validator.fields, [
+            "streamId",
+            "turnId",
+            "jobId",
+            "abort",
+          ]),
         ),
       }),
       modules,
@@ -857,6 +862,55 @@ describe("plain streams with their pending message", () => {
     for (const { _id, _creationTime, ...doc } of docs) {
       await older.run((ctx) => ctx.db.insert("messages", doc));
     }
+  });
+
+  test("deleting a prompt whose several streamed replies it fails stays within one transaction's reads", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "go" } }],
+    });
+    const promptMessageId = messages[0]._id as Id<"messages">;
+    const replies: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const reply = await t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId,
+        messages: [
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+        createStream: { format: "UIMessageChunk" },
+      });
+      const streamId = reply.streamId;
+      replies.push(reply.messages[0]._id);
+      for (let step = 0; step < 10; step++) {
+        const id = `t${step}`;
+        await t.run((ctx) =>
+          ctx.db.insert("streamDeltas", {
+            streamId: streamId as Id<"streamingMessages">,
+            start: step,
+            end: step + 1,
+            parts: [
+              { type: "start-step" },
+              { type: "text-start", id },
+              { type: "text-delta", id, delta: "x".repeat(500_000) },
+              { type: "text-end", id },
+              { type: "finish-step" },
+            ],
+          }),
+        );
+      }
+    }
+    await t.mutation(api.messages.deleteByIds, {
+      messageIds: [promptMessageId],
+    });
+    const rows = await t.run((ctx) => ctx.db.query("messages").collect());
+    expect({
+      replies: replies.map((id) => rows.find((m) => m._id === id)?.status),
+      settled: rows.every((m) => m.status === "failed"),
+    }).toEqual({ replies: ["failed", "failed", "failed"], settled: true });
   });
 
   test("a retry replacing several streamed attempts stays within one transaction's reads", async () => {

@@ -1807,6 +1807,53 @@ describe("deleting a message aborts generation writing to it (issue #300)", () =
   });
 });
 
+test("deleting a plain prompt fails each pending reply with what its own stream carried", async () => {
+  const t = initConvexTest();
+  const thread = await t.mutation(api.threads.createThread, { userId: "u" });
+  const threadId = thread._id as Id<"threads">;
+  const { messages } = await t.mutation(api.messages.addMessages, {
+    threadId,
+    messages: [{ message: { role: "user", content: "hello" } }],
+  });
+  const prompt = messages[0];
+  for (const steps of [["A1.", "A2."], ["B."]]) {
+    const { streamId } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId: prompt._id as Id<"messages">,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+      createStream: { format: "UIMessageChunk" },
+    });
+    await t.mutation(api.streams.addDelta, {
+      streamId: streamId!,
+      start: 0,
+      end: 1,
+      parts: steps.flatMap((text, i) => [
+        { type: "start-step" },
+        { type: "text-start", id: `t${i}` },
+        { type: "text-delta", id: `t${i}`, delta: text },
+        { type: "text-end", id: `t${i}` },
+        { type: "finish-step" },
+      ]),
+    });
+  }
+  await t.mutation(api.messages.deleteByIds, {
+    messageIds: [prompt._id as Id<"messages">],
+  });
+  const { page } = await t.query(api.messages.listMessagesByThreadId, {
+    threadId,
+    order: "asc",
+    statuses: ["pending", "success", "failed"],
+    paginationOpts: { cursor: null, numItems: 10 },
+  });
+  expect(page.map((m) => [m.status, m.error, m.text]).sort()).toEqual([
+    ["failed", "Message deleted", "A1."],
+    ["failed", "Message deleted", "A2."],
+    ["failed", "Message deleted", "B."],
+  ]);
+});
+
 describe("abandoning a save whose prompt was deleted (issue #300)", () => {
   test("abandons instead of throwing when the caller opts in", async () => {
     const t = initConvexTest();
@@ -1981,5 +2028,39 @@ describe("cloneThread", () => {
       upToAndIncludingMessageId: messages.at(-1)!._id as Id<"messages">,
     });
     expect((await targetRows()).filter((m) => m.tool)).toEqual([]);
+  });
+
+  test("a pending message from another thread can't be filled, with or without a prompt", async () => {
+    const t = initConvexTest();
+    const threadA = await t.mutation(api.threads.createThread, {});
+    const threadB = await t.mutation(api.threads.createThread, {});
+    const threadId = threadB._id as Id<"threads">;
+    const started = await t.mutation(api.messages.addMessages, {
+      threadId: threadA._id as Id<"threads">,
+      messages: [
+        { message: { role: "user", content: "Hi." } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "B." } }],
+    });
+    const rows = () => t.run((ctx) => ctx.db.query("messages").collect());
+    const before = await rows();
+    for (const prompt of [
+      {},
+      { promptMessageId: messages[0]._id as Id<"messages"> },
+    ]) {
+      await expect(
+        t.mutation(api.messages.addMessages, {
+          threadId,
+          ...prompt,
+          pendingMessageId: started.messages[1]._id as Id<"messages">,
+          messages: [{ message: { role: "assistant", content: "Elsewhere." } }],
+        }),
+      ).rejects.toThrow("not found");
+    }
+    expect(await rows()).toEqual(before);
   });
 });

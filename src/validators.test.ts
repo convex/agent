@@ -21,7 +21,14 @@ expectTypeOf<FinishReason>().toExtend<Infer<typeof vFinishReason>>();
 type MessageBasedOnSchema = IdsToStrings<
   Omit<
     Doc<"messages">,
-    "files" | "stepId" | "parentMessageId" | "textLengths" | "streamId"
+    | "files"
+    | "stepId"
+    | "parentMessageId"
+    | "textLengths"
+    | "turnId"
+    | "jobId"
+    | "streamId"
+    | "abort"
   >
 >;
 expectTypeOf<Infer<typeof vMessageDoc>>().toEqualTypeOf<MessageBasedOnSchema>();

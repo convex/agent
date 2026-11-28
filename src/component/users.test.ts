@@ -6,6 +6,7 @@ import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
 import schema from "./schema.js";
 import { modules } from "./setup.test.js";
+import { deleteAllForUserId } from "./users.js";
 
 describe("users", () => {
   test("listUsersWithThreads returns users who have threads", async () => {
@@ -473,5 +474,30 @@ describe("users", () => {
     ).resolves.not.toThrow();
 
     // Should complete successfully without errors
+  });
+  test("deleteAllForUserId hands every cursor of a page to the next page", async () => {
+    const first = {
+      threadsCursor: "threads",
+      threadInProgress: null,
+      messagesCursor: null,
+      streamsInProgress: false,
+      jobsCursor: "jobs",
+    };
+    const pages = [
+      { ...first, isDone: false },
+      { ...first, isDone: true },
+    ];
+    const calls: unknown[] = [];
+    const ctx = {
+      runMutation: async (_ref: unknown, args: unknown) => {
+        calls.push(args);
+        return pages.shift();
+      },
+    };
+    const action = deleteAllForUserId as unknown as {
+      _handler: (ctx: unknown, args: { userId: string }) => Promise<null>;
+    };
+    await action._handler(ctx, { userId: "u" });
+    expect(calls[1]).toEqual({ userId: "u", ...first });
   });
 });

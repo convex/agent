@@ -30,6 +30,21 @@ import {
   projectPersistedUIMessageChunks,
 } from "../streaming/materializePersistedUIMessageChunks.js";
 import { changeRefcount } from "./files.js";
+import {
+  authorizeStream,
+  callerJob,
+  endStream,
+  planStream,
+  settle,
+  settleStream,
+  stopTurns,
+  streamLease,
+  type At,
+  hold,
+  timeoutStoppedStream,
+  closeStoppedStream,
+  timeoutTurnStream,
+} from "./turns.js";
 
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -192,6 +207,9 @@ export const addDelta = mutation({
     if (stream.state.kind !== "streaming") {
       return false;
     }
+    if (stream.jobId !== undefined && stream.jobId !== (await callerJob(ctx))) {
+      return false;
+    }
     const { fileRefs, ...delta } = args;
     if (fileRefs?.length) {
       const previous = stream.fileRefs ?? [];
@@ -267,20 +285,37 @@ export const listDeltas = query({
 });
 
 export const create = mutation({
-  args: omit(schema.tables.streamingMessages.validator.fields, [
-    "state",
-    "fileRefs",
-  ]),
+  args: {
+    ...omit(schema.tables.streamingMessages.validator.fields, [
+      "state",
+      "fileRefs",
+      "turnId",
+      "jobId",
+    ]),
+    // The prompt the stream answers, when a generation begins with it.
+    promptMessageId: v.optional(v.id("messages")),
+  },
   returns: v.id("streamingMessages"),
-  handler: (ctx, args) => createStream(ctx, args),
+  handler: async (ctx, { promptMessageId, ...args }) => {
+    const stamp =
+      promptMessageId === undefined
+        ? await streamLease(ctx)
+        : await planStream(ctx, args.threadId, promptMessageId);
+    const streamId = await createStream(ctx, { ...args, ...stamp });
+    if (stamp.turnId) await settle(ctx, stamp.turnId, { byApp: false });
+    return streamId;
+  },
 });
 
 export async function createStream(
   ctx: MutationCtx,
-  fields: Omit<
+  {
+    at,
+    ...fields
+  }: Omit<
     WithoutSystemFields<Doc<"streamingMessages">>,
     "state" | "fileRefs"
-  >,
+  > & { at?: At },
 ) {
   const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
   // TODO: enforce order/stepOrder uniqueness?
@@ -288,6 +323,7 @@ export async function createStream(
     ...fields,
     state,
   });
+  await hold(ctx, { turnId: fields.turnId, at }, fields, { streamId });
   const timeoutFnId = await ctx.scheduler.runAfter(
     TIMEOUT_INTERVAL,
     internal.streams.timeoutStream,
@@ -352,6 +388,7 @@ function publicStreamMessage(m: Doc<"streamingMessages">): StreamMessage {
   };
 }
 
+/** Aborts the plain streams at an order; a turn's streams only their turn ends. */
 export async function abortStreamsAtOrder(
   ctx: MutationCtx,
   args: { threadId: Id<"threads">; order: number; reason: string },
@@ -365,16 +402,19 @@ export async function abortStreamsAtOrder(
         .eq("order", args.order),
     )
     .take(100);
+  let aborted = false;
   for (const stream of streams) {
-    await abortById(ctx, { streamId: stream._id, reason: args.reason });
+    if (stream.jobId !== undefined) continue;
+    await abortById(ctx, stream, { reason: args.reason });
+    aborted = true;
   }
-  return streams.length > 0;
+  return aborted;
 }
 
 export const abortByOrder = mutation({
   args: { threadId: v.id("threads"), order: v.number(), reason: v.string() },
   returns: v.boolean(),
-  handler: abortStreamsAtOrder,
+  handler: (ctx, args) => stopTurns(ctx, args, args.reason),
 });
 
 export const abort = mutation({
@@ -384,34 +424,88 @@ export const abort = mutation({
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.boolean(),
-  handler: abortById,
+  handler: async (ctx, args) => {
+    const { streamId, ...rest } = args;
+    const stream = await getStream(ctx, streamId);
+    if (stream.jobId !== undefined) {
+      return endStream(ctx, "abort", stream, rest);
+    }
+    return abortById(ctx, stream, rest);
+  },
 });
+
+export async function getStream(
+  ctx: MutationCtx,
+  streamId: Id<"streamingMessages">,
+) {
+  const stream = await ctx.db.get("streamingMessages", streamId);
+  if (!stream) {
+    throw new Error(`Stream not found: ${streamId}`);
+  }
+  return stream;
+}
 
 export async function abortById(
   ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
   args: {
-    streamId: Id<"streamingMessages">;
     reason: string;
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
+    lease?: true;
   },
 ) {
-  const stream = await ctx.db.get("streamingMessages", args.streamId);
-  if (!stream) {
-    throw new Error(`Stream not found: ${args.streamId}`);
+  if (args.lease && stream.jobId !== undefined) {
+    await authorizeStream(ctx, stream);
   }
   if (stream.state.kind !== "streaming") {
     return false;
   }
   // A final delta lands only in the stream it ends.
-  if (args.finalDelta?.streamId === args.streamId) {
+  if (args.finalDelta?.streamId === stream._id) {
     await ctx.db.insert("streamDeltas", args.finalDelta);
   }
   await cleanupTimeoutFn(ctx, stream);
-  const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
-  await ctx.db.patch("streamingMessages", args.streamId, {
+  const cleanupFnId = await scheduleStreamDeletion(ctx, stream._id);
+  await ctx.db.patch("streamingMessages", stream._id, {
     state: { kind: "aborted", reason: args.reason, cleanupFnId },
   });
   return true;
+}
+
+/**
+ * A stop while the stream's job may still run. It reads no deltas, so the
+ * runner still writing them doesn't conflict with it, and it keeps the
+ * timeout, which ends the reply if the runner is gone.
+ */
+export async function stopStream(
+  ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
+  reason: string,
+) {
+  if (stream.state.kind !== "streaming") return;
+  await ctx.db.patch("streamingMessages", stream._id, {
+    state: { kind: "aborted", reason, timeoutFnId: stream.state.timeoutFnId },
+  });
+}
+
+/** Ends a stream a stop left to its reply's ending. */
+export async function endStoppedStream(
+  ctx: MutationCtx,
+  streamId: Id<"streamingMessages">,
+) {
+  const stream = await ctx.db.get("streamingMessages", streamId);
+  if (stream?.state.kind !== "aborted" || !stream.state.timeoutFnId) return;
+  const timeoutFn = await ctx.db.system.get(
+    "_scheduled_functions",
+    stream.state.timeoutFnId,
+  );
+  if (timeoutFn?.state.kind === "pending") {
+    await ctx.scheduler.cancel(timeoutFn._id);
+  }
+  const cleanupFnId = await scheduleStreamDeletion(ctx, streamId);
+  await ctx.db.patch("streamingMessages", streamId, {
+    state: { kind: "aborted", reason: stream.state.reason, cleanupFnId },
+  });
 }
 
 async function cleanupTimeoutFn(
@@ -429,7 +523,7 @@ async function cleanupTimeoutFn(
   }
 }
 
-// The stream's own writer ending it with an error.
+// The stream's own writer ending it with an error. From anyone else it is a stop.
 export const fail = mutation({
   args: {
     streamId: v.id("streamingMessages"),
@@ -439,9 +533,15 @@ export const fail = mutation({
   returns: v.boolean(),
   handler: async (ctx, { streamId, reason, finalDelta }) => {
     const stream = await ctx.db.get("streamingMessages", streamId);
-    if (!stream || stream.state.kind !== "streaming") return false;
-    return abortById(ctx, {
-      streamId,
+    if (!stream) return false;
+    if (stream.jobId !== undefined) {
+      return endStream(ctx, "fail", stream, {
+        reason,
+        ...(finalDelta?.streamId === streamId ? { finalDelta } : {}),
+      });
+    }
+    if (stream.state.kind !== "streaming") return false;
+    return abortById(ctx, stream, {
       reason,
       ...(finalDelta?.streamId === streamId ? { finalDelta } : {}),
     });
@@ -454,34 +554,45 @@ export const finish = mutation({
     finalDelta: v.optional(deltaValidator),
   },
   returns: v.null(),
-  handler: finishHandler,
+  handler: async (ctx, args) => {
+    const stream = await getStream(ctx, args.streamId);
+    if (await closeStoppedStream(ctx, stream)) return null;
+    const finished = await finishHandler(ctx, stream, {
+      finalDelta: args.finalDelta,
+      lease: true,
+    });
+    if (finished?.turnId) await settleStream(ctx, finished);
+    return null;
+  },
 });
 
 export async function finishHandler(
   ctx: MutationCtx,
+  stream: Doc<"streamingMessages">,
   args: {
-    streamId: Id<"streamingMessages">;
     finalDelta?: WithoutSystemFields<Doc<"streamDeltas">>;
-  },
+    // Set by a writer's own finish, which a durable stream checks.
+    lease?: true;
+  } = {},
 ) {
   if (args.finalDelta) {
     await ctx.db.insert("streamDeltas", args.finalDelta);
   }
-  const stream = await ctx.db.get("streamingMessages", args.streamId);
-  if (!stream) {
-    throw new Error(`Stream not found: ${args.streamId}`);
+  if (args.lease && stream.jobId !== undefined) {
+    await authorizeStream(ctx, stream);
   }
   if (stream.state.kind !== "streaming") {
     console.warn(
-      `Stream trying to finish ${args.streamId} but is ${stream.state.kind}`,
+      `Stream trying to finish ${stream._id} but is ${stream.state.kind}`,
     );
-    return;
+    return null;
   }
   await cleanupTimeoutFn(ctx, stream);
-  const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
-  await ctx.db.patch("streamingMessages", args.streamId, {
+  const cleanupFnId = await scheduleStreamDeletion(ctx, stream._id);
+  await ctx.db.patch("streamingMessages", stream._id, {
     state: { kind: "finished", endedAt: Date.now(), cleanupFnId },
   });
+  return stream;
 }
 
 export const heartbeat = mutation({
@@ -566,10 +677,14 @@ export async function timeoutStreamHandler(
   args: { streamId: Id<"streamingMessages"> },
 ) {
   const stream = await ctx.db.get("streamingMessages", args.streamId);
+  if (stream?.state.kind === "aborted" && stream.state.timeoutFnId) {
+    return timeoutStoppedStream(ctx, stream);
+  }
   if (!stream || stream.state.kind !== "streaming") {
     console.warn("Stream not found", args.streamId);
     return;
   }
+  if (stream.turnId && (await timeoutTurnStream(ctx, stream))) return;
   const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
   await ctx.db.patch("streamingMessages", args.streamId, {
     state: { kind: "aborted", reason: "timeout", cleanupFnId },

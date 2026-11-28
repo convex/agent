@@ -1,4 +1,5 @@
 import { assert, omit, pick } from "convex-helpers";
+import { deleteTurnsPage, endTurnsForDeleted } from "./turns.js";
 import { partial } from "convex-helpers/validators";
 import { paginationOptsValidator } from "convex/server";
 import type { ObjectType } from "convex/values";
@@ -149,12 +150,14 @@ export const deleteAllForThreadIdSync = action({
   },
   handler: async (ctx, args) => {
     let cursor: string | undefined = undefined;
+    let jobsCursor: string | undefined = undefined;
     while (true) {
       const result: DeleteThreadReturns = await ctx.runMutation(
         internal.threads._deletePageForThreadId,
         {
           threadId: args.threadId,
           cursor,
+          jobsCursor,
           limit: args.limit,
           onSaveMessages: args.onSaveMessages,
         },
@@ -163,6 +166,7 @@ export const deleteAllForThreadIdSync = action({
         break;
       }
       cursor = result.cursor;
+      jobsCursor = result.jobsCursor;
     }
     await ctx.runAction(api.streams.deleteAllStreamsForThreadIdSync, {
       threadId: args.threadId,
@@ -178,12 +182,14 @@ const deleteThreadArgs = {
   streamsDone: v.optional(v.boolean()),
   streamOrder: v.optional(v.number()),
   deltaCursor: v.optional(v.string()),
+  jobsCursor: v.optional(v.string()),
   limit: v.optional(v.number()),
   onSaveMessages: vOnSaveMessages,
 };
 type DeleteThreadArgs = ObjectType<typeof deleteThreadArgs>;
 const deleteThreadReturns = {
   cursor: v.string(),
+  jobsCursor: v.optional(v.string()),
   isDone: v.boolean(),
 };
 type DeleteThreadReturns = ObjectType<typeof deleteThreadReturns>;
@@ -199,7 +205,7 @@ export const _deletePageForThreadId = internalMutation({
  * It will continue deleting pages asynchronously.
  */
 export const deleteAllForThreadIdAsync = mutation({
-  args: deleteThreadArgs,
+  args: omit(deleteThreadArgs, ["jobsCursor"]),
   handler: (ctx, args) => deleteAllForThreadIdBatch(ctx, args, false),
   returns: v.object({ isDone: v.boolean() }),
 });
@@ -254,9 +260,12 @@ async function deleteThreadStep(
   ctx: MutationCtx,
   args: DeleteThreadArgs,
 ): Promise<DeleteThreadStep> {
-  let messagesResult = {
+  let messagesResult: Omit<DeleteThreadReturns, "cursor"> & {
+    cursor?: string;
+  } = {
     isDone: args.messagesDone ?? false,
     cursor: args.cursor,
+    jobsCursor: args.jobsCursor,
   };
   if (!args.messagesDone) {
     messagesResult = await deletePageForThreadIdHandler(ctx, args);
@@ -279,6 +288,7 @@ async function deleteThreadStep(
       threadId: args.threadId,
       limit: args.limit,
       cursor: messagesResult.cursor,
+      jobsCursor: messagesResult.jobsCursor,
       messagesDone: messagesResult.isDone,
       streamsDone: streamResult.isDone,
       streamOrder: streamResult.streamOrder,
@@ -302,12 +312,19 @@ async function deletePageForThreadIdHandler(
       cursor: deletionCursor(args.cursor),
     });
   await Promise.all(messages.page.map((m) => deleteMessage(ctx, m)));
+  if (messages.page.some((m) => m.turnId)) {
+    await endTurnsForDeleted(ctx, messages.page);
+  }
   await reportSavedMessages(
     ctx,
     args.onSaveMessages,
     messages.page.map((doc) => ({ kind: "delete", doc })),
   );
-  if (messages.isDone) {
+  const turns = messages.isDone
+    ? await deleteTurnsPage(ctx, args.threadId, args.jobsCursor)
+    : undefined;
+  const isDone = turns?.done ?? false;
+  if (isDone) {
     const thread = await ctx.db.get("threads", args.threadId);
     if (thread) {
       await ctx.db.delete("threads", args.threadId);
@@ -315,6 +332,7 @@ async function deletePageForThreadIdHandler(
   }
   return {
     cursor: messages.continueCursor,
-    isDone: messages.isDone,
+    jobsCursor: turns?.jobsCursor ?? args.jobsCursor,
+    isDone,
   };
 }

@@ -109,12 +109,14 @@ const save = app.mutation({
     text: v.optional(v.string()),
     pending: v.optional(v.boolean()),
     restart: v.optional(v.boolean()),
+    promptMessageId: v.optional(v.string()),
     hook: vHook,
   },
   handler: async (ctx, args): Promise<string> => {
     const agent = agentWith({ hook: args.hook });
     const { messages } = await agent.saveMessages(ctx, {
       threadId: args.threadId,
+      promptMessageId: args.promptMessageId,
       messages: [
         args.pending
           ? { role: "assistant", content: [] }
@@ -576,6 +578,23 @@ test("deleting a message, messages, a range or a thread is reported", async () =
   expect(deleted.reports.slice(3)).toEqual([
     inThread.slice(0, 2).map((m) => as("delete", m)),
     [as("delete", inThread[2])],
+  ]);
+});
+
+test("deleting a prompt reports the pending reply it fails", async () => {
+  const { t, threadId, state } = await setup();
+  const prompt = await t.mutation(api.hook.save, { threadId });
+  await t.mutation(api.hook.save, {
+    threadId,
+    pending: true,
+    promptMessageId: prompt,
+  });
+  const { messages: saved } = await state();
+  await t.mutation(api.hook.remove, { threadId, messageIds: [prompt] });
+  const { reports } = await state();
+  expect(reports.slice(2)).toEqual([
+    [as("update", { ...saved[1], status: "failed" })],
+    [as("delete", saved[0])],
   ]);
 });
 
