@@ -171,6 +171,10 @@ const runArgs = {
   failSave: v.optional(v.union(v.literal("first"), v.literal("final"))),
   // That save commits before it throws.
   failSaveAfterCommit: v.optional(v.boolean()),
+  // A retry from the same prompt starts after that save commits, before it throws.
+  restartAfterCommit: v.optional(v.boolean()),
+  // Another generation adds a pending message at the order before that save.
+  otherPendingBefore: v.optional(v.boolean()),
   // Throws on the delta write that carries the first step's tool result.
   failToolResultDelta: v.optional(v.boolean()),
   abortInTool: v.optional(v.boolean()),
@@ -372,11 +376,25 @@ const run = app.action({
         ) {
           await sleep(100);
         }
+        if (failsSave && args.otherPendingBefore) {
+          await ctx.runMutation(components.agent.messages.addMessages, {
+            threadId: args.threadId,
+            promptMessageId: await firstMessageId(),
+            messages: [
+              {
+                message: { role: "assistant", content: [] },
+                status: "pending",
+              },
+            ],
+          });
+        }
         const result = await ctx.runMutation(reference, mutationArgs);
+        if (failsSave && args.restartAfterCommit) await restart();
         if (failsSave) throw new Error(`${args.failSave} save failed`);
-        const { pendingMessageId, format } = mutationArgs as {
+        const { pendingMessageId, format, createStream } = mutationArgs as {
           pendingMessageId?: string;
           format?: string;
+          createStream?: object;
         };
         // Aborts once a step save has committed, before its reply arrives.
         if (args.abortDuringSave && pendingMessageId) {
@@ -385,9 +403,11 @@ const run = app.action({
         }
         // Someone else aborts the stream as soon as it is created, before
         // the creation's reply arrives.
-        if (args.abortOnCreate && format !== undefined) {
+        if (args.abortOnCreate && (format ?? createStream) !== undefined) {
           await ctx.runMutation(components.agent.streams.abort, {
-            streamId: result as string,
+            streamId: createStream
+              ? (result as { streamId: string }).streamId
+              : (result as string),
             reason: "Stopped elsewhere",
           });
           await sleep(50);
@@ -520,6 +540,58 @@ describe.each(["generateText", "streamText"] as const)(
       expect(r.streams).toEqual(streamed ? ["aborted"] : []);
     });
 
+    // Its reply, with the id of the pending message it made, never arrived.
+    test("a step save that commits and then fails stops, and fails the pending message it made (#498)", async () => {
+      const r = await go({
+        runner,
+        failSave: "first",
+        failSaveAfterCommit: true,
+      });
+      expect(r.modelCalls).toBe(1);
+      expect(r.error).toBe("first save failed");
+      expect(r.saved).toEqual([
+        USER,
+        ...LOOKUP,
+        // Only a streamed attempt's stream tells its pending message apart.
+        streamed ? failed(EMPTY, "first save failed") : PENDING,
+      ]);
+      expect(r.streams).toEqual(streamed ? ["aborted"] : []);
+    });
+
+    test("a retry after a step save commits and before it fails leaves the retry's pending message", async () => {
+      const r = await go({
+        runner,
+        failSave: "first",
+        failSaveAfterCommit: true,
+        restartAfterCommit: true,
+      });
+      expect(r.error).toBe("first save failed");
+      expect(r.saved).toEqual([
+        USER,
+        ...LOOKUP,
+        failed(EMPTY, "Restarting"),
+        PENDING,
+      ]);
+    });
+
+    test("a step save that commits and then fails leaves another generation's pending message at its order", async () => {
+      const r = await go({
+        runner,
+        failSave: "first",
+        failSaveAfterCommit: true,
+        otherPendingBefore: true,
+      });
+      expect(r.error).toBe("first save failed");
+      // Only a streamed attempt's stream tells its own pending message apart.
+      expect(r.saved).toEqual([
+        USER,
+        LOOKUP[0],
+        PENDING,
+        LOOKUP[1],
+        streamed ? failed(EMPTY, "first save failed") : PENDING,
+      ]);
+    });
+
     test("a failed final save fails the generation (#419)", async () => {
       const r = await go({ runner, failSave: "final" });
       expect(r.error).toBe("final save failed");
@@ -534,18 +606,6 @@ describe.each(["generateText", "streamText"] as const)(
 );
 
 describe("generateText", () => {
-  // Its reply, with the id of the pending message it made, never arrived.
-  test("a step save that commits and then fails stops, and settles only the messages it knows", async () => {
-    const r = await go({
-      runner: "generateText",
-      failSave: "first",
-      failSaveAfterCommit: true,
-    });
-    expect(r.modelCalls).toBe(1);
-    expect(r.error).toBe("first save failed");
-    expect(r.saved).toEqual([USER, ...LOOKUP, PENDING]);
-  });
-
   test("a final save that commits and then fails rejects", async () => {
     const r = await go({
       runner: "generateText",
@@ -688,7 +748,10 @@ describe("streamText", () => {
       abortInStepEnd: true,
       failSave: "first",
     });
-    expect(r.saved).toEqual([USER, failed(EMPTY, "Stopped")]);
+    expect(r.saved).toEqual([
+      USER,
+      failed({ ...EMPTY, parts: ["tool-call"] }, "Stopped"),
+    ]);
     expect(r.error).toBe("first save failed");
   });
 
@@ -730,9 +793,12 @@ describe("streamText", () => {
   test("a retry during the answer fails the attempt it replaced", async () => {
     const r = await go({ runner: "streamText", restartAt: "beforeAnswer" });
     expect(r.error).toBe("Restarting");
-    expect(r.saved.filter((row) => row.parts.includes("text"))).toEqual([
+    // The retry aborted its stream, so it stopped before the answer.
+    expect(r.saved).toEqual([
       USER,
-      failed(ANSWER, "Restarting"),
+      ...LOOKUP,
+      failed(EMPTY, "Restarting"),
+      PENDING,
     ]);
     expect(r.streams).toEqual(["aborted"]);
   });

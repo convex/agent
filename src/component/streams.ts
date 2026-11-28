@@ -42,6 +42,21 @@ export const MAX_MATERIALIZATION_BYTES = 8 * 1024 * 1024;
 export const MAX_MATERIALIZATION_ROWS = 16_000;
 export const MAX_MATERIALIZATION_STREAMS = 10;
 
+type RecoveryBudget = { bytes: number; rows: number };
+const recoveryBudgets = new WeakMap<object, RecoveryBudget>();
+/** What recovery may still read in this transaction, shared by every recovery in it. */
+function recoveryBudget(ctx: MutationCtx): RecoveryBudget {
+  let budget = recoveryBudgets.get(ctx.db);
+  if (!budget) {
+    budget = {
+      bytes: MAX_MATERIALIZATION_BYTES,
+      rows: MAX_MATERIALIZATION_ROWS,
+    };
+    recoveryBudgets.set(ctx.db, budget);
+  }
+  return budget;
+}
+
 // Mirrors convex/values size.js; getConvexSize is newer than the oldest
 // convex this package supports.
 export function convexValueSize(value: unknown): number {
@@ -220,11 +235,9 @@ export const listDeltas = query({
     const deltas: StreamDelta[] = [];
     for (const cursor of args.cursors) {
       const stream = await ctx.db.get("streamingMessages", cursor.streamId);
-      // Clients can retain cursors after a stream has been cleaned up.
-      if (!stream) continue;
-      if (stream.threadId !== args.threadId) {
-        throw new Error("Stream does not belong to the given thread");
-      }
+      // Clients can retain cursors after a stream has been cleaned up, and
+      // another thread's stream reads the same as a missing one.
+      if (!stream || stream.threadId !== args.threadId) continue;
       // Uses paginator: queries may only call built-in .paginate() once per
       // transaction, and this reads one page per stream.
       const { page } = await paginator(ctx.db, schema)
@@ -259,24 +272,32 @@ export const create = mutation({
     "fileRefs",
   ]),
   returns: v.id("streamingMessages"),
-  handler: async (ctx, args) => {
-    const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
-    // TODO: enforce order/stepOrder uniqueness?
-    const streamId = await ctx.db.insert("streamingMessages", {
-      ...args,
-      state,
-    });
-    const timeoutFnId = await ctx.scheduler.runAfter(
-      TIMEOUT_INTERVAL,
-      internal.streams.timeoutStream,
-      { streamId },
-    );
-    await ctx.db.patch("streamingMessages", streamId, {
-      state: { ...state, timeoutFnId },
-    });
-    return streamId;
-  },
+  handler: (ctx, args) => createStream(ctx, args),
 });
+
+export async function createStream(
+  ctx: MutationCtx,
+  fields: Omit<
+    WithoutSystemFields<Doc<"streamingMessages">>,
+    "state" | "fileRefs"
+  >,
+) {
+  const state = { kind: "streaming" as const, lastHeartbeat: Date.now() };
+  // TODO: enforce order/stepOrder uniqueness?
+  const streamId = await ctx.db.insert("streamingMessages", {
+    ...fields,
+    state,
+  });
+  const timeoutFnId = await ctx.scheduler.runAfter(
+    TIMEOUT_INTERVAL,
+    internal.streams.timeoutStream,
+    { streamId },
+  );
+  await ctx.db.patch("streamingMessages", streamId, {
+    state: { ...state, timeoutFnId },
+  });
+  return streamId;
+}
 
 export const list = query({
   args: {
@@ -378,11 +399,12 @@ export async function abortById(
   if (!stream) {
     throw new Error(`Stream not found: ${args.streamId}`);
   }
-  if (args.finalDelta) {
-    await ctx.db.insert("streamDeltas", args.finalDelta);
-  }
   if (stream.state.kind !== "streaming") {
     return false;
+  }
+  // A final delta lands only in the stream it ends.
+  if (args.finalDelta?.streamId === args.streamId) {
+    await ctx.db.insert("streamDeltas", args.finalDelta);
   }
   await cleanupTimeoutFn(ctx, stream);
   const cleanupFnId = await scheduleStreamDeletion(ctx, args.streamId);
@@ -407,7 +429,25 @@ async function cleanupTimeoutFn(
   }
 }
 
-// No longer used from the DeltaStreamer
+// The stream's own writer ending it with an error.
+export const fail = mutation({
+  args: {
+    streamId: v.id("streamingMessages"),
+    reason: v.string(),
+    finalDelta: v.optional(deltaValidator),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, { streamId, reason, finalDelta }) => {
+    const stream = await ctx.db.get("streamingMessages", streamId);
+    if (!stream || stream.state.kind !== "streaming") return false;
+    return abortById(ctx, {
+      streamId,
+      reason,
+      ...(finalDelta?.streamId === streamId ? { finalDelta } : {}),
+    });
+  },
+});
+
 export const finish = mutation({
   args: {
     streamId: v.id("streamingMessages"),
@@ -836,6 +876,7 @@ export async function getStreamingMessagesWithMetadata(
     stepOrder,
   }: { threadId: Id<"threads">; order: number; stepOrder: number },
   metadata: { status: "success" | "failed"; error?: string },
+  onlyStreams?: Id<"streamingMessages">[],
 ): Promise<{
   messages: MessageWithMetadataInternal[];
   materializationFailures: Array<{
@@ -844,12 +885,13 @@ export async function getStreamingMessagesWithMetadata(
   }>;
   streamsToRelease: Id<"streamingMessages">[];
 }> {
-  const streamingMessages = await getStreamingMessages(
-    ctx,
-    threadId,
-    order,
-    stepOrder,
-  );
+  const streamingMessages = onlyStreams
+    ? (
+        await Promise.all(
+          onlyStreams.map((id) => ctx.db.get("streamingMessages", id)),
+        )
+      ).filter((s) => s !== null)
+    : await getStreamingMessages(ctx, threadId, order, stepOrder);
   const failure = (streamId: Id<"streamingMessages">, reason: string) => ({
     messages: [],
     materializationFailures: [{ streamId, reason }],
@@ -861,12 +903,18 @@ export async function getStreamingMessagesWithMetadata(
       `Order ${order} has more than ${MAX_MATERIALIZATION_STREAMS} streams to recover`,
     );
   }
-  let bytesRemaining = MAX_MATERIALIZATION_BYTES;
-  let rowsRemaining = MAX_MATERIALIZATION_ROWS;
+  const overBudget = (streamId: Id<"streamingMessages">) =>
+    new Error(
+      `Delta logs for order ${order} exceed the ${MAX_MATERIALIZATION_BYTES} byte or ${MAX_MATERIALIZATION_ROWS} document recovery budget at stream ${streamId}`,
+    );
+  const budget = recoveryBudget(ctx);
   const messages: MessageWithMetadataInternal[] = [];
   const streamsToRelease: Id<"streamingMessages">[] = [];
   for (const streamingMessage of streamingMessages) {
     try {
+      if (budget.bytes <= 0 || budget.rows <= 0) {
+        throw overBudget(streamingMessage._id);
+      }
       // One built-in .paginate() per stream: only mutations allow several per
       // transaction. A query would need paginator, as listDeltas uses.
       const deltas = await ctx.db
@@ -875,20 +923,16 @@ export async function getStreamingMessagesWithMetadata(
           q.eq("streamId", streamingMessage._id),
         )
         .paginate({
-          numItems: rowsRemaining,
-          maximumRowsRead: rowsRemaining,
-          maximumBytesRead: bytesRemaining,
+          numItems: budget.rows,
+          maximumRowsRead: budget.rows,
+          maximumBytesRead: budget.bytes,
           cursor: null,
         });
-      if (!deltas.isDone) {
-        throw new Error(
-          `Delta logs for order ${order} exceed the ${MAX_MATERIALIZATION_BYTES} byte or ${MAX_MATERIALIZATION_ROWS} document recovery budget at stream ${streamingMessage._id}`,
-        );
-      }
-      rowsRemaining -= deltas.page.length;
+      budget.rows -= deltas.page.length;
       for (const delta of deltas.page) {
-        bytesRemaining -= convexValueSize(delta);
+        budget.bytes -= convexValueSize(delta);
       }
+      if (!deltas.isDone) throw overBudget(streamingMessage._id);
       const { parts } = getPersistedUIMessageChunkParts(deltas.page);
       // We don't save messages that have already been saved
       const numToSkip = stepOrder - streamingMessage.stepOrder;

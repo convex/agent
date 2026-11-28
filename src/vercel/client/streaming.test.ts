@@ -34,7 +34,7 @@ const testMetadata = {
 
 describe("syncStreams", () => {
   test.each(["first", "last"])(
-    "rejects a mixed-thread request with the foreign stream %s",
+    "skips the foreign stream %s of a mixed-thread request",
     async (position) => {
       const t = initConvexTest();
       await t.action(async (ctx) => {
@@ -59,12 +59,13 @@ describe("syncStreams", () => {
         }
         if (position === "first") cursors.reverse();
 
-        await expect(
-          syncStreams(ctx, components.agent, {
-            threadId,
-            streamArgs: { kind: "deltas", cursors },
-          }),
-        ).rejects.toThrow("Stream does not belong to the given thread");
+        const result = await syncStreams(ctx, components.agent, {
+          threadId,
+          streamArgs: { kind: "deltas", cursors },
+        });
+        expect(
+          result?.kind === "deltas" && result.deltas.map((d) => d.parts),
+        ).toEqual([["allowed"]]);
       });
     },
   );

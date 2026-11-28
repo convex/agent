@@ -167,6 +167,8 @@ export async function startGeneration<
        * AI SDK's hooks, after the steps it finishes.
        */
       endsFromHooks?: boolean;
+      /** Starts the generation's stream with its first save. */
+      createStream?: { format: "UIMessageChunk" | "TextStreamPart" };
     },
   _operation?:
     | "generateText"
@@ -208,6 +210,8 @@ export async function startGeneration<
   }) => Promise<void>;
   end: (options?: { finishStreamId?: string }) => Promise<void>;
   getSavedMessages: () => MessageDoc[];
+  /** The stream the first save started. */
+  streamId: string | undefined;
 }> {
   const saveMessages = opts.storageOptions?.saveMessages ?? "promptAndOutput";
   // Unless something reads it before the first save, the userId comes back on
@@ -246,7 +250,7 @@ export async function startGeneration<
   assert(model, "model is required");
   let activeModel: ModelOrMetadata = model;
 
-  const { promptMessageId, pendingMessage, savedMessages } =
+  const { promptMessageId, pendingMessage, savedMessages, streamId } =
     threadId && saveMessages !== "none"
       ? await saveInputMessages(ctx, component, {
           ...opts,
@@ -257,11 +261,19 @@ export async function startGeneration<
           messages: args.messages,
           promptMessageId: args.promptMessageId,
           storageOptions: { saveMessages },
+          createStream: opts.createStream && {
+            ...opts.createStream,
+            agentName: opts.agentName,
+            model: getModelName(model),
+            provider: getProviderName(model),
+            providerOptions: opts.providerOptions,
+          },
         })
       : {
           promptMessageId: args.promptMessageId,
           pendingMessage: undefined,
           savedMessages: [] as MessageDoc[],
+          streamId: undefined,
         };
 
   userId ??= pendingMessage?.userId;
@@ -283,6 +295,8 @@ export async function startGeneration<
   let saving: Promise<unknown> = Promise.resolve();
   // A failed save fails the generation, wherever it ends.
   let saveFailure: { error: unknown } | undefined;
+  // A step save that threw may have committed and made a new pending message.
+  let unsureStepSave = false;
   const saveHeld = (createPendingMessage: boolean, finishStreamId?: string) => {
     const toSave = held;
     held = undefined;
@@ -296,10 +310,33 @@ export async function startGeneration<
       })
       .catch((error: unknown) => {
         saveFailure ??= { error };
+        unsureStepSave ||= createPendingMessage;
         throw error;
       });
     saving = saved;
     return saved;
+  };
+  const pendingMessageNow = async (): Promise<{
+    messageId?: string;
+    failedBy?: string;
+    byStream?: string;
+  }> => {
+    if (!pendingMessageId) return {};
+    const [replaced] = await ctx.runQuery(component.messages.getMessagesByIds, {
+      messageIds: [pendingMessageId],
+    });
+    // Something else failed it, like a retry: the generation fails with its
+    // error, as a save into it would.
+    if (replaced?.status === "failed") {
+      return { failedBy: replaced.error ?? "The pending message failed" };
+    }
+    if (replaced?.status !== "success" || !unsureStepSave || !threadId) {
+      return { messageId: pendingMessageId };
+    }
+    // The lost save moved the stream to the pending message it made (#498).
+    // Without a stream nothing tells that one from another generation's at
+    // the order, so it stays pending, as on main.
+    return streamId ? { messageId: pendingMessageId, byStream: streamId } : {};
   };
   // The generation ends once, where the AI SDK ends it: what it finished is
   // saved, and if it failed, so does what is still pending.
@@ -315,19 +352,25 @@ export async function startGeneration<
         }
       }
       const error = errorToString((failed ?? saveFailure)!.error);
+      let failedBy: string | undefined;
       try {
         // A step that ended keeps its messages, ahead of the failed one.
         if (held) await saveHeld(held.error === undefined);
       } finally {
-        if (pendingMessageId) {
+        const now = await pendingMessageNow();
+        failedBy = now.failedBy;
+        const { messageId, byStream } = now;
+        if (messageId) {
           await ctx.runMutation(component.messages.finalizeMessage, {
-            messageId: pendingMessageId,
+            messageId,
             result: { status: "failed", error },
             onSaveMessages,
+            ...(byStream ? { streamId: byStream } : {}),
           });
         }
       }
       if (saveFailure) throw saveFailure.error;
+      if (failedBy !== undefined) throw new Error(failedBy);
     })());
   // Unless the AI SDK's hooks end the generation, an abort ends it here.
   const abortSignal = args.abortSignal;
@@ -534,6 +577,7 @@ export async function startGeneration<
     stepOrder: stepOrder ?? 0,
     userId,
     promptMessageId,
+    streamId,
     getSavedMessages: () => savedMessages,
     updateModel: (model: ModelOrMetadata | undefined) => {
       if (model) {

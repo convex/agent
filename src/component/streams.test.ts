@@ -3,6 +3,8 @@
 import { convexTest } from "convex-test";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { getConvexSize } from "convex/values";
+import { defineSchema, defineTable } from "convex/server";
+import { omit } from "convex-helpers";
 import { convexValueSize } from "./streams.js";
 import { api, internal } from "./_generated/api.js";
 import type { Id } from "./_generated/dataModel.js";
@@ -74,7 +76,7 @@ async function scheduledRuns(t: ReturnType<typeof initConvexTest>) {
 }
 
 describe("streams", () => {
-  test("listDeltas rejects streams belonging to another thread", async () => {
+  test("listDeltas reads a stream of another thread as missing", async () => {
     const t = initConvexTest();
     const { streamId } = await seedStream(t);
     const otherThread = await t.mutation(api.threads.createThread, {});
@@ -85,12 +87,12 @@ describe("streams", () => {
       parts: ["private delta"],
     });
 
-    await expect(
-      t.query(api.streams.listDeltas, {
+    expect(
+      await t.query(api.streams.listDeltas, {
         threadId: otherThread._id as Id<"threads">,
         cursors: [{ streamId, cursor: 0 }],
       }),
-    ).rejects.toThrow("Stream does not belong to the given thread");
+    ).toEqual([]);
   });
 
   test("listDeltas skips deleted streams even if deltas remain", async () => {
@@ -570,5 +572,347 @@ describe("streams", () => {
       }
     }
     expect([...cursors.values()]).toEqual([15, 15]);
+  });
+});
+
+describe("plain streams with their pending message", () => {
+  test("addMessages createStream starts the pending message's stream, which a plain fill leaves streaming", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const saved = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "Hi." } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+      createStream: { format: "UIMessageChunk" },
+    });
+    const pending = saved.messages[1];
+    const [stream] = await t.query(api.streams.list, { threadId });
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: pending._id as Id<"messages">,
+      messages: [{ message: { role: "assistant", content: "Hello." } }],
+    });
+    expect({
+      stream: [
+        stream.streamId === saved.streamId,
+        stream.order,
+        stream.stepOrder,
+      ],
+      after: (await t.query(api.streams.list, { threadId })).map(
+        (s) => s.status,
+      ),
+    }).toEqual({
+      stream: [true, pending.order, pending.stepOrder],
+      after: ["streaming"],
+    });
+  });
+
+  test("streams.fail ends the stream as aborted with its reason, after its final delta", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const streamId = await t.mutation(api.streams.create, {
+      threadId,
+      order: 0,
+      stepOrder: 0,
+      format: "UIMessageChunk",
+    });
+    const failed = await t.mutation(api.streams.fail, {
+      streamId,
+      reason: "Broke.",
+      finalDelta: {
+        streamId,
+        start: 0,
+        end: 1,
+        parts: [{ type: "text-delta", id: "a", delta: "Half." }],
+      },
+    });
+    const [stream] = await t.query(api.streams.list, {
+      threadId,
+      statuses: ["aborted"],
+    });
+    const deltas = await t.query(api.streams.listDeltas, {
+      threadId,
+      cursors: [{ streamId, cursor: 0 }],
+    });
+    const state = await t.run(
+      async (ctx) => (await ctx.db.get("streamingMessages", streamId))?.state,
+    );
+    expect({
+      failed,
+      status: stream.status,
+      reason: state?.kind === "aborted" && state.reason,
+      deltas: deltas.length,
+    }).toEqual({
+      failed: true,
+      status: "aborted",
+      reason: "Broke.",
+      deltas: 1,
+    });
+  });
+
+  test("a stream is only created with a new pending message last, else nothing is written", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "hi" } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+    });
+    const rows = () =>
+      t.run(async (ctx) => ({
+        messages: await ctx.db.query("messages").collect(),
+        streams: await ctx.db.query("streamingMessages").collect(),
+      }));
+    const before = await rows();
+    for (const args of [
+      { messages: [{ message: { role: "user" as const, content: "again" } }] },
+      {
+        pendingMessageId: messages[1]._id as Id<"messages">,
+        messages: [
+          {
+            message: { role: "assistant" as const, content: [] },
+            status: "pending" as const,
+          },
+        ],
+      },
+    ]) {
+      await expect(
+        t.mutation(api.messages.addMessages, {
+          threadId,
+          createStream: { format: "UIMessageChunk" },
+          ...args,
+        }),
+      ).rejects.toThrow("createStream needs a new pending message last");
+    }
+    expect(await rows()).toEqual(before);
+  });
+
+  test("the app failing a plain streaming reply aborts its stream", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const reply = (text: string) =>
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [
+          { message: { role: "user", content: text } },
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+        createStream: { format: "UIMessageChunk" },
+      });
+    const updated = await reply("Go.");
+    await t.mutation(api.messages.updateMessage, {
+      messageId: updated.messages[1]._id as Id<"messages">,
+      patch: { status: "failed", error: "Failed by the app." },
+    });
+    const finalized = await reply("Again.");
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: finalized.messages[1]._id as Id<"messages">,
+      result: { status: "failed", error: "Stopped" },
+    });
+    const streams = await t.query(api.streams.list, {
+      threadId,
+      statuses: ["streaming", "aborted"],
+    });
+    expect(streams.map((s) => s.status)).toEqual(["aborted", "aborted"]);
+  });
+
+  test("finalizing a plain streaming reply whose recovery fails aborts its stream", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const saved = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [
+        { message: { role: "user", content: "Go." } },
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+      createStream: { format: "UIMessageChunk" },
+    });
+    const reply = saved.messages[1];
+    // More streams at its position than recovery reads, so recovery fails.
+    for (let i = 0; i < 10; i++) {
+      await t.mutation(api.streams.create, {
+        threadId,
+        order: reply.order,
+        stepOrder: reply.stepOrder,
+        format: "UIMessageChunk",
+      });
+    }
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: reply._id as Id<"messages">,
+      result: { status: "success" },
+    });
+    const [after] = await t.query(api.messages.getMessagesByIds, {
+      messageIds: [reply._id as Id<"messages">],
+    });
+    const linked = (
+      await t.query(api.streams.list, {
+        threadId,
+        statuses: ["streaming", "aborted"],
+      })
+    ).find((s) => s.streamId === saved.streamId);
+    expect([after?.status, linked?.status]).toEqual(["failed", "aborted"]);
+  });
+
+  test("a plain retry aborts the replaced attempt's stream, and its row keeps what it streamed (#432)", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "Go." } }],
+    });
+    const promptMessageId = messages[0]._id as Id<"messages">;
+    const attempt = (failPendingSteps: boolean) =>
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId,
+        failPendingSteps,
+        messages: [
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+        createStream: { format: "UIMessageChunk" },
+      });
+    const first = await attempt(false);
+    await t.mutation(api.streams.addDelta, {
+      streamId: first.streamId!,
+      start: 0,
+      end: 1,
+      parts: [
+        { type: "start-step" },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "Half." },
+      ],
+    });
+    const retry = await attempt(true);
+    const rows = await t.query(api.messages.listMessagesByThreadId, {
+      threadId,
+      order: "asc",
+      statuses: ["pending", "failed"],
+    });
+    const streams = await t.query(api.streams.list, {
+      threadId,
+      statuses: ["streaming", "aborted"],
+    });
+    expect({
+      rows: rows.page.map((m) => [m.status, m.error, m.text]),
+      streams: Object.fromEntries(
+        streams.map((s) => [
+          s.streamId === retry.streamId ? "retry" : "replaced",
+          s.status,
+        ]),
+      ),
+    }).toEqual({
+      rows: [
+        ["failed", "Restarting", "Half."],
+        ["pending", undefined, undefined],
+      ],
+      streams: { replaced: "aborted", retry: "streaming" },
+    });
+  });
+
+  test("a settled plain reply has only fields older component versions accept", async () => {
+    const t = initConvexTest();
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const reply = () =>
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        messages: [
+          { message: { role: "user", content: "Go." } },
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+        createStream: { format: "UIMessageChunk" },
+      });
+    const filled = await reply();
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      pendingMessageId: filled.messages[1]._id as Id<"messages">,
+      messages: [{ message: { role: "assistant", content: "Done." } }],
+      finishStreamId: filled.streamId,
+    });
+    const failed = await reply();
+    await t.mutation(api.messages.finalizeMessage, {
+      messageId: failed.messages[1]._id as Id<"messages">,
+      result: { status: "failed", error: "Broke." },
+    });
+    const older = convexTest(
+      defineSchema({
+        ...schema.tables,
+        messages: defineTable(
+          omit(schema.tables.messages.validator.fields, ["streamId"]),
+        ),
+      }),
+      modules,
+    );
+    const docs = await t.run((ctx) => ctx.db.query("messages").collect());
+    for (const { _id, _creationTime, ...doc } of docs) {
+      await older.run((ctx) => ctx.db.insert("messages", doc));
+    }
+  });
+
+  test("a retry replacing several streamed attempts stays within one transaction's reads", async () => {
+    const t = convexTest({ schema, modules, transactionLimits: true });
+    const thread = await t.mutation(api.threads.createThread, {});
+    const threadId = thread._id as Id<"threads">;
+    const { messages } = await t.mutation(api.messages.addMessages, {
+      threadId,
+      messages: [{ message: { role: "user", content: "go" } }],
+    });
+    const promptMessageId = messages[0]._id as Id<"messages">;
+    const attempt = () =>
+      t.mutation(api.messages.addMessages, {
+        threadId,
+        promptMessageId,
+        messages: [
+          { message: { role: "assistant", content: [] }, status: "pending" },
+        ],
+        createStream: { format: "UIMessageChunk" },
+      });
+    for (let i = 0; i < 3; i++) {
+      const streamId = (await attempt()).streamId as Id<"streamingMessages">;
+      for (let step = 0; step < 10; step++) {
+        const id = `t${step}`;
+        await t.run((ctx) =>
+          ctx.db.insert("streamDeltas", {
+            streamId,
+            start: step,
+            end: step + 1,
+            parts: [
+              { type: "start-step" },
+              { type: "text-start", id },
+              { type: "text-delta", id, delta: "x".repeat(500_000) },
+              { type: "text-end", id },
+              { type: "finish-step" },
+            ],
+          }),
+        );
+      }
+    }
+    await t.mutation(api.messages.addMessages, {
+      threadId,
+      promptMessageId,
+      failPendingSteps: true,
+      messages: [
+        { message: { role: "assistant", content: [] }, status: "pending" },
+      ],
+      createStream: { format: "UIMessageChunk" },
+    });
+    const assistants = await t.run(async (ctx) =>
+      (await ctx.db.query("messages").collect())
+        .filter((m) => m.message?.role === "assistant")
+        .map((m) => m.status),
+    );
+    expect(assistants.filter((status) => status !== "failed")).toEqual([
+      "pending",
+    ]);
   });
 });

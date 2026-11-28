@@ -248,6 +248,8 @@ export function mergeTransforms<TOOLS extends ToolSet>(
   return transforms;
 }
 
+const OPENING_CHUNKS = new Set<unknown>(["start", "start-step"]);
+
 /**
  * DeltaStreamer can be used to save a stream of "parts" by writing
  * batches of them in "deltas" to the database so clients can subscribe
@@ -306,6 +308,8 @@ export class DeltaStreamer<T> {
         parts: T[];
         fileRefs: Array<{ url: string; fileId: string }>;
       }>;
+      /** A stream already started, e.g. by the save of its pending message. */
+      streamId?: string;
     },
     public readonly metadata: {
       threadId: string;
@@ -326,8 +330,10 @@ export class DeltaStreamer<T> {
       materialize: config.materialize ?? null,
     };
     this.#finishHandledExternally = config.finishHandledExternally ?? false;
+    this.streamId = config.streamId;
     // Mutations can't use timers, and end long before a stream times out.
     this.#keepAliveStopped = !("runAction" in ctx);
+    this.#keepAlive();
     this.#nextParts = [];
     this.abortController = new AbortController();
     this.abortController.signal.addEventListener("abort", () =>
@@ -364,6 +370,7 @@ export class DeltaStreamer<T> {
         );
       }
       this.streamId = await this.#creatingStreamIdPromise;
+      this.#keepAlive();
     }
     return this.streamId;
   }
@@ -385,6 +392,7 @@ export class DeltaStreamer<T> {
     if (this.#stoppedAccepting || this.abortController.signal.aborted) {
       return;
     }
+    if (!this.#hasVisibleParts()) return;
     if (
       !this.#ongoingWrite &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
@@ -393,6 +401,15 @@ export class DeltaStreamer<T> {
     } else {
       this.#scheduleFlush();
     }
+  }
+
+  // A delta of only a message's or a step's opening chunks shows nothing, so
+  // it waits for the next part, or goes with the stream's end, or with a
+  // failure that has nothing else buffered.
+  #hasVisibleParts() {
+    return this.#nextParts.some(
+      (part) => !OPENING_CHUNKS.has((part as { type?: unknown }).type),
+    );
   }
 
   // The throttle is only reconsidered when the next part arrives, so a pause in
@@ -409,7 +426,7 @@ export class DeltaStreamer<T> {
       this.#flushTimer = undefined;
       if (
         this.#ongoingWrite ||
-        this.#nextParts.length === 0 ||
+        !this.#hasVisibleParts() ||
         this.#stoppedAccepting ||
         this.abortController.signal.aborted
       ) {
@@ -636,7 +653,7 @@ export class DeltaStreamer<T> {
     this.#keepAlive();
     // Now that we've sent the delta, check if we need to send another one.
     if (
-      this.#nextParts.length > 0 &&
+      this.#hasVisibleParts() &&
       Date.now() - this.#latestWrite >= this.config.throttleMs
     ) {
       // We send again immediately with the accumulated deltas.
@@ -645,7 +662,7 @@ export class DeltaStreamer<T> {
       this.#ongoingWrite = undefined;
       // Whatever is still buffered has just lost its owner: this write is
       // over and no arrival is guaranteed to follow. Hand it to the timer.
-      if (this.#nextParts.length > 0) {
+      if (this.#hasVisibleParts()) {
         this.#scheduleFlush();
       }
     }
@@ -769,11 +786,24 @@ export class DeltaStreamer<T> {
         writeFailure = { error };
       }
     }
+    // Other buffered parts can have arrived after a stop, so a failure drops
+    // them.
+    const opening = waitForOngoingWrite ? this.#nextParts : [];
     let abortFailure: { error: unknown } | undefined;
     try {
-      await this.ctx.runMutation(this.component.streams.abort, {
+      await this.ctx.runMutation(this.component.streams.fail, {
         streamId: this.streamId,
         reason,
+        ...(opening.length > 0 && !this.#hasVisibleParts()
+          ? {
+              finalDelta: {
+                streamId: this.streamId,
+                start: this.#cursor,
+                end: this.#cursor + opening.length,
+                parts: opening,
+              },
+            }
+          : {}),
       });
     } catch (error) {
       abortFailure = { error };
